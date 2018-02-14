@@ -1,11 +1,13 @@
-How to run dm-nstl:
+mple showing how to run dm-nstl and an E-region STL on top:
 
-1- 
-sudo insmod dm-nstl.ko
-sudo hdparm -a256 -A1 -W1 $1 #/dev/sda
-sudo ./hdparm-smr/hdparm --please-destroy-my-drive --reset-all-write-pointers $1 #/dev/sda
-##sudo python2.7 format-stl.py $1 524288 2 256 28000 #/dev/sda 524288 2 10 400
-##sudo python2.7 seagate_full_extent.py $2 $1 $3
-sudo python2.7 format-stl.py $1 524288 2 118 28000
-sudo python2.7 seagate.py $2 $1 $3
+1- build the stllib shared liberary:
+        $ gcc -c -fPIC -lz libstl.c  -o libstl.o
+        $ gcc libstl.o -shared -o libstl.so
+2- build the device-mapper target
+        $ make
+3- insert teh kernel module
+        $ insmod dm-nstl.ko
 
+4- run the STL with
+        $ python2.7 format-stl.py /dev/sdb 524288 2 118 28000
+        $ python2.7 seagate.py /dev/sdb TL1 FIFO
