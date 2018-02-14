@@ -1,0 +1,19 @@
+### Thu Jan 12 14:33:24 2017:
+
+Seagate.py garbage collection logic:
+
+1. Find a physical zone in cache to clean - currently picks the one that has the fewest valid sectors. (this isn't necessarily the best choice, as cleaning cost is proportional to the number of data zones with sectors in that cache zone, which is entirely different)
+
+2. Pick a logical zone to clean. This is based on the LBA of the oldest (i.e. lowest PBA) valid sector in the cache zone.
+
+[2.5 reset write pointer for temp region]
+
+3. Copy any non-cached data from that zone into the temporary region. (between media cache and data zones)
+
+[3.5 reset write pointer for data region]
+
+4. Copy entire logical zone into data zone. (this includes extents in media cache as well as in temp zone)
+
+Note that the data being read in #4 is the interleaving of two sequences - a random set of extents in the media cache, and an ordered set (increasing in LBA and PBA) from the temp area. The problem is that we'd *like* to do the reads in order of increasing PBA, to get best performance, and we *have* to do the writes in order of increasing LBA in order to obey the SMR write constraint, since data zone PBAs directly correspond to LBAs.
+
+Unfortunately the current interface doesn't really let us do this. To get it to work correctly we have to do the 2nd phase reads (from media cache and temp zone) in basically random order.
