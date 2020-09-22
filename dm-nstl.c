@@ -29,6 +29,78 @@
 
 #define DM_MSG_PREFIX "stl"
 
+extern struct bio_set fs_bio_set;
+
+/*
+ * Cherry picked by hand from patch c55183c9aaa00d2bbb578169a480e31aff3d397c
+ */
+static struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
+               struct bio_set *bs)
+{
+       struct bvec_iter iter;
+       struct bio_vec bv;
+       struct bio *bio;
+
+       /*
+        * Pre immutable biovecs, __bio_clone() used to just do a memcpy from
+        * bio_src->bi_io_vec to bio->bi_io_vec.
+        *
+        * We can't do that anymore, because:
+        *
+        *  - The point of cloning the biovec is to produce a bio with a biovec
+        *    the caller can modify: bi_idx and bi_bvec_done should be 0.
+        *
+        *  - The original bio could've had more than BIO_MAX_PAGES biovecs; if
+        *    we tried to clone the whole thing bio_alloc_bioset() would fail.
+        *    But the clone should succeed as long as the number of biovecs we
+        *    actually need to allocate is fewer than BIO_MAX_PAGES.
+        *
+        *  - Lastly, bi_vcnt should not be looked at or relied upon by code
+        *    that does not own the bio - reason being drivers don't use it for
+        *    iterating over the biovec anymore, so expecting it to be kept up
+        *    to date (i.e. for clones that share the parent biovec) is just
+        *    asking for trouble and would force extra work on
+        *    __bio_clone_fast() anyways.
+        */
+
+       bio = bio_alloc_bioset(gfp_mask, bio_segments(bio_src), bs);
+       if (!bio)
+               return NULL;
+       bio->bi_disk            = bio_src->bi_disk;
+       bio->bi_opf             = bio_src->bi_opf;
+       bio->bi_write_hint      = bio_src->bi_write_hint;
+       bio->bi_iter.bi_sector  = bio_src->bi_iter.bi_sector;
+       bio->bi_iter.bi_size    = bio_src->bi_iter.bi_size;
+
+       switch (bio_op(bio)) {
+       case REQ_OP_DISCARD:
+       case REQ_OP_SECURE_ERASE:
+       case REQ_OP_WRITE_ZEROES:
+               break;
+       case REQ_OP_WRITE_SAME:
+               bio->bi_io_vec[bio->bi_vcnt++] = bio_src->bi_io_vec[0];
+               break;
+       default:
+               bio_for_each_segment(bv, bio_src, iter)
+                       bio->bi_io_vec[bio->bi_vcnt++] = bv;
+               break;
+       }
+
+       if (bio_integrity(bio_src)) {
+               int ret;
+
+               ret = bio_integrity_clone(bio, bio_src, gfp_mask);
+               if (ret < 0) {
+                       bio_put(bio);
+                       return NULL;
+               }
+       }
+
+       bio_clone_blkg_association(bio, bio_src);
+
+       return bio;
+}
+
 
 /* used to hold a range to be copied.
 */
@@ -388,7 +460,7 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 			       [---------bio------] */
 		else {
 			sectors = e->lba - sector;
-			split = bio_split(bio, sectors, GFP_NOIO, fs_bio_set);
+			split = bio_split(bio, sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, bio);
 			zero_fill_bio(split);
 			bio_endio(split);
@@ -396,14 +468,14 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 		}
 
 		if (sectors < bio_sectors(bio)) {
-			split = bio_split(bio, sectors, GFP_NOIO, fs_bio_set);
+			split = bio_split(bio, sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, bio);
 		} else {
 			split = bio;
 		}
 
 		split->bi_iter.bi_sector = sector;
-		split->bi_bdev = sc->dev->bdev;
+		bio_set_dev(bio, sc->dev->bdev);
 		generic_make_request(split);
 	} while (split != bio);
 }
@@ -411,15 +483,17 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 
 static void stl_endio(struct bio *bio)
 {
-	int i;
-	struct bio_vec *bv = NULL;
+	int i = 0;
+	struct bio_vec * bv;
 	struct ctx *sc = bio->bi_private;
+	struct bvec_iter_all iter_all;
 
-	bio_for_each_segment_all(bv, bio, i) {
+	bio_for_each_segment_all(bv, bio, iter_all) {
 		WARN_ON(!bv->bv_page);
 		mempool_free(bv->bv_page, sc->page_pool);
 		atomic_dec(&sc->pages_alloced);
 		bv->bv_page = NULL;
+		i++;
 	}
 	WARN_ON(i != 1);
 	bio_put(bio);
@@ -430,7 +504,7 @@ static void setup_bio(struct bio *bio, bio_end_io_t endio, struct block_device *
 		sector_t sector, void *private, int dir)
 {
 	bio->bi_end_io = endio;
-	bio->bi_bdev = bdev;
+	bio_set_dev(bio, bdev);
 	bio->bi_iter.bi_sector = sector;
 	bio->bi_private = private;
 	bio->bi_opf = dir;
@@ -445,6 +519,7 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 	struct bio_vec *bv = NULL;
 	struct bio *bio;
 	struct page *page;
+	struct bvec_iter_all iter_all;
 
 	npages = sectors / 8;
 	remainder = (sectors * 512) - npages * PAGE_SIZE;
@@ -474,7 +549,7 @@ fail:
 			atomic_read(&sc->pages_alloced));
 	WARN_ON(1);
 	if (bio != NULL) {
-		bio_for_each_segment_all(bv, bio, i) {
+		bio_for_each_segment_all(bv, bio, iter_all) {
 			mempool_free(bv->bv_page, sc->page_pool);
 			atomic_dec(&sc->pages_alloced);
 		}
@@ -714,7 +789,7 @@ again:
 	} while (split != bio);
 
 	for (i = 0; i < nbios; i++) {
-		bios[i]->bi_bdev = sc->dev->bdev;
+		bio_set_dev(bios[i], sc->dev->bdev);
 		generic_make_request(bios[i]); /* preserves ordering, unlike submit_bio */
 	}
 	atomic_inc(&c4);
@@ -722,7 +797,7 @@ again:
 
 fail:
 	printk(KERN_INFO "FAIL!!!!\n");
-	bio->bi_error = -ENOMEM;
+	bio->bi_status = BLK_STS_IOERR; 	
 	for (i = 0; i < nbios; i++)
 		if (bios[i] && bios[i]->bi_private == sc)
 			stl_endio(bio);
@@ -743,7 +818,7 @@ static int stl_map(struct dm_target *ti, struct bio *bio)
 			//		case REQ_OP_WRITE_ZEROES:
 			printk(KERN_INFO "Discard or Flush: %d \n", bio_op(bio));
 			WARN_ON(bio_sectors(bio));
-			bio->bi_bdev = sc->dev->bdev;
+			bio_set_dev(bio, sc->dev->bdev);
 			return DM_MAPIO_REMAPPED;
 		default:
 			break;
@@ -767,7 +842,7 @@ static void stl_dtr(struct dm_target *ti)
 	mempool_destroy(sc->extent_pool);
 	mempool_destroy(sc->copyreq_pool);
 	mempool_destroy(sc->page_pool);
-	bioset_free(sc->bs);
+	bioset_exit(sc->bs);
 	dm_put_device(ti, sc->dev);
 	kfree(sc);
 }
@@ -847,7 +922,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (!sc->page_pool)
 		goto fail;
 
-	sc->bs = bioset_create(32, 0);
+	bioset_init(sc->bs, 32, 0, 0);
 	if (!sc->bs)
 		goto fail;
 
@@ -868,7 +943,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 fail:
 	if (sc->bs)
-		bioset_free(sc->bs);
+		bioset_exit(sc->bs);
 	if (sc->copyreq_pool)
 		mempool_destroy(sc->copyreq_pool);
 	if (sc->page_pool)
@@ -1020,9 +1095,10 @@ static void stl_move_endio(struct bio *bio)
 	int i;
 	struct bio_vec *bv = NULL;
 	struct ctx *sc = bio->bi_private;
+	struct bvec_iter_all iter_all;
 
 	if (bio_data_dir(bio) == WRITE) {
-		bio_for_each_segment_all(bv, bio, i) {
+		bio_for_each_segment_all(bv, bio, iter_all) {
 			WARN_ON(!bv->bv_page);
 			mempool_free(bv->bv_page, sc->page_pool);
 			atomic_dec(&sc->pages_alloced);
