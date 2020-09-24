@@ -31,9 +31,12 @@ if not sb1:
     print 'bad disk format (superblock1)'
     exit()
 
+print "superblock1 read"
+
 sb2 = stllib.read_superblock(lba=(conv_zones+1)*ZONE_LBAs) ## homa
 if not sb2:
     print 'bad disk format (superblock2) - continuing'
+print "superblock2 read"
 if sb1.last_modified > sb2.last_modified:
     sb = sb1
     next_ckpt = stllib.PAGE_SECTORS + (conv_zones*ZONE_LBAs) ##homa
@@ -79,16 +82,23 @@ if last_valid == -1:
     exit()
 
 # create the device mapper target and open the control file
-# 
+#  
 data_start = (conv_zones + sb.ckpt_zones + sb.cache_zones + sb.temp_zones) * sb.zone_lbas ## homa
 volume_size = sb.data_zones * zone_lbas
+print "volume_size: " + str(volume_size)
+print "blkddev: " + str(blkdev)
+print "tgtname: " + str(tgtname)
+print "zone_lbas: " + str(zone_lbas)
 data_end = data_start + volume_size
+print "data_end: " + str(data_end)
+print '0 %d nstl %s %s %d %d' % (volume_size, blkdev, tgtname, zone_lbas, data_end)
 subprocess.call(['/sbin/dmsetup', 'create', tgtname, '--table',
                  '0 %d nstl %s %s %d %d' % (volume_size, blkdev, tgtname, 
                                             zone_lbas, data_end)])
 time.sleep(0.5)
 ctlfile = '/dev/stl/' + tgtname
 stllib.ctl_open(ctlfile)
+print "ctlfile is opened!"
 
 # read the write frontier and free zones from the checkpoint,
 # but don't do anything with them until we've replayed the journal
@@ -103,11 +113,13 @@ freezone_map = [False] * sb.cache_zones
 for start,end in freezones:
     freezone_map[cache_band(start)] = True
 
+print "freezone map created! "
 # read the map and feed it to the device
 #
 last_valid += 8
 _map = stllib.read_map(last_valid, (next_ckpt - last_valid) / stllib.PAGE_SECTORS)
 stllib.put_map(_map)
+print "map read!"
 
 # chase down checkpoint, removing free zones from the list if we wrap
 # around to a new one
@@ -130,9 +142,12 @@ for lba in freezones:
     stllib.put_freezone(lba, lba+sb.zone_lbas)
     stllib.put_space(sb.zone_lbas)
     
+print "calling put_write_frontier"
 stllib.put_write_frontier(wf)
+print "calling put_space"
 stllib.put_space(zone_end(wf) - wf)
 
+print "starting ios in stllib"
 stllib.start_ios()
 
 msgs_per_pg = 4096 / 16

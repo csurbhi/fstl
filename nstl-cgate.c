@@ -129,6 +129,8 @@ void generic_write(struct smr *smr, enum stl_cmd cmd, uint64_t lba, uint64_t pba
     struct stl_msg m = {.cmd = cmd, .flags = 0, .lba = lba, .len = len, .pba = pba};
     if (write(smr->dm_fd, &m, sizeof(m)) < 0)
         perror("error sending PUT to kernel"), exit(1);
+    else
+	printf("generic_write() returned successfully");
 }
 
 #define set_write_frontier(smr, wf) generic_write(smr, STL_PUT_WF, 0, wf, 0)

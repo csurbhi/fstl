@@ -57,6 +57,7 @@ for dir in (os.getcwd(), '/mnt'):
 assert stllib
 
 def ctl_open(dev):
+    print dev
     val = stllib.ctl_open(dev)
     assert val > -1
 

@@ -29,5 +29,5 @@ An example  showing how to run dm-nstl and an E-region STL on top:
         $ insmod dm-nstl.ko
 
 4- run the STL with
-        $ python2.7 format-stl.py /dev/sdb 524288 2 118 28000
-        $ python2.7 seagate.py /dev/sdb TL1 FIFO
+        $ python format-stl.py /dev/sdb 524288 2 118 28000
+        $ python seagate.py TL1 /dev/sdb fifo

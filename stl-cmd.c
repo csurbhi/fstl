@@ -13,6 +13,8 @@ int64_t generic_write(int fd, enum stl_cmd cmd, uint64_t lba, uint64_t pba, uint
     struct stl_msg m = {.cmd = cmd, .flags = 0, .lba = lba, .len = len, .pba = pba};
     if (write(fd, &m, sizeof(m)) < 0)
         perror("error sending PUT to kernel"), exit(1);
+
+    printf("write is done: returning 0");
     return 0;
 }
 
