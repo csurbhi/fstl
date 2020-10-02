@@ -528,7 +528,7 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 
 
 	if (!(bio = bio_alloc_bioset(GFP_NOIO, npages + (remainder > 0), sc->bs))) 
-		goto fail;
+		goto fail0;
 
 	printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
 	for (i = 0; i < npages; i++) {
@@ -559,8 +559,8 @@ fail:
 			mempool_free(bv->bv_page, sc->page_pool);
 			atomic_dec(&sc->pages_alloced);
 		}
-		bio_put(bio);
 	}
+fail0:
 	return NULL;
 }
 
