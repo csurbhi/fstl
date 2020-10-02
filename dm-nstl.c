@@ -145,7 +145,7 @@ struct ctx {
 	mempool_t        *extent_pool;
 	mempool_t        *copyreq_pool;
 	mempool_t        *page_pool;
-	struct bio_set   bs;
+	struct bio_set   * bs;
 
 	struct dm_dev    *dev;
 
@@ -523,9 +523,14 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 
 	npages = sectors / 8;
 	remainder = (sectors * 512) - npages * PAGE_SIZE;
+	printk(KERN_ERR "\n npages: %d, remainder: %d sc->bs: %x", npages, remainder, sc->bs);
+	printk(KERN_ERR "\n npages + (remainder > 0): %d", npages + (remainder > 0));
 
-	if (!(bio = bio_alloc_bioset(GFP_NOIO, npages + (remainder > 0), &sc->bs))) 
+
+	if (!(bio = bio_alloc_bioset(GFP_NOIO, npages + (remainder > 0), sc->bs))) 
 		goto fail;
+
+	printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
 	for (i = 0; i < npages; i++) {
 		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
 			goto fail;
@@ -534,6 +539,7 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 		if (ppage != NULL)
 			*ppage = page;
 	}
+	printk(KERN_ERR "\n mempool alloc. to npages successful. will try one more page allocation");
 	if (remainder > 0) {
 		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
 			goto fail;
@@ -643,7 +649,7 @@ static int get_new_zone(struct ctx *sc)
 	if (sc->write_frontier > sc->wf_end)
 		printk(KERN_INFO "kernel wf before BUG: %ld - %ld\n", sc->write_frontier, sc->wf_end);
 	BUG_ON(sc->write_frontier > sc->wf_end);
-//	printk(KERN_INFO "Num of free sect.: %ld, diff of end and wf:%ld\n", sc->n_free_sectors, sc->wf_end - sc->write_frontier);
+	printk(KERN_INFO "Num of free sect.: %ld, diff of end and wf:%ld\n", sc->n_free_sectors, sc->wf_end - sc->write_frontier);
 	sc->n_free_sectors -= (sc->wf_end - sc->write_frontier);
 	sc->write_frontier = fz->start;
 	sc->wf_end = zone_end(sc, sc->write_frontier);
@@ -701,9 +707,9 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 	t1 = jiffies;
 	atomic_inc(&c2);
 	printk(KERN_INFO "\n will wait for space if necessary, sc->n_free_sectors: %d, sc->zone_size: %d ", sc->n_free_sectors, sc->zone_size);
-	wait_event_lock_irqsave(sc->space_wait,
+	/*wait_event_lock_irqsave(sc->space_wait,
 			priority || sc->n_free_sectors >= sc->zone_size,
-			sc->lock, flags);
+			sc->lock, flags); */
 	t2 = jiffies;
 	atomic_inc(&c3);
 	spin_unlock_irqrestore(&sc->lock, flags);
@@ -728,18 +734,22 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		seq = sc->sequence++;
 		prev = sc->previous;
 		sc->previous = move_write_frontier(sc, s8+8, &next_header);
-		if (sc->previous == -1)
+		if (sc->previous == -1) {
+			printk(KERN_ERR "\n failed at move_write_frontier!");
 		       goto fail;	
+		}
 		spin_unlock_irqrestore(&sc->lock, flags);
 
 		if (!(bios[nbios++] = make_header(sc, seq, wf, prev, s8, 0, 0, 0))){
+			printk(KERN_ERR "\n failed at make_header!");
 			goto fail;
 		}
 		prev = wf;
 		wf += 4;
 
 		if (sectors < bio_sectors(bio)) {
-			if (!(split = bio_split(bio, sectors, GFP_NOIO, &sc->bs))){
+			if (!(split = bio_split(bio, sectors, GFP_NOIO, sc->bs))){
+				printk(KERN_ERR "\n failed at bio_split!");
 				goto fail;
 			}
 			bio_chain(split, bio);
@@ -776,6 +786,7 @@ again:
 		if (sectors != s8) {
 			int padlen = 8 - (bio->bi_iter.bi_size & ~PAGE_MASK)/512;
 			if (!(pad = stl_alloc_bio(sc, padlen, NULL))){
+				printk(KERN_ERR "\n failed at stl_alloc_bio, padlen: %d!", padlen);
 				goto fail;
 			}
 			setup_bio(pad, stl_endio, sc->dev->bdev, wf, sc, WRITE);
@@ -784,6 +795,7 @@ again:
 		}
 		
 		if (!(bios[nbios++] = make_trailer(sc, seq, wf, prev, 0, sector, _pba, sectors, next_header))){
+			printk(KERN_ERR "\n failed at make_trailer!");
 			goto fail;
 
 		}
@@ -814,6 +826,8 @@ static int stl_map(struct dm_target *ti, struct bio *bio)
 	struct ctx *sc = ti->private;
 
 	//        wait_for_completion(&sc->init_wait); /* START */
+	//
+	//dump_stack();
 
 	switch (bio_op(bio)) {
 		case REQ_OP_DISCARD:
@@ -846,7 +860,8 @@ static void stl_dtr(struct dm_target *ti)
 	mempool_destroy(sc->extent_pool);
 	mempool_destroy(sc->copyreq_pool);
 	mempool_destroy(sc->page_pool);
-	bioset_exit(&sc->bs);
+	bioset_exit(sc->bs);
+	kfree(sc->bs);
 	dm_put_device(ti, sc->dev);
 	kfree(sc);
 }
@@ -866,6 +881,8 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	struct ctx *sc;
 	unsigned long long tmp, max_pba;
 	char d;
+
+	dump_stack();
 
 	DMINFO("ctr %s %s %s %s", argv[0], argv[1], argv[2], argv[3]);
 
@@ -928,7 +945,10 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto fail;
 
 	printk(KERN_INFO "about to call bioset_init()");
-	bioset_init(&sc->bs, 32, 0, 0);
+	sc->bs = kzalloc(sizeof(*(sc->bs)), GFP_KERNEL);
+	if (!sc->bs)
+		goto fail;
+	bioset_init(sc->bs, 32, 0, 0);
 
 	sc->rb = RB_ROOT;
 	rwlock_init(&sc->rb_lock);
@@ -948,7 +968,8 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	return 0;
 
 fail:
-	bioset_exit(&sc->bs);
+	bioset_exit(sc->bs);
+	kfree(sc->bs);
 	if (sc->copyreq_pool)
 		mempool_destroy(sc->copyreq_pool);
 	if (sc->page_pool)
@@ -1207,7 +1228,7 @@ static void stl_do_data_move(struct ctx *sc)
 	for (i = 0; i < m; i++) {
 		cr = reqs[i];
 		cr->bio = stl_alloc_bio(sc, cr->len, NULL);
-		clone = bio_clone_bioset(cr->bio, GFP_NOIO, &sc->bs);
+		clone = bio_clone_bioset(cr->bio, GFP_NOIO, sc->bs);
 		sector = cr->e->pba + (cr->lba - cr->e->lba);
 		setup_bio(clone, stl_move_endio, sc->dev->bdev, sector, sc, READ);
 		atomic_inc(&sc->io_count);
