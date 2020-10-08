@@ -15,6 +15,7 @@
 #include <dirent.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <linux/types.h>
 
 #include "hdparm.h"

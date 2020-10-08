@@ -118,19 +118,24 @@ print "freezone map created! "
 #
 last_valid += 8
 _map = stllib.read_map(last_valid, (next_ckpt - last_valid) / stllib.PAGE_SECTORS)
-stllib.put_map(_map)
 print "map read!"
+stllib.put_map(_map)
+print "put map done"
 
 # chase down checkpoint, removing free zones from the list if we wrap
 # around to a new one
 #
+i=0
 while True:
+    #print "reading header " + str(i)
     h = stllib.read_hdr(wf)
     if not h:
         break
     if h.len > 0:
         stllib.put_map([(h.lba, h.pba, h.len)])
+        #print str(h.lba) + str(h.pba) + str(h.len)
     wf = h.next_pba
+    i = i + 1
     freezone_map[cache_band(wf)] = False
 
 # feed the free zone list and write frontier to the target, and 
@@ -142,9 +147,9 @@ for lba in freezones:
     stllib.put_freezone(lba, lba+sb.zone_lbas)
     stllib.put_space(sb.zone_lbas)
     
-print "calling put_write_frontier"
+#print "calling put_write_frontier"
 stllib.put_write_frontier(wf)
-print "calling put_space"
+#print "calling put_space"
 stllib.put_space(zone_end(wf) - wf)
 
 print "starting ios in stllib"
@@ -281,10 +286,8 @@ def garbage_collect():
 
     lo_pba = (i+sb.ckpt_zones+conv_zones)*zone_lbas ##homa
     hi_pba = lo_pba + zone_lbas
-    print 'cleaning band %d (%d-%d), wf is in band %d' % (i+2, lo_pba, hi_pba, ((wf - cache_pba) / zone_lbas) + 2)
 
     zloc = lo_pba
-    print "Reseting cache zone with no valid data-----------------------", zloc, "\n"
     if valid_sectors[i] == 0:
         print 'YAY! empty zone in cache'
         rstZPtr = subprocess.call(["sudo %s/hdparm --please-destroy-my-drive  --reset-one-write-pointer %s %s" %(hdparm_path, zloc, blkdev)], shell=True)
@@ -298,6 +301,7 @@ def garbage_collect():
                 fifo_bnd_to_clean += 1
         last_gc_pba[i] = lo_pba
         check_gc_pba()
+        # we return here, because one segment is cleaned.
         return
 
     # find the extent in that zone with smallest PBA, and corresponding LBA
@@ -314,8 +318,12 @@ def garbage_collect():
     min_extent = min(cache_map, key=lambda x: x[1])
     tail_lba,tail_pba = min_extent[0],min_extent[1]
 
+    #print 'Considering band %d (%d-%d), wf is in band %d' % (i+2, lo_pba, hi_pba, ((wf - cache_pba) / zone_lbas) + 2)
+    print 'tail_lba %d pba %d' % (tail_lba, tail_pba)
     print >> fp, 'tail_lba %d pba %d' % (tail_lba, tail_pba)
+    print "printing cache map:"
     for l,p,n in cache_map:
+        print '  %d +%d %d' % (l,n,p)
         print >> fp, '  %d +%d %d' % (l,n,p)
 
     # find all extents in the same logical zone. complicated by the fact that 
@@ -323,6 +331,7 @@ def garbage_collect():
     #
     start,end = zone_start(tail_lba), zone_end(tail_lba)
     logical_zone = filter(lambda x: x[0] < end and (x[0]+x[2]) > start, full_map)
+    #print ' about to call trim_lbas with ' + (logical_zone, start, end)
     trim_lbas(logical_zone, start, end)
 
 
@@ -334,6 +343,7 @@ def garbage_collect():
     temp_start = cache_end_pba
    
     tmp_need_reset_flg = 0
+    print "about to copy"
     while in_data_zone: 
         tmp_need_reset_flg = 1
         n,reqs = 0,[]
@@ -350,6 +360,7 @@ def garbage_collect():
         stllib.put_copy(reqs)
         temp_start += stllib.doit()
 
+    print "copy done"
     # homa 
     if tmp_need_reset_flg ==1:
         zloc = cache_end_pba    
@@ -457,6 +468,8 @@ write_ticks = 0
 idle_free = (sb.cache_zones - 2) * sb.zone_lbas
 busy_free = sb.zone_lbas
 
+print "Waiting now to garbage collect"
+
 while True:
     _writes = stllib.get_sequence()
     _total_io = _writes + stllib.get_reads()
@@ -468,7 +481,7 @@ while True:
     if room < busy_free or (idle_ticks > 15 and room < idle_free):
         print "empty space in # of LBAs", room 
         garbage_collect()
-        checkpoint()
+        #checkpoint()
         continue
 
     # finally checkpoint if we need to

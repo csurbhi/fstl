@@ -493,8 +493,10 @@ struct bio *make_header(struct ctx *sc, unsigned seq, sector_t here, sector_t pr
 	struct stl_header *h = NULL;
 	sector_t next = here + 4 + sectors;
 
-	if (bio == NULL)
+	if (bio == NULL) {
+		printk(KERN_ERR "\n stl_alloc_bio for 4 sectors failed");
 		return NULL;
+	}
 
 	/* min space for an extent at the end of a zone is 8K - wrap if less.
 	*/

@@ -476,6 +476,7 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 
 		split->bi_iter.bi_sector = sector;
 		bio_set_dev(bio, sc->dev->bdev);
+		//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
 		generic_make_request(split);
 	} while (split != bio);
 }
@@ -523,14 +524,16 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 
 	npages = sectors / 8;
 	remainder = (sectors * 512) - npages * PAGE_SIZE;
-	printk(KERN_ERR "\n npages: %d, remainder: %d sc->bs: %x", npages, remainder, sc->bs);
-	printk(KERN_ERR "\n npages + (remainder > 0): %d", npages + (remainder > 0));
+	//printk(KERN_ERR "\n npages: %d, remainder: %d sc->bs: %x", npages, remainder, sc->bs);
+	//printk(KERN_ERR "\n npages + (remainder > 0): %d", npages + (remainder > 0));
 
 
-	if (!(bio = bio_alloc_bioset(GFP_NOIO, npages + (remainder > 0), sc->bs))) 
+	if (!(bio = bio_alloc_bioset(GFP_NOIO, npages + (remainder > 0), sc->bs))) {
+		printk(KERN_ERR "bio_alloc_bioset failed! ");
 		goto fail0;
+	}
 
-	printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
+	//printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
 	for (i = 0; i < npages; i++) {
 		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
 			goto fail;
@@ -539,7 +542,7 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 		if (ppage != NULL)
 			*ppage = page;
 	}
-	printk(KERN_ERR "\n mempool alloc. to npages successful. will try one more page allocation");
+	//printk(KERN_ERR "\n mempool alloc. to npages successful. will try one more page allocation");
 	if (remainder > 0) {
 		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
 			goto fail;
@@ -575,8 +578,10 @@ struct bio *make_header(struct ctx *sc, unsigned seq, sector_t here, sector_t pr
 	struct stl_header *h = NULL;
 	sector_t next = here + 4 + sectors;
 
-	if (bio == NULL)
+	if (bio == NULL) {
+		printk(KERN_ERR "\n failed at stl_alloc_bio, perhaps this is a low memory issue");
 		return NULL;
+	}
 
 	/* min space for an extent at the end of a zone is 8K - wrap if less.
 	*/
@@ -649,13 +654,14 @@ static int get_new_zone(struct ctx *sc)
 	if (sc->write_frontier > sc->wf_end)
 		printk(KERN_INFO "kernel wf before BUG: %ld - %ld\n", sc->write_frontier, sc->wf_end);
 	BUG_ON(sc->write_frontier > sc->wf_end);
-	printk(KERN_INFO "Num of free sect.: %ld, diff of end and wf:%ld\n", sc->n_free_sectors, sc->wf_end - sc->write_frontier);
+	//printk(KERN_INFO "Num of free sect.: %ld, diff of end and wf:%ld\n", sc->n_free_sectors, sc->wf_end - sc->write_frontier);
 	sc->n_free_sectors -= (sc->wf_end - sc->write_frontier);
 	sc->write_frontier = fz->start;
 	sc->wf_end = zone_end(sc, sc->write_frontier);
 
-	printk(KERN_INFO "new zone: %d (%ld->%ld) left %d\n", (int)(fz->start / sc->zone_size),
+	/*printk(KERN_INFO "new zone: %d (%ld->%ld) left %d\n", (int)(fz->start / sc->zone_size),
 			old_free, sc->n_free_sectors, sc->n_free_zones);
+	*/
 
 	kfree(fz);
 	return sc->write_frontier;
@@ -669,7 +675,7 @@ static sector_t move_write_frontier(struct ctx *sc, sector_t sectors_s8, sector_
 	prev = sc->write_frontier + sectors_s8 -4;
 	if (room_in_zone(sc, sc->write_frontier + sectors_s8 -1 ) - 1 < 16 ){ // We do "-1 ) + -1" because sc->write_frontier + sectors_s8 can move to the next zone in some scenarios
 		if (!(sc->write_frontier = get_new_zone(sc))){
-			printk(KERN_INFO "fail due to get_new_zone at line 626");
+			printk(KERN_INFO "fail due to get_new_zone at line %d, func: %s", __LINE__, __func__ );
 			return -1;
 	//		goto fail;
 		}
@@ -701,12 +707,12 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 	/* wait until there's room
 	*/
 
-	printk(KERN_INFO "\n Inside map_write_io");
+	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
 	atomic_inc(&c1);
 	spin_lock_irqsave(&sc->lock, flags);
 	t1 = jiffies;
 	atomic_inc(&c2);
-	printk(KERN_INFO "\n will wait for space if necessary, sc->n_free_sectors: %d, sc->zone_size: %d ", sc->n_free_sectors, sc->zone_size);
+	//printk(KERN_INFO "\n will wait for space if necessary, sc->n_free_sectors: %d, sc->zone_size: %d ", sc->n_free_sectors, sc->zone_size);
 	/*wait_event_lock_irqsave(sc->space_wait,
 			priority || sc->n_free_sectors >= sc->zone_size,
 			sc->lock, flags); */
@@ -720,7 +726,7 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		unsigned seq;
 		sector_t _pba, wf, prev;
 
-		sectors = bio_sectors(bio);
+		//sectors = bio_sectors(bio);
 		s8 = round_up(sectors, 8);
 		sector = bio->bi_iter.bi_sector;
 
@@ -741,7 +747,7 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		spin_unlock_irqrestore(&sc->lock, flags);
 
 		if (!(bios[nbios++] = make_header(sc, seq, wf, prev, s8, 0, 0, 0))){
-			printk(KERN_ERR "\n failed at make_header!");
+			printk(KERN_ERR "\n failed at make_header!, bios: %d", nbios);
 			goto fail;
 		}
 		prev = wf;
@@ -749,7 +755,7 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 
 		if (sectors < bio_sectors(bio)) {
 			if (!(split = bio_split(bio, sectors, GFP_NOIO, sc->bs))){
-				printk(KERN_ERR "\n failed at bio_split!");
+				printk(KERN_ERR "\n failed at bio_split! nbios: %d", nbios);
 				goto fail;
 			}
 			bio_chain(split, bio);
@@ -795,12 +801,12 @@ again:
 		}
 		
 		if (!(bios[nbios++] = make_trailer(sc, seq, wf, prev, 0, sector, _pba, sectors, next_header))){
-			printk(KERN_ERR "\n failed at make_trailer!");
+			printk(KERN_ERR "\n failed at make_trailer! at nbios: %d", nbios);
 			goto fail;
 
 		}
 		wf += 4;
-		printk(KERN_ERR "\n split!=bio");
+		//printk(KERN_ERR "\n split!=bio");
 
 	} while (split != bio);
 
@@ -834,7 +840,7 @@ static int stl_map(struct dm_target *ti, struct bio *bio)
 		case REQ_OP_FLUSH:	
 			//		case REQ_OP_SECURE_ERASE:
 			//		case REQ_OP_WRITE_ZEROES:
-			printk(KERN_INFO "Discard or Flush: %d \n", bio_op(bio));
+			//printk(KERN_INFO "Discard or Flush: %d \n", bio_op(bio));
 			WARN_ON(bio_sectors(bio));
 			bio_set_dev(bio, sc->dev->bdev);
 			return DM_MAPIO_REMAPPED;
@@ -875,6 +881,8 @@ static const struct file_operations stl_misc_fops;
    argv[2] = zone size (LBAs)
    argv[3] = max pba
    */
+
+#define BS_NR_POOL_PAGES 128
 static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	int r = -ENOMEM;
@@ -882,7 +890,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	unsigned long long tmp, max_pba;
 	char d;
 
-	dump_stack();
+	//dump_stack();
 
 	DMINFO("ctr %s %s %s %s", argv[0], argv[1], argv[2], argv[3]);
 
@@ -917,9 +925,9 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	sc->max_pba = tmp;
 
 	sc->write_frontier = 0;
-	printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->write_frontier);
+	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->write_frontier);
 	sc->wf_end = zone_end(sc, sc->write_frontier); 
-	printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->wf_end);
+	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->wf_end);
 
 	spin_lock_init(&sc->lock);
 	init_completion(&sc->init_wait);
@@ -944,11 +952,14 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (!sc->page_pool)
 		goto fail;
 
-	printk(KERN_INFO "about to call bioset_init()");
+	//printk(KERN_INFO "about to call bioset_init()");
 	sc->bs = kzalloc(sizeof(*(sc->bs)), GFP_KERNEL);
 	if (!sc->bs)
 		goto fail;
-	bioset_init(sc->bs, 32, 0, 0);
+	if(bioset_init(sc->bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS|BIOSET_NEED_RESCUER) == -ENOMEM) {
+		printk(KERN_ERR "\n bioset_init failed!");
+		goto fail;
+	}
 
 	sc->rb = RB_ROOT;
 	rwlock_init(&sc->rb_lock);
@@ -960,7 +971,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	sc->misc.nodename = sc->nodename;
 	sc->misc.fops = &stl_misc_fops;
 
-	printk(KERN_INFO "About to call misc_register");
+	//printk(KERN_INFO "About to call misc_register");
 
 	if (misc_register(&sc->misc))
 		goto fail;
@@ -1288,8 +1299,9 @@ void put_free_zone(struct ctx *sc, struct stl_msg *m)
 	unsigned long flags;
 	struct free_zone *fz = kzalloc(sizeof(*fz), GFP_KERNEL);
 
-	printk(KERN_INFO "put free zone %d %ld (wf %ld ns %ld)\n",
+	/*printk(KERN_INFO "put free zone %d %ld (wf %ld ns %ld)\n",
 			(int)(m->lba / sc->zone_size), (long)m->lba, sc->write_frontier, sc->n_free_sectors);
+	*/
 	if (fz == NULL)
 		return;
 	fz->start = m->lba;
@@ -1331,7 +1343,7 @@ static ssize_t stl_proc_write(struct file *filp, const char *buf,
 			case STL_PUT_WF: /* only before startup: no locking */
 				spin_lock_irqsave(&_sc->lock, flags);
 				_sc->write_frontier = m.pba;
-				printk(KERN_INFO "PUT_WF %ld\n", (long)m.pba);
+				//printk(KERN_INFO "PUT_WF %ld\n", (long)m.pba);
 				_sc->wf_end = zone_end(_sc, m.pba);
 				spin_unlock_irqrestore(&_sc->lock, flags);
 				break;
@@ -1343,14 +1355,14 @@ static ssize_t stl_proc_write(struct file *filp, const char *buf,
 				put_free_zone(_sc, &m);
 				break;
 			case STL_PUT_SPACE:
-				printk(KERN_INFO "put_space: %ld (%ld)\n", (long)m.lba, _sc->n_free_sectors);
+				//printk(KERN_INFO "put_space: %ld (%ld)\n", (long)m.lba, _sc->n_free_sectors);
 				spin_lock_irqsave(&_sc->lock, flags);
 				_sc->n_free_sectors += m.lba;
 				wake_up_all(&_sc->space_wait);
 				spin_unlock_irqrestore(&_sc->lock, flags);
 				break;
 			case STL_CMD_START:
-				printk(KERN_INFO "start: wf=%ld\n", _sc->write_frontier);
+				//printk(KERN_INFO "start: wf=%ld\n", _sc->write_frontier);
 				complete_all(&_sc->init_wait);
 				break;
 			case STL_PUT_TGT:
@@ -1387,16 +1399,16 @@ static int stl_proc_open(struct inode *inode, struct file *file)
 
 static long stl_dev_ioctl(struct file *fp, unsigned int num, unsigned long arg)
 {
-	printk(KERN_INFO "ioctl %d\n", num);
+	//printk(KERN_INFO "ioctl %d\n", num);
 	switch (num) {
 		case 1:
-			printk(KERN_INFO "ioctl 1\n");
+			//printk(KERN_INFO "ioctl 1\n");
 			break;
 		case 2:
-			printk(KERN_INFO "ioctl 2\n");
+			//printk(KERN_INFO "ioctl 2\n");
 			break;
 		case 3:
-			printk(KERN_INFO "ioctl 3\n");
+			//printk(KERN_INFO "ioctl 3\n");
 			break;
 		default:
 			break;

@@ -18,7 +18,7 @@
 #include <sys/ioctl.h>
 #include <linux/types.h>
 #include <linux/fs.h>
-
+#include <sys/sysmacros.h>
 #include "hdparm.h"
 
 static int get_driver_major (const char *driver, unsigned int *major)
