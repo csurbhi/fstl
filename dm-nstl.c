@@ -881,7 +881,9 @@ static const struct file_operations stl_misc_fops;
    argv[2] = zone size (LBAs)
    argv[3] = max pba
    */
-
+/* TODO: remove _sc and sc. Only one of them is neeeded.
+ * The memory for both is the same
+ */
 #define BS_NR_POOL_PAGES 128
 static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
@@ -905,7 +907,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	if ((r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &sc->dev))) {
 		ti->error = "dm-nstl: Device lookup failed.";
-		goto fail;
+		goto fail1;
 	}
 	max_pba = sc->dev->bdev->bd_inode->i_size / 512;
 
@@ -914,13 +916,13 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	r = -EINVAL;
 	if (sscanf(argv[2], "%llu%c", &tmp, &d) != 1) {
 		ti->error = "dm-stl: Invalid zone size";
-		goto fail;
+		goto fail1;
 	}
 	sc->zone_size = tmp;
 
 	if (sscanf(argv[3], "%llu%c", &tmp, &d) != 1 || tmp > max_pba) {
 		ti->error = "dm-stl: Invalid max pba";
-		goto fail;
+		goto fail1;
 	}
 	sc->max_pba = tmp;
 
@@ -944,21 +946,21 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	sc->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, _extent_cache);
 	if (!sc->extent_pool)
-		goto fail;
+		goto fail1;
 	sc->copyreq_pool = mempool_create_slab_pool(MIN_COPY_REQS, _copyreq_cache);
 	if (!sc->copyreq_pool)
-		goto fail;
+		goto fail2;
 	sc->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
 	if (!sc->page_pool)
-		goto fail;
+		goto fail3;
 
 	//printk(KERN_INFO "about to call bioset_init()");
 	sc->bs = kzalloc(sizeof(*(sc->bs)), GFP_KERNEL);
 	if (!sc->bs)
-		goto fail;
+		goto fail4;
 	if(bioset_init(sc->bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS|BIOSET_NEED_RESCUER) == -ENOMEM) {
 		printk(KERN_ERR "\n bioset_init failed!");
-		goto fail;
+		goto fail5;
 	}
 
 	sc->rb = RB_ROOT;
@@ -971,24 +973,30 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	sc->misc.nodename = sc->nodename;
 	sc->misc.fops = &stl_misc_fops;
 
-	//printk(KERN_INFO "About to call misc_register");
+	printk(KERN_INFO "About to call misc_register");
 
-	if (misc_register(&sc->misc))
-		goto fail;
-
-	return 0;
-
-fail:
+	r = misc_register(&sc->misc);
+	if (!r) {
+		printk(KERN_INFO "\n Miscellaneous device registered!");
+		return 0;
+	}
+/* failed case */
 	bioset_exit(sc->bs);
+fail5:
 	kfree(sc->bs);
-	if (sc->copyreq_pool)
-		mempool_destroy(sc->copyreq_pool);
+fail4:
 	if (sc->page_pool)
 		mempool_destroy(sc->page_pool);
+fail3:
+	if (sc->copyreq_pool)
+		mempool_destroy(sc->copyreq_pool);
+fail2:
 	if (sc->extent_pool)
 		mempool_destroy(sc->extent_pool);
+fail1:
 	kfree(sc);
 
+fail:
 	return r;
 }
 
@@ -1429,13 +1437,13 @@ static int __init dm_stl_init(void)
 {
 	int r = -ENOMEM;
 
-	printk(KERN_INFO "dm-nstl\n");
 	if (!(_extent_cache = KMEM_CACHE(extent, 0)))
 		goto fail;
 	if (!(_copyreq_cache = KMEM_CACHE(copy_req, 0)))
 		goto fail;
 	if ((r = dm_register_target(&stl_target)) < 0)
 		goto fail;
+	printk(KERN_INFO "dm-nstl\n %s %d", __func__, __LINE__);
 	return 0;
 
 fail:

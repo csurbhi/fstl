@@ -57,7 +57,7 @@ for dir in (os.getcwd(), '/mnt'):
 assert stllib
 
 def ctl_open(dev):
-    print dev
+    print("Opening: " + str(dev))
     val = stllib.ctl_open(dev)
     assert val > -1
 
@@ -79,6 +79,7 @@ def get_map():
 
 def put_map(map):
     n = len(map)
+    print("len(map): " + str(n))
     buf = (stl_msg * n)()
     for i in range(n):
         buf[i].lba, buf[i].pba, buf[i].len = map[i]
@@ -92,6 +93,8 @@ def get_write_frontier():
     return buf.pba
 
 def put_write_frontier(wf):
+    print("stl_cmd.PUT_WF: " + str(stl_cmd.PUT_WF))
+    print("pba=wf: " + str(wf))
     buf = stl_msg(cmd=stl_cmd.PUT_WF, pba=wf)
     stllib.ctl_rw(byref(buf), c_int(1), c_int(0))
 
@@ -195,7 +198,10 @@ class stl_sb(Structure):
 """
 
 def disk_open(name):
+    print("*****opening disk: " + str(name))
     val = stllib.dsk_open(name)
+    print("........" + str(name));
+    print("")
     assert val > -1
 
 def disk_close():
@@ -239,7 +245,7 @@ def write_hdr(lba, hdr):
     assert n >= 0
     stllib.dsk_sync()
 
-msgs_per_pg = 4096/16
+msgs_per_pg = int(4096/16)
 
 def read_map(lba, pages):
     _map = []
@@ -274,25 +280,34 @@ def read_ckpt(lba):
     buf = (stl_msg * msgs_per_pg)()
     n = stllib.dsk_read(byref(buf), c_uint(lba), c_uint(8))
     assert n == 8
+    print("buf[0]: " + str(buf[0].pba))
     msgs = [buf[i] for i in range(msgs_per_pg)]
-    WFs = filter(lambda m: m.cmd == stl_cmd.PUT_WF, msgs)
-    FZs = filter(lambda m: m.cmd == stl_cmd.PUT_FREEZONE, msgs)
+    WFs = list(filter(lambda m: m.cmd == stl_cmd.PUT_WF, msgs))
+    print("############Read wfs: " + str(*WFs))
+    FZs = list(filter(lambda m: m.cmd == stl_cmd.PUT_FREEZONE, msgs))
     if not WFs or not FZs:
         return (None, [])
     return (WFs[0].pba, [(m.lba, m.pba) for m in FZs])
 
 def write_ckpt(lba, wfs, fzs):
+    #old = stl_msg 
+    #stl_msg = int(old)
+    #if (old > float(stl_msg)):
+    #    stl_msg = stl_msg + 1
+    print("writing checkpoint, WFs: " + str(*wfs))
+    print("msgs_per_pg: " + str(msgs_per_pg))
     buf = (stl_msg * msgs_per_pg)()
     i = 0
     for wf in wfs:
         buf[i].cmd = stl_cmd.PUT_WF
         buf[i].pba = wf
+        print("buf[" + str(i) + "].pba: " + str(wf))
         i += 1
     for fz in fzs:
         buf[i].cmd = stl_cmd.PUT_FREEZONE
         buf[i].lba, buf[i].pba = fz
         i += 1
-    stllib.dsk_write(byref(buf), c_uint(lba), c_uint(8))
+    return stllib.dsk_write(byref(buf), c_uint(lba), c_uint(8))
     
 def spoil(lba):
     buf = (c_char * 4096)()

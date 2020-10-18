@@ -10,11 +10,12 @@ import os
 import time
 
 if len(sys.argv) != 6:
-    print "usage: format <device> <zone_lbas> <ckpt_zones> <cache_zones> <data_zones>"
+    print ("usage: format <device> <zone_lbas> <ckpt_zones> <cache_zones> <data_zones>")
     sys.exit()
 
 #homa
-conv_zones = 64 #based on 8TB host mangaed drive
+conv_zones = 0 #based on 8TB host mangaed drive
+print("argv[1]: " + sys.argv[1])
 stllib.disk_open(sys.argv[1])
 
 ##### write the superblock
@@ -39,24 +40,37 @@ stllib.write_superblock(sb, 1+conv_zones)
 # [0: sb] [1: hdr] [2: wf+freelist] [3: data extents...] [x: next]
 
 exts_per_pg = 4096 / 16
-n_extent_pgs = (sb.data_zones + exts_per_pg - 1) / exts_per_pg
+n_extent_pgs = int((sb.data_zones + exts_per_pg - 1) / exts_per_pg)
+if ((sb.data_zones + exts_per_pg - 1) % exts_per_pg) > 0:
+    n_extent_pgs = n_extent_pgs + 1
 next_page = 1 + 1 + 1 + n_extent_pgs
 this_page = 1
 
 # header
-h = stllib.stl_hdr(next_pba=(conv_zones*sb.zone_lbas + next_page*8), seq=1)
+pba = conv_zones*sb.zone_lbas + next_page*8;
+print("pba: " + str(pba))
+h = stllib.stl_hdr(next_pba=pba, seq=1)
 stllib.write_hdr(conv_zones*sb.zone_lbas +  this_page*8, h)
 this_page += 1
 
 # wf+freelist
+print("sb.ckpt_zones: " + str(sb.ckpt_zones))
 WFs = [(conv_zones+ sb.ckpt_zones) * sb.zone_lbas]
+print("WFs: " + str(*WFs))
+print("sb.cache_zones: " + str(sb.cache_zones))
 FZs = [((conv_zones+sb.ckpt_zones+i) * sb.zone_lbas, (conv_zones+sb.ckpt_zones+i+1) * sb.zone_lbas)
-       for i in range(1, sb.cache_zones)]
-stllib.write_ckpt(conv_zones*sb.zone_lbas + this_page*8, WFs, FZs)
+       for i in range(1, sb.data_zones)]
+print("FZs: " + str(FZs))
+print("")
+
+print("sb.zone_lbas: " + str(sb.zone_lbas) + " conv_zones: " + str(conv_zones) + " this_page: " + str(this_page))
+print("**writing checkpoint at: " + str(conv_zones*sb.zone_lbas + this_page*8))
+ret=stllib.write_ckpt(conv_zones*sb.zone_lbas + this_page*8, WFs, FZs)
+print("-------------------->written checkpoint sectors: " + str(ret))
 this_page += 1
 
 # map
-data_start = (conv_zones + sb.ckpt_zones + sb.cache_zones + sb.temp_zones) * sb.zone_lbas
+data_start = (conv_zones + sb.ckpt_zones + sb.temp_zones) * sb.zone_lbas
 
 _map = [ (i, data_start + i, sb.zone_lbas) for i in range(0, sb.data_zones*sb.zone_lbas, sb.zone_lbas)]
 stllib.write_map(conv_zones*sb.zone_lbas + this_page*8, _map)

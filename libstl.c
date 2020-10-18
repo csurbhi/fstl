@@ -14,18 +14,28 @@
 #include <stdint.h>
 #include <fcntl.h>
 #include <zlib.h>
-
+#include <errno.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include "nstl-u.h"
+#include <assert.h>
 
 int ctl_fd = -1;
 
 int ctl_open(char *name)
 {
-    return ctl_fd = open(name, O_RDWR);
+	//return ctl_fd = open(name, O_RDWR);
+    ctl_fd = open("/dev/stl/TL1", O_RDWR);
+    if (ctl_fd < 0) {
+	    perror("could not open /dev/stl/TL1: ");
+    } else {
+	    printf("\n OPENED CTL FILE!!!!!!!!!!!!!!!!!!");
+	}
 }
 
 int ctl_close(void)
 {
+    printf("\n /dev/stl/TL1 closed");
     close(ctl_fd);
     ctl_fd = -1;
     return 0;
@@ -34,6 +44,7 @@ int ctl_close(void)
 int ctl_rw(struct stl_msg *buf, int n_out, int n_in)
 {
     int n;
+    assert(ctl_fd > 0);
     if (n_out > 0 && write(ctl_fd, buf, n_out * sizeof(*buf)) < 0)
         perror("control write error"), exit(1);
     if (n_in > 0 && (n = read(ctl_fd, buf, n_in * sizeof(*buf))) < 0)
@@ -45,7 +56,13 @@ int dsk_fd = -1;
 
 int dsk_open(char *name)
 {
-    return dsk_fd = open(name, O_RDWR);
+    errno = 0;
+    dsk_fd = open("/dev/vdb", O_RDWR);
+    //dsk_fd = open(name, O_RDWR);
+    if (dsk_fd < 0) {
+	    perror("could not open disk: ");
+    }
+    printf("\n");
 }
 
 int dsk_close(void)
@@ -72,6 +89,8 @@ int dsk_write(void *buf, int lba, int nsectors)
         val = write(dsk_fd, buf, (size_t)nsectors * 512);
     if (val < 0)
         perror("disk write error"), exit(1);
+    else
+	printf("\n written %d sectors at: %d, requested: %d ", val/512, lba, nsectors);
     return val / 512;
 }
 
