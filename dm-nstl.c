@@ -433,24 +433,32 @@ blocked:
 static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 {
 	struct bio *split = NULL;
+	bio_end_io_t *fn_end_io = bio->bi_end_io;
+
+	printk(KERN_ERR "Read begins! ");
 
 	atomic_inc(&sc->n_reads);
-	do {
+	while(split != bio) {
+		if(unlikely(&bio->bi_end_io < 0x1000) || (bio->bi_end_io != fn_end_io)) {
+			dump_stack();
+		}
+
 		sector_t sector = bio->bi_iter.bi_sector;
 		struct extent *e = stl_rb_geq(sc, sector);
 		unsigned sectors = bio_sectors(bio);
 
-
 		/* note that beginning of extent is >= start of bio */
 		/* [----bio-----] [eeeeeee]  */
 		if (e == NULL || e->lba >= sector + sectors)  {
+			printk(KERN_ERR "\n Case of no overlap");
 			zero_fill_bio(bio);
 			bio_endio(bio);
-			return;
+			break;
 		}
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		   [---------bio------] */
 		else if (e->lba <= sector) {
+			printk(KERN_ERR "\n e->lba <= sector");
 			unsigned overlap = e->lba + e->len - sector;
 			if (overlap < sectors)
 				sectors = overlap;
@@ -459,6 +467,7 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 		/*             [eeeeeeeeeeee]
 			       [---------bio------] */
 		else {
+			printk(KERN_ERR "\n e->lba >  sector");
 			sectors = e->lba - sector;
 			split = bio_split(bio, sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, bio);
@@ -478,7 +487,8 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 		bio_set_dev(bio, sc->dev->bdev);
 		//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
 		generic_make_request(split);
-	} while (split != bio);
+	}
+	printk(KERN_ERR "\n Read end");
 }
 
 
@@ -524,8 +534,8 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 
 	npages = sectors / 8;
 	remainder = (sectors * 512) - npages * PAGE_SIZE;
-	//printk(KERN_ERR "\n npages: %d, remainder: %d sc->bs: %x", npages, remainder, sc->bs);
-	//printk(KERN_ERR "\n npages + (remainder > 0): %d", npages + (remainder > 0));
+	printk(KERN_ERR "\n npages: %d, remainder: %d sc->bs: %x", npages, remainder, sc->bs);
+	printk(KERN_ERR "\n npages + (remainder > 0): %d", npages + (remainder > 0));
 
 
 	if (!(bio = bio_alloc_bioset(GFP_NOIO, npages + (remainder > 0), sc->bs))) {
@@ -533,7 +543,7 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 		goto fail0;
 	}
 
-	//printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
+	printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
 	for (i = 0; i < npages; i++) {
 		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
 			goto fail;
@@ -542,7 +552,7 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 		if (ppage != NULL)
 			*ppage = page;
 	}
-	//printk(KERN_ERR "\n mempool alloc. to npages successful. will try one more page allocation");
+	printk(KERN_ERR "\n mempool alloc. to npages successful. will try one more page allocation");
 	if (remainder > 0) {
 		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
 			goto fail;
@@ -573,13 +583,20 @@ fail0:
 struct bio *make_header(struct ctx *sc, unsigned seq, sector_t here, sector_t prev,
 		unsigned sectors, sector_t lba, sector_t pba, unsigned len)
 {
-	struct page *page;
+	struct page *page = NULL;
 	struct bio *bio = stl_alloc_bio(sc, 4, &page);
 	struct stl_header *h = NULL;
 	sector_t next = here + 4 + sectors;
 
+	printk(KERN_ERR "\n entering make_header");
+
 	if (bio == NULL) {
 		printk(KERN_ERR "\n failed at stl_alloc_bio, perhaps this is a low memory issue");
+		return NULL;
+	}
+
+	if (page == NULL) {
+		printk(KERN_ERR "\n failed to get a page for the bio ");
 		return NULL;
 	}
 
@@ -598,7 +615,7 @@ struct bio *make_header(struct ctx *sc, unsigned seq, sector_t here, sector_t pr
 	h->crc32 = crc32_le(0, (u8 *)h, STL_HDR_SIZE);
 	bio_add_page(bio, page, STL_HDR_SIZE, 0);
 	setup_bio(bio, stl_endio, sc->dev->bdev, here, sc, WRITE);
-
+	printk(KERN_ERR "\n returning from make_header");
 	return bio;
 }
 
@@ -696,8 +713,9 @@ static atomic_t c1, c2, c3, c4, c5;
 static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 {
 	struct bio *split = NULL, *pad = NULL;
-	struct bio *bios[7];
-	int i, nbios = 0;
+	struct bio *bios[40];
+	int i;
+	volatile int nbios = 0;
 	unsigned long flags, t1, t2;
 	unsigned sectors = bio_sectors(bio);
 	sector_t s8, sector = bio->bi_iter.bi_sector;
@@ -708,23 +726,12 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 	*/
 
 	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
-	atomic_inc(&c1);
-	spin_lock_irqsave(&sc->lock, flags);
-	t1 = jiffies;
-	atomic_inc(&c2);
-	//printk(KERN_INFO "\n will wait for space if necessary, sc->n_free_sectors: %d, sc->zone_size: %d ", sc->n_free_sectors, sc->zone_size);
-	/*wait_event_lock_irqsave(sc->space_wait,
-			priority || sc->n_free_sectors >= sc->zone_size,
-			sc->lock, flags); */
-	t2 = jiffies;
-	atomic_inc(&c3);
-	spin_unlock_irqrestore(&sc->lock, flags);
-	if (t2-t1 > HZ / 10)
-		printk(KERN_INFO "freespace stall: %u ms\n", jiffies_to_msecs(t2-t1));
-
 	do {
+		printk(KERN_ERR "\n %s %s %d nbios: %d ", __FILE__, __func__, __LINE__, nbios);
 		unsigned seq;
-		sector_t _pba, wf, prev;
+		volatile sector_t _pba, wf, prev;
+
+		WARN_ON(nbios >= 40);
 
 		//sectors = bio_sectors(bio);
 		s8 = round_up(sectors, 8);
@@ -745,6 +752,8 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		       goto fail;	
 		}
 		spin_unlock_irqrestore(&sc->lock, flags);
+
+		printk(KERN_ERR "\n nbios: %d", nbios);
 
 		if (!(bios[nbios++] = make_header(sc, seq, wf, prev, s8, 0, 0, 0))){
 			printk(KERN_ERR "\n failed at make_header!, bios: %d", nbios);
@@ -769,20 +778,8 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		 * stl_update_range will return that extent, and we can
 		 * wait and try again.
 		 */
-		t1 = jiffies;
 again:
 		e = stl_update_range(sc, sector, wf, sectors);
-		if (e != NULL) {
-			extent_get(e, 1, STALLED_WRITE);
-			wait_event(sc->cleaning_wait,
-					!extent_busy(e));
-			extent_put(sc, e, 1, STALLED_WRITE);
-			goto again;
-		}
-		t2 = jiffies;
-		if (t2 - t1 > HZ/10) 
-			printk(KERN_INFO "GC stall: %u ms\n", jiffies_to_msecs(t2-t1));
-
 		split->bi_iter.bi_sector = wf;
 		_pba = wf;
 		wf += sectors;
@@ -829,11 +826,11 @@ fail:
 
 static int stl_map(struct dm_target *ti, struct bio *bio)
 {
-	struct ctx *sc = ti->private;
+	volatile struct ctx *sc = ti->private;
 
-	//        wait_for_completion(&sc->init_wait); /* START */
-	//
-	//dump_stack();
+	if(unlikely(bio == NULL)) {
+		return 0;
+	}
 
 	switch (bio_op(bio)) {
 		case REQ_OP_DISCARD:
@@ -841,7 +838,12 @@ static int stl_map(struct dm_target *ti, struct bio *bio)
 			//		case REQ_OP_SECURE_ERASE:
 			//		case REQ_OP_WRITE_ZEROES:
 			//printk(KERN_INFO "Discard or Flush: %d \n", bio_op(bio));
-			WARN_ON(bio_sectors(bio));
+			/* warn on panic is on. so removing this warn on
+			 WARN_ON(bio_sectors(bio));
+			*/
+			if(bio_sectors(bio)) {
+				printk(KERN_ERR "\n sectors in bio when FLUSH requested");
+			}
 			bio_set_dev(bio, sc->dev->bdev);
 			return DM_MAPIO_REMAPPED;
 		default:
@@ -1438,18 +1440,19 @@ static int __init dm_stl_init(void)
 	int r = -ENOMEM;
 
 	if (!(_extent_cache = KMEM_CACHE(extent, 0)))
-		goto fail;
+		return r;
 	if (!(_copyreq_cache = KMEM_CACHE(copy_req, 0)))
-		goto fail;
+		goto fail1;
 	if ((r = dm_register_target(&stl_target)) < 0)
 		goto fail;
 	printk(KERN_INFO "dm-nstl\n %s %d", __func__, __LINE__);
 	return 0;
 
 fail:
-	if (_extent_cache)
-		kmem_cache_destroy(_extent_cache);
 	if (_copyreq_cache)
+		kmem_cache_destroy(_extent_cache);
+fail1:
+	if (_extent_cache)
 		kmem_cache_destroy(_extent_cache);
 	return r;
 }
@@ -1458,7 +1461,8 @@ fail:
 static void __exit dm_stl_exit(void)
 {
 	dm_unregister_target(&stl_target);
-	kmem_cache_destroy(_extent_cache);
+	if(_extent_cache)
+		kmem_cache_destroy(_extent_cache);
 }
 
 

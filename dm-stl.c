@@ -423,6 +423,7 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
         /* wait if we're writing to an LBA range that is currently
          * being cleaned.
          */
+	/*
         spin_lock_irqsave(&sc->lock, flags);
 	if (!priority && sector < sc->clean_end && sector+sectors >= sc->clean_start) {
 		printk(KERN_INFO "STALL: lba %ld\n", sector);
@@ -432,13 +433,13 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		printk(KERN_INFO "unSTALL: lba %ld\n", sector);
 	}
         spin_unlock_irqrestore(&sc->lock, flags);
-
+	*/
 	/* wait until there's room in the cache. This would be easier
 	 * if we just accounted for free space.
 	 */
 	sector_t cache_size = sc->data_start - sc->cache_start;
 	sector_t min_room = sc->zone_size * 5 / 4;
-
+	/*
 	if (!priority && ((((sc->tail_pba-1) - sc->write_frontier +
 			    cache_size) % cache_size) < min_room)) {
 		printk(KERN_INFO "GC WAIT\n");
@@ -446,7 +447,8 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 			   ((((sc->tail_pba-1) - sc->write_frontier) +
 			    cache_size) % cache_size) > min_room);
 		printk(KERN_INFO "GC UNWAIT\n");
-	}
+		
+	} */
 
 	do {
 		unsigned seq, room;
