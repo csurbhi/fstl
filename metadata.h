@@ -1,3 +1,5 @@
+#include<linux/types.h>
+
 /*
  *
  *
@@ -75,6 +77,15 @@ struct stl_seg_entry {
 }__packed;
 
 
+/* The same structure is used for writing the header/trailer.
+ * header->len is always 0. If you crash after writing the header
+ * and some data but not the trailer, at remount time, you read
+ * the blocks after the header till the end of the zone. If you
+ * don't find the trailer, then you do not trust the trailing
+ * data. When found, the trailer->len should
+ * indicate the data that it covers. Every zone must have atleast
+ * one header and trailer, but it could be multiple as well.
+ */
 struct stl_header {
 	uint32_t magic;
 	uint32_t nonce;
@@ -85,7 +96,7 @@ struct stl_header {
 	uint64_t next_pba;
 	uint64_t lba;
 	uint64_t pba;
-	uint32_t seq;
+	uint64_t seq;
 } __attribute__((packed));
 
 /* Type of segments could be
@@ -100,13 +111,13 @@ struct stl_ckpt {
 	__le64 valid_block_count;
 	__le32 rsvd segment_count;
 	__le32 free_segment_count;
-	__le32 cur_frontier;
 	__le32 blk_nr; 		/* write at this blk nr */
+	__le32 cur_frontier;
+	__le32 blk_pba;
+	__le64 elapsed_time;
 	struct stl_seg_entry cur_seg_entry;
 	struct stl_header header;
-	char * free_bitmap;		/* Free zone bitmap */
-	char * invalid_bitmap;		/* zones with some errors reported */
-	__u8 reserved[0];		/* valid reserved region. Rest of the block space */
+	char reserved[0];
 }__packed;
 
 
@@ -133,13 +144,10 @@ struct stl_sb {
 	__le32 blk_count_sit;		/* # of segments for SIT */
 	__le32 zone_count_reserved;	/* # CMR zones that are reserved */
 	__le32 zone_count_main;		/* # of segments for main area */
-	__le32 res_zone_start_blk;	/* Start block nr of CMR zone for data*/
-	__le32 res_zone_end_blk;	/* End block nr of CMR zone used for data*/
-	__le32 zone0_blkaddr;		/* start block address of segment 0 */
-	__le32 cp_lba;			/* start block address of checkpoint */
-	__le32 map_lba;			/* start block address of NAT */
-	__le32 sit_lba;			/* start block address of SIT */
-	__le32 main_lba;		/* start block address of main area */
+	__le32 cp_pba;			/* start block address of checkpoint */
+	__le32 map_pba;			/* start block address of NAT */
+	__le32 sit_pba;			/* start block address of SIT */
+	__le32 zone0_pba;		/* start block address of segment 0 */
 	__le32 nr_invalid_zones;	/* zones that have errors in them */
 	//__u8 uuid[16];			/* 128-bit uuid for volume */
 	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
@@ -212,6 +220,14 @@ struct stl_sb_info {
 	/* maximum # of trials to find a victim segment for SSR and GC */
 	unsigned int max_victim_search;
 };
+
+struct extent_entry {
+	sector_t lba;
+	sector_t pba;
+	size_t   len;
+}__packed;
+
+
 
 
 

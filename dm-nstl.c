@@ -21,11 +21,14 @@
 #include <linux/jiffies.h>
 #include <linux/sort.h>
 #include <linux/miscdevice.h>
+#include <linux/freezer.h>
+#include <linux/kthread.h>
 
 #include <linux/vmstat.h>
 
 #include "nstl-u.h"
 #include "stl-wait.h"
+#include "metadata.h"
 
 #define DM_MSG_PREFIX "stl"
 
@@ -101,6 +104,157 @@ static struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
        return bio;
 }
 
+void read_super_endio()
+{
+	free(bio);
+}
+
+#define BLK_SZ 4096
+
+struct stl_sb * read_superblock(struct block_device *bdev)
+{
+
+	struct stl_sb_info *sb_info;
+
+	/* TODO: for the future. Right now we keep
+	 * the block size the same as the sector size
+	 *
+	if (set_blocksize(bdev, BLK_SZ))
+		return NULL;
+	*/
+
+	struct buffer_head *bh = __bread(bdev, 1, BLK_SZ);
+	if (!bh)
+		return NULL;
+	
+	struct stl_sb * sb = (struct stl_sb *)bh->b_data;
+	if (sb->MAGIC != STL_SB_MAGIC) {
+		printk(KERN_INFO "\n Wrong superblock!");
+		put_bh(bh);
+		return NULL;
+	}
+	/* We put the page in case of error in the future (put_page)*/
+	ctx->sb_page = bh->b_page;
+
+
+}
+
+struct stl_ckpt * read_ckpt(unsigned long pba, struct block_device *bdev)
+{
+	struct buffer_head *bh = __bread(bdev, pba, BLK_SZ);
+	if (!bh)
+		return NULL;
+	struct stl_ckpt *ckpt = (struct stl_ckpt *)bh->b_data;
+	ctx->ckpt_page = bh->b_page;
+	return ckpt;
+}
+
+/* we write the checkpoints alternately.
+ * Only one of them is more recent than
+ * the other
+ * In case we fail while writing one
+ * then we find the older one safely
+ * on the disk
+ */
+struct stl_ckp * get_cur_ckpt(struct stl_sb)
+{
+	unsigned long pba = sb->ckpt_pba;
+	struct stl_ckpt *ckpt1, *ckp2, *ckpt;
+	struct page *page1;
+
+	ckpt1 = read_ckpt(pba);
+	pba = pba + NR_SECTORS_IN_BLK;
+	page1 = ctx->ckpt_page;
+	/* ctx->ckpt_page will be overwritten by the next
+	 * call to read_ckpt
+	 */
+	ckpt2 = read_ckpt(pba);
+	if (ckpt1->elapsed_time >= ckpt2->elapsed_time) {
+		ckpt = ckpt1;
+		ctx->ckpt_page = page1;
+	}
+	else {
+		ckpt = ckpt2;
+		//page2 is rightly set by read_ckpt();
+		put_page(page1);
+	}
+	return ckpt;
+}
+
+void read_extents_from_block(struct ctx * sc, struct extent_entry *entry, unsigned int nr_extents)
+{
+	int i = 0;
+	
+	while (i <= nr_extents) {
+		/* If there are no more recorded entries on disk, then
+		 * dont add an entries further
+		 */
+		if ((entry->lba == 0) && (entry->len == 0))
+			break;
+		stl_update_range(sc, entry->lba, entry->pba, entry->len)
+		entry = entry + sizeof(entry);
+		i++;
+	}
+}
+
+
+#define NR_SECTORS_PER_BLK 8
+
+/* 
+ * Create a RB tree from the map on
+ * disk
+ */
+int read_extent_map(unsigned long pba, unsigned in nrblks, struct block_device *bdev)
+{
+	struct buffer_head *bh = NULL;
+	int nr_extents_in_blk = BLK_SZ / sizeof(struct extent_map);
+	struct extent_entry * entry0;
+	
+	int i = 0;
+	while(i < nrblks) {
+		bh = __bread(bdev, pba, BLK_SZ);
+		if (!bh)
+			return -1;
+		entry0 = (struct extent_entry *) bh->b_data;
+		if (nrblks <= (i + nr_extents_in_blk))
+			read_extents_from_block(entry0, nr_extents_in_blk);
+		else
+			read_extents_from_block(entry0, nrblks - i);
+		i = i + nr_extents_in_blk;
+		pba = pba + (BLK_SZ * NR_SECTORS_PER_BLK);
+		put_bh(bh);
+	}
+}
+
+/*
+ * Create a heap/RB tree from the seginfo
+ * on disk. Use this for finding the 
+ * victim. We don't need to keep the
+ * entire heap in memory. We store only
+ * the top x candidates in memory
+ */
+void read_seg_info_table(unsigned long pba, unsigned int nrblks, struct block_device *bdev)
+{
+	struct buffer_head *bh = NULL;
+	int nr_seg_entries_blk = BLK_SZ / sizeof(struct stl_seg_entry);
+	int i = 0;
+	struct stl_seg_entry *entry0;
+
+	while (i < nrblks) {
+		bh = __bread(bdev, pba, BLK_SZ);
+		if (!bh)
+			return -1;
+		entry0 = bh->b_data;
+		if (nrblks <= (i + nr_seg_entries_blk))
+			read_seg_entries_from_block(entry0, nr_seg_entries_blk);
+		else
+			read_seg_entries_from_block(entry0, nrblks - i);
+		i = i + nr_seg_entries_blk;
+		pba = pba + (BLK_SZ * NR_SECTORS_PER_BLK);
+		put_bh(bh);
+	}
+}
+
 
 /* used to hold a range to be copied.
 */
@@ -123,6 +277,8 @@ struct free_zone {
 	sector_t end;
 };
 
+struct stl_gc_thread;
+
 /* this has grown kind of organically, and needs to be cleaned up.
 */
 struct ctx {
@@ -139,7 +295,9 @@ struct ctx {
 	sector_t          n_free_sectors;
 
 	struct rb_root    rb;	          /* map RB tree */
+	struct rb_root	  sit_rb;	  /* SIT RB tree */
 	rwlock_t          rb_lock;
+	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
 
 	mempool_t        *extent_pool;
@@ -167,6 +325,8 @@ struct ctx {
 
 	char              nodename[32];
 	struct miscdevice misc;
+  
+	struct stl_gc_thread *gc_th;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 
@@ -321,6 +481,140 @@ static struct extent *stl_rb_next(struct extent *e)
 	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
 }
 
+struct stl_gc_thread {
+	struct task_struct *stl_gc_task;
+	wait_queue_head_t stl_gc_wait_queue;
+	/* for gc sleep time */
+	unsigned int urgent_sleep_time;
+	unsigned int min_sleep_time;
+        unsigned int max_sleep_time;
+        unsigned int no_gc_sleep_time;
+
+	/* for changing gc mode */
+        unsigned int gc_wake;
+};
+
+static inline int stl_is_idle(void)
+{
+	return 1;
+}
+
+static inline void * stl_malloc(size_t size, gfp_t flags)
+{
+	void *addr;
+
+	addr = kmalloc(size, flags);
+	if (!addr) {
+		addr = kvmalloc(size, flags);
+	}
+
+	return addr;
+}
+
+static int stl_gc(void)
+{
+	printk(KERN_INFO "\n GC thread polling after every few seconds ");
+	return 0;
+}
+
+static int gc_zonenr(int zonenr)
+{
+	return 0;
+}
+
+static int gc_thread_fn(void * data)
+{
+
+	struct ctx *sc = (struct ctx *) data;
+	struct stl_gc_thread *gc_th = sc->gc_th;
+	wait_queue_head_t *wq = &gc_th->stl_gc_wait_queue;
+	unsigned int wait_ms;
+
+	wait_ms = gc_th->min_sleep_time;
+	set_freezable();
+	do {
+		wait_event_interruptible_timeout(*wq,
+			kthread_should_stop() || freezing(current) ||
+			gc_th->gc_wake,
+			msecs_to_jiffies(wait_ms));
+
+		               /* give it a try one time */
+                if (gc_th->gc_wake)
+                        gc_th->gc_wake = 0;
+
+                if (try_to_freeze()) {
+                        continue;
+                }
+                if (kthread_should_stop())
+                        break;
+		/* take some lock here as you will start the GC 
+		 * For urgent mode mutex_lock()
+		 * and for idle time GC mode mutex_trylock()
+		 * You need some check for is_idle()
+		 * */
+		if(!stl_is_idle()) {
+			//increase_sleep_time();
+			/* unlock mutex */
+			continue;
+
+		}
+		stl_gc();
+
+
+	} while(!kthread_should_stop());
+
+}
+
+#define DEF_GC_THREAD_URGENT_SLEEP_TIME 500     /* 500 ms */
+#define DEF_GC_THREAD_MIN_SLEEP_TIME    30000   /* milliseconds */
+#define DEF_GC_THREAD_MAX_SLEEP_TIME    60000
+#define DEF_GC_THREAD_NOGC_SLEEP_TIME   300000  /* wait 5 min */
+#define LIMIT_INVALID_BLOCK     40 /* percentage over total user space */
+#define LIMIT_FREE_BLOCK        40 /* percentage over invalid + free space */
+
+
+/* 
+ * On error returns 0
+ *
+ */
+int stl_gc_thread_start(struct ctx *sc)
+{
+	struct stl_gc_thread *gc_th;
+	dev_t dev = sc->dev->bdev->bd_dev;
+	int err=0;
+
+	printk(KERN_ERR "\n About to start GC thread");
+
+	gc_th = stl_malloc(sizeof(struct stl_gc_thread), GFP_KERNEL);
+	if (!gc_th) {
+		return -ENOMEM;
+	}
+
+	gc_th->urgent_sleep_time = DEF_GC_THREAD_URGENT_SLEEP_TIME;
+        gc_th->min_sleep_time = DEF_GC_THREAD_MIN_SLEEP_TIME;
+        gc_th->max_sleep_time = DEF_GC_THREAD_MAX_SLEEP_TIME;
+        gc_th->no_gc_sleep_time = DEF_GC_THREAD_NOGC_SLEEP_TIME;
+
+        gc_th->gc_wake= 0;
+
+        sc->gc_th = gc_th;
+	init_waitqueue_head(&gc_th->stl_gc_wait_queue);
+	sc->gc_th->stl_gc_task = kthread_run(gc_thread_fn, sc,
+			"stl-gc%u:%u", MAJOR(dev), MINOR(dev));
+
+	if (IS_ERR(gc_th->stl_gc_task)) {
+		err = PTR_ERR(gc_th->stl_gc_task);
+		kvfree(gc_th);
+		sc->gc_th = NULL;
+		return err;
+	}
+
+	printk(KERN_ERR "\n Created a STL GC thread ");
+	return 0;	
+}
+
+
+
 
 /* Update mapping. Removes any total overlaps, edits any partial
  * overlaps, adds new extent to map.
@@ -433,24 +727,32 @@ blocked:
 static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 {
 	struct bio *split = NULL;
+	bio_end_io_t *fn_end_io = bio->bi_end_io;
+
+	printk(KERN_ERR "Read begins! ");
 
 	atomic_inc(&sc->n_reads);
-	do {
+	while(split != bio) {
+		if(unlikely(&bio->bi_end_io < 0x1000) || (bio->bi_end_io != fn_end_io)) {
+			dump_stack();
+		}
+
 		sector_t sector = bio->bi_iter.bi_sector;
 		struct extent *e = stl_rb_geq(sc, sector);
 		unsigned sectors = bio_sectors(bio);
 
-
 		/* note that beginning of extent is >= start of bio */
 		/* [----bio-----] [eeeeeee]  */
 		if (e == NULL || e->lba >= sector + sectors)  {
+			printk(KERN_ERR "\n Case of no overlap");
 			zero_fill_bio(bio);
 			bio_endio(bio);
-			return;
+			break;
 		}
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		   [---------bio------] */
 		else if (e->lba <= sector) {
+			printk(KERN_ERR "\n e->lba <= sector");
 			unsigned overlap = e->lba + e->len - sector;
 			if (overlap < sectors)
 				sectors = overlap;
@@ -459,6 +761,7 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 		/*             [eeeeeeeeeeee]
 			       [---------bio------] */
 		else {
+			printk(KERN_ERR "\n e->lba >  sector");
 			sectors = e->lba - sector;
 			split = bio_split(bio, sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, bio);
@@ -478,7 +781,8 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 		bio_set_dev(bio, sc->dev->bdev);
 		//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
 		generic_make_request(split);
-	} while (split != bio);
+	}
+	printk(KERN_ERR "\n Read end");
 }
 
 
@@ -524,8 +828,8 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 
 	npages = sectors / 8;
 	remainder = (sectors * 512) - npages * PAGE_SIZE;
-	//printk(KERN_ERR "\n npages: %d, remainder: %d sc->bs: %x", npages, remainder, sc->bs);
-	//printk(KERN_ERR "\n npages + (remainder > 0): %d", npages + (remainder > 0));
+	printk(KERN_ERR "\n npages: %d, remainder: %d sc->bs: %x", npages, remainder, sc->bs);
+	printk(KERN_ERR "\n npages + (remainder > 0): %d", npages + (remainder > 0));
 
 
 	if (!(bio = bio_alloc_bioset(GFP_NOIO, npages + (remainder > 0), sc->bs))) {
@@ -533,7 +837,7 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 		goto fail0;
 	}
 
-	//printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
+	printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
 	for (i = 0; i < npages; i++) {
 		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
 			goto fail;
@@ -542,7 +846,7 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 		if (ppage != NULL)
 			*ppage = page;
 	}
-	//printk(KERN_ERR "\n mempool alloc. to npages successful. will try one more page allocation");
+	printk(KERN_ERR "\n mempool alloc. to npages successful. will try one more page allocation");
 	if (remainder > 0) {
 		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
 			goto fail;
@@ -567,19 +871,34 @@ fail0:
 	return NULL;
 }
 
+void inline prepare_header(struct stl_header *h)
+{
+	h->magic = STL_HDR_MAGIC;
+	h->nounce = 0;
+	h->crc32 = 0;
+	h->flags = 0;
+}
+
 
 /* create a bio for a journal header (if len=0) or trailer (if len>0).
 */
 struct bio *make_header(struct ctx *sc, unsigned seq, sector_t here, sector_t prev,
 		unsigned sectors, sector_t lba, sector_t pba, unsigned len)
 {
-	struct page *page;
+	struct page *page = NULL;
 	struct bio *bio = stl_alloc_bio(sc, 4, &page);
 	struct stl_header *h = NULL;
 	sector_t next = here + 4 + sectors;
 
+	printk(KERN_ERR "\n entering make_header");
+
 	if (bio == NULL) {
 		printk(KERN_ERR "\n failed at stl_alloc_bio, perhaps this is a low memory issue");
+		return NULL;
+	}
+
+	if (page == NULL) {
+		printk(KERN_ERR "\n failed to get a page for the bio ");
 		return NULL;
 	}
 
@@ -591,14 +910,18 @@ struct bio *make_header(struct ctx *sc, unsigned seq, sector_t here, sector_t pr
 //	}
 
 	h = page_address(page);
-	*h = (struct stl_header){.magic = STL_HDR_MAGIC, .nonce = 0, .crc32 = 0, .flags = 0,
-		.prev_pba = prev, .next_pba = next /*here+4+sectors*/, .lba = lba,
-		.pba = pba, .len = len, .seq = seq};
+	prepare_header();
+	h->prev_pba = prev;
+	h->next_pba = nextl
+	h->lba = lba;
+	h->pba = pba;
+	h->len = 0;
+	h->seq = seq;
 	get_random_bytes(&h->nonce, sizeof(h->nonce));
 	h->crc32 = crc32_le(0, (u8 *)h, STL_HDR_SIZE);
 	bio_add_page(bio, page, STL_HDR_SIZE, 0);
 	setup_bio(bio, stl_endio, sc->dev->bdev, here, sc, WRITE);
-
+	printk(KERN_ERR "\n returning from make_header");
 	return bio;
 }
 
@@ -696,8 +1019,9 @@ static atomic_t c1, c2, c3, c4, c5;
 static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 {
 	struct bio *split = NULL, *pad = NULL;
-	struct bio *bios[7];
-	int i, nbios = 0;
+	struct bio *bios[40];
+	int i;
+	volatile int nbios = 0;
 	unsigned long flags, t1, t2;
 	unsigned sectors = bio_sectors(bio);
 	sector_t s8, sector = bio->bi_iter.bi_sector;
@@ -708,23 +1032,12 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 	*/
 
 	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
-	atomic_inc(&c1);
-	spin_lock_irqsave(&sc->lock, flags);
-	t1 = jiffies;
-	atomic_inc(&c2);
-	//printk(KERN_INFO "\n will wait for space if necessary, sc->n_free_sectors: %d, sc->zone_size: %d ", sc->n_free_sectors, sc->zone_size);
-	/*wait_event_lock_irqsave(sc->space_wait,
-			priority || sc->n_free_sectors >= sc->zone_size,
-			sc->lock, flags); */
-	t2 = jiffies;
-	atomic_inc(&c3);
-	spin_unlock_irqrestore(&sc->lock, flags);
-	if (t2-t1 > HZ / 10)
-		printk(KERN_INFO "freespace stall: %u ms\n", jiffies_to_msecs(t2-t1));
-
 	do {
+		printk(KERN_ERR "\n %s %s %d nbios: %d ", __FILE__, __func__, __LINE__, nbios);
 		unsigned seq;
-		sector_t _pba, wf, prev;
+		volatile sector_t _pba, wf, prev;
+
+		WARN_ON(nbios >= 40);
 
 		//sectors = bio_sectors(bio);
 		s8 = round_up(sectors, 8);
@@ -745,6 +1058,8 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		       goto fail;	
 		}
 		spin_unlock_irqrestore(&sc->lock, flags);
+
+		printk(KERN_ERR "\n nbios: %d", nbios);
 
 		if (!(bios[nbios++] = make_header(sc, seq, wf, prev, s8, 0, 0, 0))){
 			printk(KERN_ERR "\n failed at make_header!, bios: %d", nbios);
@@ -769,20 +1084,8 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		 * stl_update_range will return that extent, and we can
 		 * wait and try again.
 		 */
-		t1 = jiffies;
 again:
 		e = stl_update_range(sc, sector, wf, sectors);
-		if (e != NULL) {
-			extent_get(e, 1, STALLED_WRITE);
-			wait_event(sc->cleaning_wait,
-					!extent_busy(e));
-			extent_put(sc, e, 1, STALLED_WRITE);
-			goto again;
-		}
-		t2 = jiffies;
-		if (t2 - t1 > HZ/10) 
-			printk(KERN_INFO "GC stall: %u ms\n", jiffies_to_msecs(t2-t1));
-
 		split->bi_iter.bi_sector = wf;
 		_pba = wf;
 		wf += sectors;
@@ -827,50 +1130,10 @@ fail:
 }
 
 
-static int stl_map(struct dm_target *ti, struct bio *bio)
-{
-	struct ctx *sc = ti->private;
-
-	//        wait_for_completion(&sc->init_wait); /* START */
-	//
-	//dump_stack();
-
-	switch (bio_op(bio)) {
-		case REQ_OP_DISCARD:
-		case REQ_OP_FLUSH:	
-			//		case REQ_OP_SECURE_ERASE:
-			//		case REQ_OP_WRITE_ZEROES:
-			//printk(KERN_INFO "Discard or Flush: %d \n", bio_op(bio));
-			WARN_ON(bio_sectors(bio));
-			bio_set_dev(bio, sc->dev->bdev);
-			return DM_MAPIO_REMAPPED;
-		default:
-			break;
-	}
-
-	if (bio_data_dir(bio) == READ) 
-		split_read_io(sc, bio, 0);
-	else{
-		map_write_io(sc, bio, 0);
-	}
-	return DM_MAPIO_SUBMITTED;
-}
 
 
-static void stl_dtr(struct dm_target *ti)
-{
-	struct ctx *sc = ti->private;
-	ti->private = NULL;
 
-	misc_deregister(&sc->misc);
-	mempool_destroy(sc->extent_pool);
-	mempool_destroy(sc->copyreq_pool);
-	mempool_destroy(sc->page_pool);
-	bioset_exit(sc->bs);
-	kfree(sc->bs);
-	dm_put_device(ti, sc->dev);
-	kfree(sc);
-}
+
 
 static struct ctx *_sc;
 static const struct file_operations stl_misc_fops;
@@ -881,130 +1144,10 @@ static const struct file_operations stl_misc_fops;
    argv[2] = zone size (LBAs)
    argv[3] = max pba
    */
-
+/* TODO: remove _sc and sc. Only one of them is neeeded.
+ * The memory for both is the same
+ */
 #define BS_NR_POOL_PAGES 128
-static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
-{
-	int r = -ENOMEM;
-	struct ctx *sc;
-	unsigned long long tmp, max_pba;
-	char d;
-
-	//dump_stack();
-
-	DMINFO("ctr %s %s %s %s", argv[0], argv[1], argv[2], argv[3]);
-
-	if (argc != 4) {
-		ti->error = "dm-stl: Invalid argument count";
-		return -EINVAL;
-	}
-
-	if (!(_sc = sc = kzalloc(sizeof(*sc), GFP_KERNEL)))
-		goto fail;
-	ti->private = sc;
-
-	if ((r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &sc->dev))) {
-		ti->error = "dm-nstl: Device lookup failed.";
-		goto fail;
-	}
-	max_pba = sc->dev->bdev->bd_inode->i_size / 512;
-
-	sprintf(sc->nodename, "stl/%s", argv[1]);
-
-	r = -EINVAL;
-	if (sscanf(argv[2], "%llu%c", &tmp, &d) != 1) {
-		ti->error = "dm-stl: Invalid zone size";
-		goto fail;
-	}
-	sc->zone_size = tmp;
-
-	if (sscanf(argv[3], "%llu%c", &tmp, &d) != 1 || tmp > max_pba) {
-		ti->error = "dm-stl: Invalid max pba";
-		goto fail;
-	}
-	sc->max_pba = tmp;
-
-	sc->write_frontier = 0;
-	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->write_frontier);
-	sc->wf_end = zone_end(sc, sc->write_frontier); 
-	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->wf_end);
-
-	spin_lock_init(&sc->lock);
-	init_completion(&sc->init_wait);
-	init_waitqueue_head(&sc->cleaning_wait);
-	init_completion(&sc->move_done);
-	init_waitqueue_head(&sc->space_wait);
-
-	INIT_LIST_HEAD(&sc->free_zones);
-	sc->n_free_zones = 0;
-	INIT_LIST_HEAD(&sc->copyreqs);
-
-	r = -ENOMEM;
-	ti->error = "dm-stl: No memory";
-
-	sc->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, _extent_cache);
-	if (!sc->extent_pool)
-		goto fail;
-	sc->copyreq_pool = mempool_create_slab_pool(MIN_COPY_REQS, _copyreq_cache);
-	if (!sc->copyreq_pool)
-		goto fail;
-	sc->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
-	if (!sc->page_pool)
-		goto fail;
-
-	//printk(KERN_INFO "about to call bioset_init()");
-	sc->bs = kzalloc(sizeof(*(sc->bs)), GFP_KERNEL);
-	if (!sc->bs)
-		goto fail;
-	if(bioset_init(sc->bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS|BIOSET_NEED_RESCUER) == -ENOMEM) {
-		printk(KERN_ERR "\n bioset_init failed!");
-		goto fail;
-	}
-
-	sc->rb = RB_ROOT;
-	rwlock_init(&sc->rb_lock);
-	
-
-	ti->error = "dm-stl: misc_register failed";
-	sc->misc.minor = MISC_DYNAMIC_MINOR;
-	sc->misc.name = "dm-nstl";
-	sc->misc.nodename = sc->nodename;
-	sc->misc.fops = &stl_misc_fops;
-
-	//printk(KERN_INFO "About to call misc_register");
-
-	if (misc_register(&sc->misc))
-		goto fail;
-
-	return 0;
-
-fail:
-	bioset_exit(sc->bs);
-	kfree(sc->bs);
-	if (sc->copyreq_pool)
-		mempool_destroy(sc->copyreq_pool);
-	if (sc->page_pool)
-		mempool_destroy(sc->page_pool);
-	if (sc->extent_pool)
-		mempool_destroy(sc->extent_pool);
-	kfree(sc);
-
-	return r;
-}
-
-static struct target_type stl_target = {
-	.name            = "nstl",
-	.version         = {1, 0, 0},
-	.module          = THIS_MODULE,
-	.ctr             = stl_ctr,
-	.dtr             = stl_dtr,
-	.map             = stl_map,
-	.status          = 0 /*stl_status*/,
-	.prepare_ioctl   = 0 /*stl_prepare_ioctl*/,
-	.message         = 0 /*stl_message*/,
-	.iterate_devices = 0 /*stl_iterate_devices*/,
-};
-
 
 static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t *offp)
 {
@@ -1425,37 +1568,231 @@ static const struct file_operations stl_misc_fops = {
 	.unlocked_ioctl = stl_dev_ioctl,
 };
 
+static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+{
+	int r = -ENOMEM;
+	struct ctx *sc;
+	unsigned long long tmp, max_pba;
+	char d;
+
+	//dump_stack();
+
+	DMINFO("ctr %s %s %s %s", argv[0], argv[1], argv[2], argv[3]);
+
+	if (argc != 4) {
+		ti->error = "dm-stl: Invalid argument count";
+		return -EINVAL;
+	}
+
+	if (!(_sc = sc = kzalloc(sizeof(*sc), GFP_KERNEL)))
+		goto fail;
+	ti->private = sc;
+
+	if ((r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &sc->dev))) {
+		ti->error = "dm-nstl: Device lookup failed.";
+		goto fail1;
+	}
+	
+	read_superblock(sc->dev->bdev);
+
+	max_pba = sc->dev->bdev->bd_inode->i_size / 512;
+
+	sprintf(sc->nodename, "stl/%s", argv[1]);
+
+	r = -EINVAL;
+	if (sscanf(argv[2], "%llu%c", &tmp, &d) != 1) {
+		ti->error = "dm-stl: Invalid zone size";
+		goto fail2;
+	}
+	sc->zone_size = tmp;
+
+	if (sscanf(argv[3], "%llu%c", &tmp, &d) != 1 || tmp > max_pba) {
+		ti->error = "dm-stl: Invalid max pba";
+		goto fail2;
+	}
+	sc->max_pba = tmp;
+
+	sc->write_frontier = 0;
+	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->write_frontier);
+	sc->wf_end = zone_end(sc, sc->write_frontier); 
+	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->wf_end);
+
+	spin_lock_init(&sc->lock);
+	init_completion(&sc->init_wait);
+	init_waitqueue_head(&sc->cleaning_wait);
+	init_completion(&sc->move_done);
+	init_waitqueue_head(&sc->space_wait);
+
+	INIT_LIST_HEAD(&sc->free_zones);
+	sc->n_free_zones = 0;
+	INIT_LIST_HEAD(&sc->copyreqs);
+
+	r = -ENOMEM;
+	ti->error = "dm-stl: No memory";
+
+	sc->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, _extent_cache);
+	if (!sc->extent_pool)
+		goto fail3;
+	sc->copyreq_pool = mempool_create_slab_pool(MIN_COPY_REQS, _copyreq_cache);
+	if (!sc->copyreq_pool)
+		goto fail4;
+	sc->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
+	if (!sc->page_pool)
+		goto fail5;
+
+	//printk(KERN_INFO "about to call bioset_init()");
+	sc->bs = kzalloc(sizeof(*(sc->bs)), GFP_KERNEL);
+	if (!sc->bs)
+		goto fail6;
+	if(bioset_init(sc->bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS|BIOSET_NEED_RESCUER) == -ENOMEM) {
+		printk(KERN_ERR "\n bioset_init failed!");
+		goto fail7;
+	}
+
+	sc->rb = RB_ROOT;
+	rwlock_init(&sc->rb_lock);
+
+	sc->sit_rb = RB_ROOT;
+	rwlock_init(&sc->sit_rb_lock);
+	
+
+	ti->error = "dm-stl: misc_register failed";
+	sc->misc.minor = MISC_DYNAMIC_MINOR;
+	sc->misc.name = "dm-nstl";
+	sc->misc.nodename = sc->nodename;
+	sc->misc.fops = &stl_misc_fops;
+
+	printk(KERN_INFO "About to call misc_register");
+
+	r = misc_register(&sc->misc);
+	if (r)
+		goto fail7;
+	printk(KERN_INFO "\n Miscellaneous device registered!");
+
+	r = stl_gc_thread_start(sc);
+	if (!r) {
+		return 0;
+	}
+/* failed case */
+	misc_deregister(&sc->misc);
+fail7:
+	bioset_exit(sc->bs);
+fail6:
+	kfree(sc->bs);
+fail5:
+	if (sc->page_pool)
+		mempool_destroy(sc->page_pool);
+fail4:
+	if (sc->copyreq_pool)
+		mempool_destroy(sc->copyreq_pool);
+fail3:
+	if (sc->extent_pool)
+		mempool_destroy(sc->extent_pool);
+fail2:
+	dm_put_device(ti, sc->dev);
+fail1:
+	kfree(sc);
+
+fail:
+	return r;
+}
+
+static void stl_dtr(struct dm_target *ti)
+{
+	struct ctx *sc = ti->private;
+	ti->private = NULL;
+
+	misc_deregister(&sc->misc);
+	bioset_exit(sc->bs);
+	kfree(sc->bs);
+	mempool_destroy(sc->page_pool);
+	mempool_destroy(sc->copyreq_pool);
+	mempool_destroy(sc->extent_pool);
+	dm_put_device(ti, sc->dev);
+	kfree(sc);
+}
+
+static int stl_map(struct dm_target *ti, struct bio *bio)
+{
+	volatile struct ctx *sc = ti->private;
+
+	if(unlikely(bio == NULL)) {
+		return 0;
+	}
+
+	switch (bio_op(bio)) {
+		case REQ_OP_DISCARD:
+		case REQ_OP_FLUSH:	
+			//		case REQ_OP_SECURE_ERASE:
+			//		case REQ_OP_WRITE_ZEROES:
+			//printk(KERN_INFO "Discard or Flush: %d \n", bio_op(bio));
+			/* warn on panic is on. so removing this warn on
+			 WARN_ON(bio_sectors(bio));
+			*/
+			if(bio_sectors(bio)) {
+				printk(KERN_ERR "\n sectors in bio when FLUSH requested");
+			}
+			bio_set_dev(bio, sc->dev->bdev);
+			return DM_MAPIO_REMAPPED;
+		default:
+			break;
+	}
+
+	if (bio_data_dir(bio) == READ) 
+		split_read_io(sc, bio, 0);
+	else{
+		map_write_io(sc, bio, 0);
+	}
+	return DM_MAPIO_SUBMITTED;
+}
+
+static struct target_type stl_target = {
+	.name            = "nstl",
+	.version         = {1, 0, 0},
+	.module          = THIS_MODULE,
+	.ctr             = stl_ctr,
+	.dtr             = stl_dtr,
+	.map             = stl_map,
+	.status          = 0 /*stl_status*/,
+	.prepare_ioctl   = 0 /*stl_prepare_ioctl*/,
+	.message         = 0 /*stl_message*/,
+	.iterate_devices = 0 /*stl_iterate_devices*/,
+};
+
+/* Called on module entry (insmod) */
 static int __init dm_stl_init(void)
 {
 	int r = -ENOMEM;
 
-	printk(KERN_INFO "dm-nstl\n");
 	if (!(_extent_cache = KMEM_CACHE(extent, 0)))
-		goto fail;
+		return r;
 	if (!(_copyreq_cache = KMEM_CACHE(copy_req, 0)))
-		goto fail;
+		goto fail1;
 	if ((r = dm_register_target(&stl_target)) < 0)
 		goto fail;
+	printk(KERN_INFO "dm-nstl\n %s %d", __func__, __LINE__);
 	return 0;
 
 fail:
-	if (_extent_cache)
-		kmem_cache_destroy(_extent_cache);
 	if (_copyreq_cache)
+		kmem_cache_destroy(_extent_cache);
+fail1:
+	if (_extent_cache)
 		kmem_cache_destroy(_extent_cache);
 	return r;
 }
 
-
+/* Called on module exit (rmmod) */
 static void __exit dm_stl_exit(void)
 {
 	dm_unregister_target(&stl_target);
-	kmem_cache_destroy(_extent_cache);
+	if(_extent_cache)
+		kmem_cache_destroy(_extent_cache);
 }
 
 
 module_init(dm_stl_init);
 module_exit(dm_stl_exit);
 
-MODULE_DESCRIPTION(DM_NAME " generic user-space-controlled SMR Translation Layer");
+MODULE_DESCRIPTION(DM_NAME "log structured SMR Translation Layer");
 MODULE_LICENSE("GPL");
