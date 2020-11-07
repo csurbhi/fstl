@@ -1,4 +1,5 @@
-#include<linux/types.h>
+#include <linux/types.h>
+#include "nstl-u.h"
 
 /*
  *
@@ -13,6 +14,7 @@
 
 #define STL_SB_MAGIC 0x7853544c
 #define STL_HDR_MAGIC 0x4c545353
+#define NR_SECTORS_IN_BLK 8
 
 struct zone_summary_info {
 	sector_t table_lba;	/* start block address of SIT area */
@@ -37,7 +39,7 @@ struct free_zone_info {
 };
 
 struct victim_selection {
-	int (*select_victim)(struct stl_sb_info);
+	int (*select_victim)(struct stl_sb_info *);
 };
 
 struct cur_zone_info {
@@ -74,7 +76,7 @@ struct stl_seg_entry {
 	 * as a part of the translation map
 	 */
     	/* can also add Type of segment */
-}__packed;
+}__attribute__((packed));
 
 
 /* The same structure is used for writing the header/trailer.
@@ -86,18 +88,6 @@ struct stl_seg_entry {
  * indicate the data that it covers. Every zone must have atleast
  * one header and trailer, but it could be multiple as well.
  */
-struct stl_header {
-	uint32_t magic;
-	uint32_t nonce;
-	uint32_t crc32;
-	uint16_t flags;
-	uint16_t len;
-	uint64_t prev_pba;
-	uint64_t next_pba;
-	uint64_t lba;
-	uint64_t pba;
-	uint64_t seq;
-} __attribute__((packed));
 
 /* Type of segments could be
  * Read Hot, Read Warm
@@ -109,17 +99,17 @@ struct stl_ckpt {
 	__le64 checkpoint_ver;
 	__le64 user_block_count;
 	__le64 valid_block_count;
-	__le32 rsvd segment_count;
+	__le32 rsvd_segment_count;
 	__le32 free_segment_count;
 	__le32 blk_nr; 		/* write at this blk nr */
-	__le32 cur_frontier;
-	__le32 blk_pba;
+	__le32 cur_frontier_pba;
 	__le64 elapsed_time;
 	struct stl_seg_entry cur_seg_entry;
 	struct stl_header header;
 	char reserved[0];
-}__packed;
+}__attribute__((packed));
 
+#define MAX_PATH_LEN 256
 
 struct stl_dev_info {
         struct block_device *bdev;
@@ -136,7 +126,7 @@ struct stl_sb {
 	__le32 magic;			/* Magic Number */
 	__le32 log_sector_size;		/* log2 sector size in bytes */
 	__le32 log_block_size;		/* log2 block size in bytes */
-	__le32 log_zone_size;	/	/* log2 zone size in bytes */
+	__le32 log_zone_size;		/* log2 zone size in bytes */
 	__le32 checksum_offset;		/* checksum offset inside super block */
 	__le32 zone_count;		/* total # of segments */
 	__le32 blk_count_ckpt;		/* # of blocks for checkpoint */
@@ -149,11 +139,17 @@ struct stl_sb {
 	__le32 sit_pba;			/* start block address of SIT */
 	__le32 zone0_pba;		/* start block address of segment 0 */
 	__le32 nr_invalid_zones;	/* zones that have errors in them */
+	__le64 max_pba;			/* The last lba in the disk */
 	//__u8 uuid[16];			/* 128-bit uuid for volume */
 	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
 	__le32 crc;			/* checksum of superblock */
 	__u8 reserved[0];		/* valid reserved region. Rest of the block space */
-} __packed;
+}__attribute__((packed));
+
+/* TODO: clean up struct sb_info. ctx
+ * is doing that job
+ */
+#define MAX_TIME 5
 
 
 struct stl_sb_info {
@@ -169,8 +165,6 @@ struct stl_sb_info {
 	/* for segment-related operations */
 	struct stl_sm_info *sm_info;		/* segment manager */
 
-	/* for bio operations */
-	struct f2fs_bio_info *write_io[NR_PAGE_TYPE];	/* for write bios */
 	/* keep migration IO order for LFS mode */
 	struct rw_semaphore io_order_lock;
 
@@ -228,6 +222,92 @@ struct extent_entry {
 }__packed;
 
 
+/* used to hold a range to be copied.
+*/
+struct copy_req {
+	struct list_head list;
+	sector_t lba;
+	sector_t pba;
+	int len;
+	int flags;
+	struct bio *bio;
+	struct extent *e;
+};
+static struct kmem_cache *_copyreq_cache;
 
+/* zone free list entry
+*/
+struct free_zone {
+	struct list_head list;
+	sector_t start;
+	sector_t end;
+};
 
+struct stl_gc_thread;
+
+/* this has grown kind of organically, and needs to be cleaned up.
+*/
+struct ctx {
+	sector_t          nr_lbas_in_zone;	/* in 512B LBAs */
+	int               max_pba;
+
+	spinlock_t        lock;
+	sector_t          write_frontier; /* LBA, protected by lock */
+	sector_t          wf_end;
+	sector_t          previous;	  /* protected by lock */
+	unsigned          sequence;
+	struct list_head  free_zones;
+	int               n_free_zones;
+	sector_t          n_free_sectors;
+
+	struct rb_root    rb;	          /* map RB tree */
+	struct rb_root	  sit_rb;	  /* SIT RB tree */
+	rwlock_t          rb_lock;
+	rwlock_t	  sit_rb_lock;
+	int               n_extents;      /* map size */
+
+	mempool_t        *extent_pool;
+	mempool_t        *copyreq_pool;
+	mempool_t        *page_pool;
+	struct bio_set   * bs;
+
+	struct dm_dev    *dev;
+
+	struct stl_msg    msg;
+	sector_t          list_lba;
+
+	struct completion init_wait; /* before START issued */
+	wait_queue_head_t cleaning_wait;
+	wait_queue_head_t space_wait;
+	atomic_t          io_count;
+	struct completion move_done;
+
+	atomic_t          n_reads;
+	sector_t          target;
+	unsigned long     target_seq;
+	unsigned          sectors_copied;
+	struct list_head  copyreqs;
+	atomic_t          pages_alloced;
+
+	char              nodename[32];
+	struct miscdevice misc;
+  
+	struct stl_gc_thread *gc_th;
+	struct page 	*sb_page;
+	struct stl_sb 	*sb;
+	struct page 	*ckpt_page;
+	struct stl_ckpt *ckpt;
+};
+
+/* total size = xx bytes (64b). fits in 1 cache line 
+   for 32b is xx bytes, fits in ARM cache line */
+struct extent {
+	struct rb_node rb;	/* 20 bytes */
+	sector_t lba;		/* 512B LBA */
+	sector_t pba;		
+	u32      len;
+	atomic_t refs[3];
+	atomic_t total_refs;
+	unsigned seq;
+}; /* xx bytes including padding after 'rb', xx on 32-bit */
 

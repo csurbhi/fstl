@@ -23,6 +23,7 @@
 #include <linux/miscdevice.h>
 #include <linux/freezer.h>
 #include <linux/kthread.h>
+#include <linux/buffer_head.h>
 
 #include <linux/vmstat.h>
 
@@ -104,243 +105,6 @@ static struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
        return bio;
 }
 
-void read_super_endio()
-{
-	free(bio);
-}
-
-#define BLK_SZ 4096
-
-struct stl_sb * read_superblock(struct block_device *bdev)
-{
-
-	struct stl_sb_info *sb_info;
-
-	/* TODO: for the future. Right now we keep
-	 * the block size the same as the sector size
-	 *
-	if (set_blocksize(bdev, BLK_SZ))
-		return NULL;
-	*/
-
-	struct buffer_head *bh = __bread(bdev, 1, BLK_SZ);
-	if (!bh)
-		return NULL;
-	
-	struct stl_sb * sb = (struct stl_sb *)bh->b_data;
-	if (sb->MAGIC != STL_SB_MAGIC) {
-		printk(KERN_INFO "\n Wrong superblock!");
-		put_bh(bh);
-		return NULL;
-	}
-	/* We put the page in case of error in the future (put_page)*/
-	ctx->sb_page = bh->b_page;
-
-
-}
-
-struct stl_ckpt * read_ckpt(unsigned long pba, struct block_device *bdev)
-{
-	struct buffer_head *bh = __bread(bdev, pba, BLK_SZ);
-	if (!bh)
-		return NULL;
-	struct stl_ckpt *ckpt = (struct stl_ckpt *)bh->b_data;
-	ctx->ckpt_page = bh->b_page;
-	return ckpt;
-}
-
-/* we write the checkpoints alternately.
- * Only one of them is more recent than
- * the other
- * In case we fail while writing one
- * then we find the older one safely
- * on the disk
- */
-struct stl_ckp * get_cur_ckpt(struct stl_sb)
-{
-	unsigned long pba = sb->ckpt_pba;
-	struct stl_ckpt *ckpt1, *ckp2, *ckpt;
-	struct page *page1;
-
-	ckpt1 = read_ckpt(pba);
-	pba = pba + NR_SECTORS_IN_BLK;
-	page1 = ctx->ckpt_page;
-	/* ctx->ckpt_page will be overwritten by the next
-	 * call to read_ckpt
-	 */
-	ckpt2 = read_ckpt(pba);
-	if (ckpt1->elapsed_time >= ckpt2->elapsed_time) {
-		ckpt = ckpt1;
-		ctx->ckpt_page = page1;
-	}
-	else {
-		ckpt = ckpt2;
-		//page2 is rightly set by read_ckpt();
-		put_page(page1);
-	}
-	return ckpt;
-}
-
-void read_extents_from_block(struct ctx * sc, struct extent_entry *entry, unsigned int nr_extents)
-{
-	int i = 0;
-	
-	while (i <= nr_extents) {
-		/* If there are no more recorded entries on disk, then
-		 * dont add an entries further
-		 */
-		if ((entry->lba == 0) && (entry->len == 0))
-			break;
-		stl_update_range(sc, entry->lba, entry->pba, entry->len)
-		entry = entry + sizeof(entry);
-		i++;
-	}
-}
-
-
-#define NR_SECTORS_PER_BLK 8
-
-/* 
- * Create a RB tree from the map on
- * disk
- */
-int read_extent_map(unsigned long pba, unsigned in nrblks, struct block_device *bdev)
-{
-	struct buffer_head *bh = NULL;
-	int nr_extents_in_blk = BLK_SZ / sizeof(struct extent_map);
-	struct extent_entry * entry0;
-	
-	int i = 0;
-	while(i < nrblks) {
-		bh = __bread(bdev, pba, BLK_SZ);
-		if (!bh)
-			return -1;
-		entry0 = (struct extent_entry *) bh->b_data;
-		if (nrblks <= (i + nr_extents_in_blk))
-			read_extents_from_block(entry0, nr_extents_in_blk);
-		else
-			read_extents_from_block(entry0, nrblks - i);
-		i = i + nr_extents_in_blk;
-		pba = pba + (BLK_SZ * NR_SECTORS_PER_BLK);
-		put_bh(bh);
-	}
-}
-
-/*
- * Create a heap/RB tree from the seginfo
- * on disk. Use this for finding the 
- * victim. We don't need to keep the
- * entire heap in memory. We store only
- * the top x candidates in memory
- */
-void read_seg_info_table(unsigned long pba, unsigned int nrblks, struct block_device *bdev)
-{
-	struct buffer_head *bh = NULL;
-	int nr_seg_entries_blk = BLK_SZ / sizeof(struct stl_seg_entry);
-	int i = 0;
-	struct stl_seg_entry *entry0;
-
-	while (i < nrblks) {
-		bh = __bread(bdev, pba, BLK_SZ);
-		if (!bh)
-			return -1;
-		entry0 = bh->b_data;
-		if (nrblks <= (i + nr_seg_entries_blk))
-			read_seg_entries_from_block(entry0, nr_seg_entries_blk);
-		else
-			read_seg_entries_from_block(entry0, nrblks - i);
-		i = i + nr_seg_entries_blk;
-		pba = pba + (BLK_SZ * NR_SECTORS_PER_BLK);
-		put_bh(bh);
-	}
-}
-
-
-/* used to hold a range to be copied.
-*/
-struct copy_req {
-	struct list_head list;
-	sector_t lba;
-	sector_t pba;
-	int len;
-	int flags;
-	struct bio *bio;
-	struct extent *e;
-};
-static struct kmem_cache *_copyreq_cache;
-
-/* zone free list entry
-*/
-struct free_zone {
-	struct list_head list;
-	sector_t start;
-	sector_t end;
-};
-
-struct stl_gc_thread;
-
-/* this has grown kind of organically, and needs to be cleaned up.
-*/
-struct ctx {
-	sector_t          zone_size;	/* in 512B LBAs */
-	int               max_pba;
-
-	spinlock_t        lock;
-	sector_t          write_frontier; /* LBA, protected by lock */
-	sector_t          wf_end;
-	sector_t          previous;	  /* protected by lock */
-	unsigned          sequence;
-	struct list_head  free_zones;
-	int               n_free_zones;
-	sector_t          n_free_sectors;
-
-	struct rb_root    rb;	          /* map RB tree */
-	struct rb_root	  sit_rb;	  /* SIT RB tree */
-	rwlock_t          rb_lock;
-	rwlock_t	  sit_rb_lock;
-	int               n_extents;      /* map size */
-
-	mempool_t        *extent_pool;
-	mempool_t        *copyreq_pool;
-	mempool_t        *page_pool;
-	struct bio_set   * bs;
-
-	struct dm_dev    *dev;
-
-	struct stl_msg    msg;
-	sector_t          list_lba;
-
-	struct completion init_wait; /* before START issued */
-	wait_queue_head_t cleaning_wait;
-	wait_queue_head_t space_wait;
-	atomic_t          io_count;
-	struct completion move_done;
-
-	atomic_t          n_reads;
-	sector_t          target;
-	unsigned long     target_seq;
-	unsigned          sectors_copied;
-	struct list_head  copyreqs;
-	atomic_t          pages_alloced;
-
-	char              nodename[32];
-	struct miscdevice misc;
-  
-	struct stl_gc_thread *gc_th;
-};
-
-/* total size = xx bytes (64b). fits in 1 cache line 
-   for 32b is xx bytes, fits in ARM cache line */
-struct extent {
-	struct rb_node rb;	/* 20 bytes */
-	sector_t lba;		/* 512B LBA */
-	sector_t pba;		
-	u32      len;
-	atomic_t refs[3];
-	atomic_t total_refs;
-	unsigned seq;
-}; /* xx bytes including padding after 'rb', xx on 32-bit */
-
 static struct kmem_cache *_extent_cache;
 #define IN_MAP 0
 #define IN_CLEANING 1
@@ -384,10 +148,10 @@ static void extent_init(struct extent *e, sector_t lba, sector_t pba, unsigned l
 #define MIN_COPY_REQS 16
 
 static sector_t zone_start(struct ctx *sc, sector_t pba) {
-	return pba - (pba % sc->zone_size);
+	return pba - (pba % sc->nr_lbas_in_zone);
 }
 static sector_t zone_end(struct ctx *sc, sector_t pba) {
-	return zone_start(sc, pba) + sc->zone_size - 1; 
+	return zone_start(sc, pba) + sc->nr_lbas_in_zone - 1; 
 }
 static unsigned room_in_zone(struct ctx *sc, sector_t sector) {
 	return zone_end(sc, sector) - sector + 1;   
@@ -874,7 +638,7 @@ fail0:
 void inline prepare_header(struct stl_header *h)
 {
 	h->magic = STL_HDR_MAGIC;
-	h->nounce = 0;
+	h->nonce = 0;
 	h->crc32 = 0;
 	h->flags = 0;
 }
@@ -904,15 +668,15 @@ struct bio *make_header(struct ctx *sc, unsigned seq, sector_t here, sector_t pr
 
 	/* min space for an extent at the end of a zone is 8K - wrap if less.
 	*/
-//	if (sc->zone_size - (next % sc->zone_size) < 16) {
+//	if (sc->nr_lbas_in_zone - (next % sc->nr_lbas_in_zone) < 16) {
 //		next = next + 16;
-//		next = next - (next % sc->zone_size);
+//		next = next - (next % sc->nr_lbas_in_zone);
 //	}
 
 	h = page_address(page);
-	prepare_header();
+	prepare_header(h);
 	h->prev_pba = prev;
-	h->next_pba = nextl
+	h->next_pba = next;
 	h->lba = lba;
 	h->pba = pba;
 	h->len = 0;
@@ -939,9 +703,9 @@ struct bio *make_trailer(struct ctx *sc, unsigned seq, sector_t here, sector_t p
 
 	/* min space for an extent at the end of a zone is 8K - wrap if less.
 	 *          */
-//	if (sc->zone_size - (next % sc->zone_size) < 16) {
+//	if (sc->nr_lbas_in_zone - (next % sc->nr_lbas_in_zone) < 16) {
 //		next = next + 16;
-//		next = next - (next % sc->zone_size);
+//		next = next - (next % sc->nr_lbas_in_zone);
 //	}
 
 	h = page_address(page);
@@ -982,7 +746,7 @@ static int get_new_zone(struct ctx *sc)
 	sc->write_frontier = fz->start;
 	sc->wf_end = zone_end(sc, sc->write_frontier);
 
-	/*printk(KERN_INFO "new zone: %d (%ld->%ld) left %d\n", (int)(fz->start / sc->zone_size),
+	/*printk(KERN_INFO "new zone: %d (%ld->%ld) left %d\n", (int)(fz->start / sc->nr_lbas_in_zone),
 			old_free, sc->n_free_sectors, sc->n_free_zones);
 	*/
 
@@ -1443,7 +1207,7 @@ void put_free_zone(struct ctx *sc, struct stl_msg *m)
 	struct free_zone *fz = kzalloc(sizeof(*fz), GFP_KERNEL);
 
 	/*printk(KERN_INFO "put free zone %d %ld (wf %ld ns %ld)\n",
-			(int)(m->lba / sc->zone_size), (long)m->lba, sc->write_frontier, sc->n_free_sectors);
+			(int)(m->lba / sc->nr_lbas_in_zone), (long)m->lba, sc->write_frontier, sc->n_free_sectors);
 	*/
 	if (fz == NULL)
 		return;
@@ -1568,6 +1332,208 @@ static const struct file_operations stl_misc_fops = {
 	.unlocked_ioctl = stl_dev_ioctl,
 };
 
+#define BLK_SZ 4096
+
+struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
+{
+	struct block_device *bdev = ctx->dev->bdev;
+	struct buffer_head *bh = __bread(bdev, pba, BLK_SZ);
+	if (!bh)
+		return NULL;
+	struct stl_ckpt *ckpt = (struct stl_ckpt *)bh->b_data;
+	ctx->ckpt_page = bh->b_page;
+	return ckpt;
+}
+
+/* we write the checkpoints alternately.
+ * Only one of them is more recent than
+ * the other
+ * In case we fail while writing one
+ * then we find the older one safely
+ * on the disk
+ */
+struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
+{
+	struct stl_sb * sb = ctx->sb;
+	struct block_device *bdev = ctx->dev->bdev;
+	unsigned long pba = sb->cp_pba;
+	struct stl_ckpt *ckpt1, *ckpt2, *ckpt;
+	struct page *page1;
+
+	ckpt1 = read_checkpoint(ctx, pba);
+	pba = pba + NR_SECTORS_IN_BLK;
+	page1 = ctx->ckpt_page;
+	/* ctx->ckpt_page will be overwritten by the next
+	 * call to read_ckpt
+	 */
+	ckpt2 = read_checkpoint(ctx, pba);
+	if (ckpt1->elapsed_time >= ckpt2->elapsed_time) {
+		ckpt = ckpt1;
+		ctx->ckpt_page = page1;
+	}
+	else {
+		ckpt = ckpt2;
+		//page2 is rightly set by read_ckpt();
+		put_page(page1);
+	}
+	return ckpt;
+}
+
+void read_extents_from_block(struct ctx * sc, struct extent_entry *entry, unsigned int nr_extents)
+{
+	int i = 0;
+	
+	while (i <= nr_extents) {
+		/* If there are no more recorded entries on disk, then
+		 * dont add an entries further
+		 */
+		if ((entry->lba == 0) && (entry->len == 0))
+			break;
+		stl_update_range(sc, entry->lba, entry->pba, entry->len);
+		entry = entry + sizeof(entry);
+		i++;
+	}
+}
+
+
+#define NR_SECTORS_PER_BLK 8
+
+/* 
+ * Create a RB tree from the map on
+ * disk
+ */
+int read_extent_map(struct ctx *sc)
+{
+	struct buffer_head *bh = NULL;
+	int nr_extents_in_blk = BLK_SZ / sizeof(struct extent_entry);
+	struct extent_entry * entry0;
+	unsigned long long pba = sc->sb->map_pba;
+	unsigned long nrblks = sc->sb->blk_count_map;
+	struct block_device *bdev = sc->dev->bdev;
+	
+	int i = 0;
+	while(i < nrblks) {
+		bh = __bread(bdev, pba, BLK_SZ);
+		if (!bh)
+			return -1;
+		entry0 = (struct extent_entry *) bh->b_data;
+		if (nrblks <= (i + nr_extents_in_blk))
+			read_extents_from_block(sc, entry0, nr_extents_in_blk);
+		else
+			read_extents_from_block(sc, entry0, nrblks - i);
+		i = i + nr_extents_in_blk;
+		pba = pba + (BLK_SZ * NR_SECTORS_PER_BLK);
+		put_bh(bh);
+	}
+}
+
+void read_seg_entries_from_block(struct stl_seg_entry *entry0, unsigned int nrblks)
+{
+	return;
+}
+
+/*
+ * Create a heap/RB tree from the seginfo
+ * on disk. Use this for finding the 
+ * victim. We don't need to keep the
+ * entire heap in memory. We store only
+ * the top x candidates in memory
+ */
+void read_seg_info_table(unsigned long pba, unsigned int nrblks, struct block_device *bdev)
+{
+	struct buffer_head *bh = NULL;
+	int nr_seg_entries_blk = BLK_SZ / sizeof(struct stl_seg_entry);
+	int i = 0;
+	struct stl_seg_entry *entry0;
+
+	while (i < nrblks) {
+		bh = __bread(bdev, pba, BLK_SZ);
+		if (!bh)
+			return -1;
+		entry0 = (struct stl_seg_entry *) bh->b_data;
+		if (nrblks <= (i + nr_seg_entries_blk))
+			read_seg_entries_from_block(entry0, nr_seg_entries_blk);
+		else
+			read_seg_entries_from_block(entry0, nrblks - i);
+		i = i + nr_seg_entries_blk;
+		pba = pba + (BLK_SZ * NR_SECTORS_PER_BLK);
+		put_bh(bh);
+	}
+}
+
+struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
+{
+
+	struct stl_sb_info *sb_info;
+	struct block_device *bdev = ctx->dev->bdev;
+
+	/* TODO: for the future. Right now we keep
+	 * the block size the same as the sector size
+	 *
+	if (set_blocksize(bdev, BLK_SZ))
+		return NULL;
+	*/
+
+	struct buffer_head *bh = __bread(bdev, pba, BLK_SZ);
+	if (!bh)
+		return NULL;
+	
+	struct stl_sb * sb = (struct stl_sb *)bh->b_data;
+	if (sb->magic != STL_SB_MAGIC) {
+		printk(KERN_INFO "\n Wrong superblock!");
+		put_bh(bh);
+		return NULL;
+	}
+	/* We put the page in case of error in the future (put_page)*/
+	ctx->sb_page = bh->b_page;
+	return sb;
+}
+
+int read_metadata(struct ctx * ctx)
+{
+	int ret;
+	struct stl_sb * sb1, *sb2;
+	struct page *page;
+	unsigned long pba = 0;
+	struct stl_ckpt *ckpt;
+	struct block_device *bdev = ctx->dev->bdev;
+
+	sb1 = read_superblock(ctx, pba);
+	if (NULL == sb1)
+		return -1;
+	/*
+	 * we need to verify that sb1 is uptodate.
+	 * Right now we do nothing. we assume
+	 * sb1 is okay.
+	page = ctx->sb_page;
+	pba = pba + SECTORS_PER_BLK;
+	sb2 = read_superblock(bdev, pba);
+	put_page(page);
+	 */
+	ctx->sb = sb1;
+
+	ckpt = get_cur_checkpoint(ctx);
+	if (NULL == ckpt) {
+		put_page(ctx->sb_page);
+		return -1;
+	}	
+	ctx->ckpt = ckpt;
+	ret = read_extent_map(ctx);
+	if (0 > ret) {
+		put_page(ctx->sb_page);
+		put_page(ctx->ckpt_page);
+		return ret;
+	}
+	/* TODO: Read the sit info 
+	 * Doing nothing for now.
+	 * */
+	return 0;
+}
+
+
+
+
+
 static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	int r = -ENOMEM;
@@ -1579,7 +1545,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	DMINFO("ctr %s %s %s %s", argv[0], argv[1], argv[2], argv[3]);
 
-	if (argc != 4) {
+	if (argc != 2) {
 		ti->error = "dm-stl: Invalid argument count";
 		return -EINVAL;
 	}
@@ -1590,29 +1556,27 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	if ((r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &sc->dev))) {
 		ti->error = "dm-nstl: Device lookup failed.";
-		goto fail1;
+		goto fail0;
 	}
 	
-	read_superblock(sc->dev->bdev);
+	r = read_metadata(sc);
+	if (r < 0)
+		goto fail1;
 
 	max_pba = sc->dev->bdev->bd_inode->i_size / 512;
 
 	sprintf(sc->nodename, "stl/%s", argv[1]);
 
 	r = -EINVAL;
-	if (sscanf(argv[2], "%llu%c", &tmp, &d) != 1) {
-		ti->error = "dm-stl: Invalid zone size";
+
+	sc->nr_lbas_in_zone = (1 << (sc->sb->log_zone_size - sc->sb->log_sector_size));
+	sc->max_pba = sc->sb->max_pba;
+	if (sc->max_pba > max_pba) {
+		ti->error = "dm-stl: Invalid max pba found on sb";
 		goto fail2;
 	}
-	sc->zone_size = tmp;
+	sc->write_frontier = sc->ckpt->cur_frontier_pba;
 
-	if (sscanf(argv[3], "%llu%c", &tmp, &d) != 1 || tmp > max_pba) {
-		ti->error = "dm-stl: Invalid max pba";
-		goto fail2;
-	}
-	sc->max_pba = tmp;
-
-	sc->write_frontier = 0;
 	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->write_frontier);
 	sc->wf_end = zone_end(sc, sc->write_frontier); 
 	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->wf_end);
@@ -1689,8 +1653,11 @@ fail3:
 	if (sc->extent_pool)
 		mempool_destroy(sc->extent_pool);
 fail2:
-	dm_put_device(ti, sc->dev);
+	put_page(sc->sb_page);
+	put_page(sc->ckpt_page);
 fail1:
+	dm_put_device(ti, sc->dev);
+fail0:
 	kfree(sc);
 
 fail:

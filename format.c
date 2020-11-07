@@ -249,10 +249,10 @@ void set_bitmap(char *bitmap, unsigned int nrzones, char ch)
 	memset(bitmap, ch, nrbytes);
 }
 
-unsigned int get_current_frontier(struct stl_sb *sb)
+unsigned long long get_current_frontier(struct stl_sb *sb)
 {
-	unsigned int sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
-	unsigned int sit_end_blk_nr = sit_end_pba / NR_SECTORS_IN_BLK;
+	unsigned long sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
+	unsigned long sit_end_blk_nr = sit_end_pba / NR_SECTORS_IN_BLK;
 	unsigned int sit_zone_nr = sit_end_blk_nr / NR_BLKS_PER_ZONE;
 	if (sit_end_blk_nr % NR_BLKS_PER_ZONE > 0)
 		sit_zone_nr + 1;
@@ -260,7 +260,15 @@ unsigned int get_current_frontier(struct stl_sb *sb)
 	/* The data zones start in the next zone of that of the last
 	 * metadata zone
 	 */
-	return sit_zone_nr + 1;
+	return sit_zone_nr * (1 << (sb->log_zone_size - sb->log_sector_size));
+}
+
+unsigned long long get_user_block_count(struct stl_sb *sb)
+{
+	unsigned long sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
+	unsigned long sit_zone_nr = sit_end_pba >> sb->log_zone_size;
+	return ((sb->zone_count - sit_zone_nr) * (NR_BLKS_PER_ZONE));
+
 }
 
 void prepare_cur_seg_entry(struct stl_seg_entry *entry)
@@ -284,13 +292,11 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 	ckpt->valid_block_count = ckpt->user_block_count;
 	ckpt->rsvd_segment_count = sb->zone_count_reserved;
 	ckpt->free_segment_count = sb->zone_count_main - 1; //1 for the current frontier
-	ckpt->cur_frontier = get_current_frontier(sb);
-	ckpt->blk_nr = 0;
-	ckpt->blk_pba = get_lba(ckpt->cur_frontier, ckpt->blk_nr);
-	ckpt->user_block_count = (sb->zone_count - ckpt->cur_frontier) * (NR_BLKS_PER_ZONE);
+	ckpt->cur_frontier_pba = get_current_frontier(sb);
+	ckpt->user_block_count = get_user_block_count(sb);
 	ckpt->elapsed_time = 0;
 	prepare_cur_seg_entry(&ckpt->cur_seg_entry);
-	prepare_header(&ckpt->header, ckpt->blk_pba, 0);
+	prepare_header(&ckpt->header, ckpt->cur_frontier_pba, 0);
 	write_to_disk(fd, (char *)ckpt, BLK_SZ, ckpt_pba);
 	free(ckpt);
 }
