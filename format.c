@@ -33,7 +33,7 @@ int open_disk(char *dname)
 	int fd;
 
 	fd = open(dname, O_RDWR);
-	if (!fd) {
+	if (fd < 0) {
 		perror("Could not open the disk: ");
 		exit(errno);
 	}
@@ -77,7 +77,7 @@ __le32 get_zone_count()
  */
 __le64 get_nr_blks(struct stl_sb *sb)
 {
-	unsigned long nr_blks_per_zone = (1 << sb->log_zone_size) / (1 << sb->log_block_size);
+	unsigned long nr_blks_per_zone = (1 << (sb->log_zone_size - sb->log_block_size));
 	unsigned long nr_blks =  (sb->zone_count * nr_blks_per_zone);
 	return nr_blks;
 
@@ -315,53 +315,72 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
  * as nothing is mapped. So we write all zeroes.
 */
 
-void write_map(int fd, u64 nrblks, u64 map_pba)
+void write_map(int fd, u64 nr_extents, u64 map_pba)
 {
-	unsigned int nr_extents = nrblks;
-	unsigned int extents_sz = nr_extents * sizeof(struct extent_map);
-	unsigned int nr_blks = extents_sz / BLK_SZ;
+	unsigned int extents_in_blk = BLK_SZ / sizeof(struct extent_map);
+	unsigned int nr_extent_blks = nr_extents / extents_in_blk;
 	int i = 0, ret=0;
-	if (extents_sz % BLK_SZ > 0)
-		nr_blks = nr_blks + 1;
+	if (nr_extents % extents_in_blk > 0)
+		nr_extent_blks = nr_extent_blks + 1;
 
 	char * buf = (char *) malloc(BLK_SZ);
 	if (!buf)
 		exit(-1);
 
 	memset(buf, 0, BLK_SZ);
-	while (i < nr_blks) {
+	printf("\n nr_data_blks: %llu ", nr_extents);
+	printf("\n nr_extent_blks: %d", nr_extent_blks);
+	while (i < nr_extent_blks) {
 		ret = write_to_disk(fd, (char *) buf, BLK_SZ, map_pba);
 		if (ret < 0) {
 			exit(ret);
 		}
-		map_pba += BLK_SZ;
+		map_pba += NR_SECTORS_IN_BLK;
 		i++;
+		//printf("\n Written blk: %d", i);
 	}
 	free(buf);
+	printf("\n returning from write_map...");
+	return;
 }
 
-void write_seg_info_table(int fd, u64 nrzones, unsigned long seg_entries_pba)
+void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_pba)
 {
 	struct stl_seg_entry seg_entry;
 	unsigned entries_in_blk = BLK_SZ / sizeof(struct stl_seg_entry);
-	unsigned int nr_blks = (BLK_SZ * nrzones)/sizeof(struct stl_seg_entry);
+	unsigned int nr_sit_blks = (nr_seg_entries)/entries_in_blk;
 	unsigned int i, ret;
-	if (BLK_SZ * nrzones % sizeof(struct stl_seg_entry) > 0)
-		nr_blks = nr_blks + 1;
+	if (nr_seg_entries % entries_in_blk > 0)
+		nr_sit_blks = nr_sit_blks + 1;
+
+	printf("\n nr of seg entries: %llu", nr_seg_entries);
+	printf("\n nr of sit blks: %d", nr_sit_blks);
+	printf("\n");
 
 	char * buf = (char *) malloc(BLK_SZ);
-	if (!buf)
+	char *orig_addr;
+	if (NULL == buf) {
+		perror("\n Could not malloc: ");
 		exit(-ENOMEM);
+	}
 
 	memset(buf, 0, BLK_SZ);
 
 	seg_entry.vblocks = NR_BLKS_PER_ZONE;
 	seg_entry.mtime = 0;
-	while (i < entries_in_blk)
-		memcpy(buf, &seg_entry, sizeof(struct stl_seg_entry));
-	
+	orig_addr = buf;
+	size_t size = 0;
+	printf("\n preparing buf! ");
 	i = 0;
-	while (i < nr_blks) {
+	while (i < entries_in_blk) {
+		memcpy(buf + size, &seg_entry, sizeof(struct stl_seg_entry));
+		size = size +  sizeof(struct stl_seg_entry);
+		i = i + 1;
+	}
+	printf("\n Buf prepared");
+	i = 0;
+	buf = orig_addr;
+	while (i < nr_sit_blks) {
 		ret = write_to_disk(fd, (char *) buf, BLK_SZ, seg_entries_pba);
 		if (ret < 0) {
 			exit(ret);
@@ -369,6 +388,7 @@ void write_seg_info_table(int fd, u64 nrzones, unsigned long seg_entries_pba)
 		seg_entries_pba += BLK_SZ;
 		i++;
 	}
+	free(buf);
 }
 
 int main()
@@ -384,13 +404,20 @@ int main()
 
 	sb1 = write_sb(fd, pba);
 	sb2 = write_sb(fd, pba + NR_SECTORS_IN_BLK);
+	printf("\n Superblock written");
 	free(sb2);
 	write_ckpt(fd, sb1, sb1->cp_pba);
 	write_ckpt(fd, sb1, sb1->cp_pba + NR_SECTORS_IN_BLK);
+	printf("\n Checkpoint written");
 	nrblks = get_nr_blks(sb1);
+	printf("\n nrblks: %lu", nrblks);
 	write_map(fd, nrblks, sb1->map_pba);
+	printf("\n Extent map written");
+	printf("\n sb1->zone_count: %d", sb1->zone_count);
 	write_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
+	printf("\n Segment Information Table written");
 	free(sb1);
+	close(fd);
 	/* 0 volume_size: 39321600  nstl  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 524288;
 	unsigned long data_zones = 28000;
@@ -401,6 +428,7 @@ int main()
 	sprintf(cmd, "/sbin/dmsetup create TL1 --table '0 %ld nstl %s %s %ld %ld'",
             volume_size, blkdev, tgtname, zone_lbas, 
 	    data_end);
+	printf("\n cmd: %s", cmd);
     	system(cmd);
 	return(0);
 }
