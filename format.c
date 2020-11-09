@@ -194,7 +194,7 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	sb = (struct stl_sb *)malloc(BLK_SZ);
 	if (!sb)
 		exit(-1);
-	memset(&sb, 0, BLK_SZ);
+	memset(sb, 0, BLK_SZ);
 	
 	sb->magic = STL_SB_MAGIC;
 	sb->version = 1;
