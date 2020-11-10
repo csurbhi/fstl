@@ -921,6 +921,8 @@ static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t 
 	unsigned long flags;
 	struct list_head *p;
 
+	dump_stack();
+
 	/* reads must be a multiple of the message size */
 	if (count % (sizeof(m)) != 0) {
 		printk(KERN_INFO "invalid read count %ld\n", count);
@@ -1337,10 +1339,13 @@ static const struct file_operations stl_misc_fops = {
 struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 {
 	struct block_device *bdev = ctx->dev->bdev;
-	struct buffer_head *bh = __bread(bdev, pba, BLK_SZ);
+	unsigned int blknr = pba / NR_SECTORS_IN_BLK;
+	struct buffer_head *bh = __bread(bdev, blknr, BLK_SZ);
 	if (!bh)
 		return NULL;
 	struct stl_ckpt *ckpt = (struct stl_ckpt *)bh->b_data;
+	printk(KERN_INFO "\n ** pba: %lu, ckpt->cur_frontier_pba: %lld", pba, ckpt->cur_frontier_pba);
+	printk(KERN_INFO "\n ckpt->header.pba: %lld", ckpt->header.pba);
 	ctx->ckpt_page = bh->b_page;
 	return ckpt;
 }
@@ -1360,12 +1365,14 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	struct stl_ckpt *ckpt1, *ckpt2, *ckpt;
 	struct page *page1;
 
+	printk(KERN_INFO "\n !Reading checkpoint 1 from pba: %lu", pba);
 	ckpt1 = read_checkpoint(ctx, pba);
 	pba = pba + NR_SECTORS_IN_BLK;
 	page1 = ctx->ckpt_page;
 	/* ctx->ckpt_page will be overwritten by the next
 	 * call to read_ckpt
 	 */
+	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %lu", pba);
 	ckpt2 = read_checkpoint(ctx, pba);
 	if (ckpt1->elapsed_time >= ckpt2->elapsed_time) {
 		ckpt = ckpt1;
@@ -1389,7 +1396,7 @@ void read_extents_from_block(struct ctx * sc, struct extent_entry *entry, unsign
 		 */
 		if ((entry->lba == 0) && (entry->len == 0))
 			break;
-		stl_update_range(sc, entry->lba, entry->pba, entry->len);
+		//stl_update_range(sc, entry->lba, entry->pba, entry->len);
 		entry = entry + sizeof(entry);
 		i++;
 	}
@@ -1410,10 +1417,11 @@ int read_extent_map(struct ctx *sc)
 	unsigned long long pba = sc->sb->map_pba;
 	unsigned long nrblks = sc->sb->blk_count_map;
 	struct block_device *bdev = sc->dev->bdev;
+	unsigned int blknr = pba/NR_SECTORS_PER_BLK;
 	
 	int i = 0;
 	while(i < nrblks) {
-		bh = __bread(bdev, pba, BLK_SZ);
+		bh = __bread(bdev, blknr, BLK_SZ);
 		if (!bh)
 			return -1;
 		entry0 = (struct extent_entry *) bh->b_data;
@@ -1445,9 +1453,10 @@ void read_seg_info_table(unsigned long pba, unsigned int nrblks, struct block_de
 	int nr_seg_entries_blk = BLK_SZ / sizeof(struct stl_seg_entry);
 	int i = 0;
 	struct stl_seg_entry *entry0;
+	unsigned int blknr = pba/NR_SECTORS_PER_BLK;
 
 	while (i < nrblks) {
-		bh = __bread(bdev, pba, BLK_SZ);
+		bh = __bread(bdev, blknr, BLK_SZ);
 		if (!bh)
 			return -1;
 		entry0 = (struct stl_seg_entry *) bh->b_data;
@@ -1466,15 +1475,17 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 
 	struct stl_sb_info *sb_info;
 	struct block_device *bdev = ctx->dev->bdev;
-
+	unsigned int blknr = pba / NR_SECTORS_PER_BLK;
 	/* TODO: for the future. Right now we keep
 	 * the block size the same as the sector size
 	 *
+	*/
 	if (set_blocksize(bdev, BLK_SZ))
 		return NULL;
-	*/
 
-	struct buffer_head *bh = __bread(bdev, pba, BLK_SZ);
+	printk(KERN_INFO "\n sb found at pba: %lu", pba);
+
+	struct buffer_head *bh = __bread(bdev, blknr, BLK_SZ);
 	if (!bh)
 		return NULL;
 	
@@ -1484,6 +1495,10 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 		put_bh(bh);
 		return NULL;
 	}
+	printk(KERN_INFO "\n sb->magic: %u", sb->magic);
+	printk(KERN_INFO "\n sb->map_pba: %lu, sb->blk_count_map: %lu", sb->map_pba, sb->blk_count_map);
+	printk(KERN_INFO "\n sb->zone_count: %d", sb->zone_count);
+	printk(KERN_INFO "\n sb->max_pba: %d", sb->max_pba);
 	/* We put the page in case of error in the future (put_page)*/
 	ctx->sb_page = bh->b_page;
 	return sb;
@@ -1498,6 +1513,7 @@ int read_metadata(struct ctx * ctx)
 	struct stl_ckpt *ckpt;
 	struct block_device *bdev = ctx->dev->bdev;
 
+	pba = 0;
 	sb1 = read_superblock(ctx, pba);
 	if (NULL == sb1)
 		return -1;
@@ -1543,12 +1559,15 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	//dump_stack();
 
-	DMINFO("ctr %s %s %s %s", argv[0], argv[1], argv[2], argv[3]);
+	// DMINFO("ctr %s %s %s %s", argv[0], argv[1], argv[2], argv[3]);
 
-	if (argc != 2) {
+	printk(KERN_INFO "\n argc: %d", argc);
+	if (argc < 2) {
 		ti->error = "dm-stl: Invalid argument count";
 		return -EINVAL;
 	}
+
+	printk(KERN_INFO "\n argv[0]: %s, argv[1]: %s", argv[0], argv[1]);
 
 	if (!(_sc = sc = kzalloc(sizeof(*sc), GFP_KERNEL)))
 		goto fail;
@@ -1558,6 +1577,10 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		ti->error = "dm-nstl: Device lookup failed.";
 		goto fail0;
 	}
+
+	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", sc->dev->bdev->bd_part->start_sect);
+	printk(KERN_INFO "\n sc->dev->bdev->bd_part->nr_sects: %llu", sc->dev->bdev->bd_part->nr_sects);
+
 	
 	r = read_metadata(sc);
 	if (r < 0)
@@ -1565,22 +1588,25 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	max_pba = sc->dev->bdev->bd_inode->i_size / 512;
 
+
 	sprintf(sc->nodename, "stl/%s", argv[1]);
 
 	r = -EINVAL;
 
 	sc->nr_lbas_in_zone = (1 << (sc->sb->log_zone_size - sc->sb->log_sector_size));
+	printk(KERN_INFO "\n device records max_pba: %llu", max_pba);
 	sc->max_pba = sc->sb->max_pba;
+	printk(KERN_INFO "\n formatted max_pba: %llu", sc->max_pba);
 	if (sc->max_pba > max_pba) {
 		ti->error = "dm-stl: Invalid max pba found on sb";
 		goto fail2;
 	}
 	sc->write_frontier = sc->ckpt->cur_frontier_pba;
 
-	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->write_frontier);
+	printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->write_frontier);
 	sc->wf_end = zone_end(sc, sc->write_frontier); 
-	//printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->wf_end);
-
+	printk(KERN_INFO "%s %d kernel wf end: %ld\n", __func__, __LINE__, sc->wf_end);
+	printk(KERN_INFO "max_pba = %lu", sc->max_pba);
 	spin_lock_init(&sc->lock);
 	init_completion(&sc->init_wait);
 	init_waitqueue_head(&sc->cleaning_wait);
