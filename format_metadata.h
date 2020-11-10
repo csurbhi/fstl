@@ -88,7 +88,7 @@ struct stl_ckpt {
 	__le32 rsvd_segment_count;
 	__le32 free_segment_count;
 	__le32 blk_nr; 		/* write at this blk nr */
-	__le32 cur_frontier_pba;
+	__le64 cur_frontier_pba;
 	__le64 elapsed_time;
 	struct stl_seg_entry cur_seg_entry;
 	struct stl_header header;

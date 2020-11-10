@@ -9,24 +9,6 @@
 #define STL_HDR_MAGIC 0x4c545353 /* 'SSTL' */
 #define STL_HDR_SIZE 2048
 
-struct stl_header {
-	uint32_t magic;
-	uint32_t nonce;
-	uint32_t crc32;
-	uint16_t flags;
-	uint16_t len;
-	uint64_t prev_pba;
-	uint64_t next_pba;
-	uint64_t lba;
-	uint64_t pba;
-	uint32_t seq;
-} __attribute__((packed));
-struct _stl_header {
-	struct stl_header h;
-	char pad[2048-sizeof(struct stl_header)];
-};
-
-
 /* the structure used for user/kernel communication. Needs to fit
  * evenly into a 4K page.
  */

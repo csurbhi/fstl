@@ -1,5 +1,6 @@
 #include <linux/types.h>
 #include "nstl-u.h"
+#include "format_metadata.h"
 
 /*
  *
@@ -64,20 +65,7 @@ struct cur_zone_info {
  * Thus total of 66178 blocks are needed 
  * that comes out to be 258MB of metadata
  * information for GC.
-#define VBLK_MAP_SIZE 8192
-__u8 valid_map[VBLK_MAP_SIZE];
  */
-
-struct stl_seg_entry {
-	__le16 vblocks;
-	__le64 mtime;
-	/* We do not store any valid map here
-	 * as an extent map is stored separately
-	 * as a part of the translation map
-	 */
-    	/* can also add Type of segment */
-}__attribute__((packed));
-
 
 /* The same structure is used for writing the header/trailer.
  * header->len is always 0. If you crash after writing the header
@@ -95,20 +83,6 @@ struct stl_seg_entry {
  * Read-Write Cold
  */
 
-struct stl_ckpt {
-	__le64 checkpoint_ver;
-	__le64 user_block_count;
-	__le64 valid_block_count;
-	__le32 rsvd_segment_count;
-	__le32 free_segment_count;
-	__le32 blk_nr; 		/* write at this blk nr */
-	__le32 cur_frontier_pba;
-	__le64 elapsed_time;
-	struct stl_seg_entry cur_seg_entry;
-	struct stl_header header;
-	char reserved[0];
-}__attribute__((packed));
-
 #define MAX_PATH_LEN 256
 
 struct stl_dev_info {
@@ -120,31 +94,6 @@ struct stl_dev_info {
         unsigned long *zone_bitmap;        /* Bitmap indicating sequential zones */
 };
 
-#define STL_SB_SIZE 4096
-
-struct stl_sb {
-	__le32 magic;			/* Magic Number */
-	__le32 log_sector_size;		/* log2 sector size in bytes */
-	__le32 log_block_size;		/* log2 block size in bytes */
-	__le32 log_zone_size;		/* log2 zone size in bytes */
-	__le32 checksum_offset;		/* checksum offset inside super block */
-	__le32 zone_count;		/* total # of segments */
-	__le32 blk_count_ckpt;		/* # of blocks for checkpoint */
-	__le32 blk_count_map;		/* # of segments for extent map*/
-	__le32 blk_count_sit;		/* # of segments for SIT */
-	__le32 zone_count_reserved;	/* # CMR zones that are reserved */
-	__le32 zone_count_main;		/* # of segments for main area */
-	__le32 cp_pba;			/* start block address of checkpoint */
-	__le32 map_pba;			/* start block address of NAT */
-	__le32 sit_pba;			/* start block address of SIT */
-	__le32 zone0_pba;		/* start block address of segment 0 */
-	__le32 nr_invalid_zones;	/* zones that have errors in them */
-	__le64 max_pba;			/* The last lba in the disk */
-	//__u8 uuid[16];			/* 128-bit uuid for volume */
-	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
-	__le32 crc;			/* checksum of superblock */
-	__u8 reserved[0];		/* valid reserved region. Rest of the block space */
-}__attribute__((packed));
 
 /* TODO: clean up struct sb_info. ctx
  * is doing that job

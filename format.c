@@ -189,7 +189,7 @@ __le64 get_zone0_pba(struct stl_sb *sb)
 	return sb->sit_pba + (sb->blk_count_sit * NR_SECTORS_IN_BLK);
 }
 
-struct stl_sb * read_sb(int fd, unsigned long sectornr)
+void read_sb(int fd, unsigned long sectornr)
 {
 	struct stl_sb *sb;
 	int ret = 0;
@@ -215,7 +215,7 @@ struct stl_sb * read_sb(int fd, unsigned long sectornr)
 	}
 	if (sb->magic != STL_SB_MAGIC) {
 		printf("\n wrong superblock!");
-		return NULL;
+		exit(-1);
 	}
 	printf("\n sb->magic: %d", sb->magic);
 	printf("\n sb->version %d", sb->version);
@@ -227,9 +227,14 @@ struct stl_sb * read_sb(int fd, unsigned long sectornr)
 	printf("\n sb->map_pba: %d", sb->map_pba);
 	printf("\n Read verified!!!");
 	printf("\n ==================== \n");
-	return sb;
+	free(sb);
 }
 
+__le64 get_max_pba(struct stl_sb *sb)
+{
+	return sb->zone_count * (1 << (sb->log_zone_size - sb->log_sector_size));
+
+}
 
 struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 {
@@ -258,6 +263,8 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	sb->map_pba = get_map_pba(sb);
 	sb->sit_pba = get_sit_pba(sb);
 	sb->zone0_pba = get_zone0_pba(sb);
+	sb->max_pba = get_max_pba(sb);
+	printf("\n sb->max_pba: %lld", sb->max_pba);
 	sb->crc = 0;
 	sb->crc = crc32(-1, (unsigned char *)sb, STL_SB_SIZE);
 
@@ -345,12 +352,37 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 	ckpt->rsvd_segment_count = sb->zone_count_reserved;
 	ckpt->free_segment_count = sb->zone_count_main - 1; //1 for the current frontier
 	ckpt->cur_frontier_pba = get_current_frontier(sb);
-	printf("\n checkpoint: cur_frontier_pba: %u", ckpt->cur_frontier_pba);
+	printf("\n checkpoint: cur_frontier_pba: %lld", ckpt->cur_frontier_pba);
 	ckpt->user_block_count = get_user_block_count(sb);
 	ckpt->elapsed_time = 0;
 	prepare_cur_seg_entry(&ckpt->cur_seg_entry);
 	prepare_header(&ckpt->header, ckpt->cur_frontier_pba, 0);
 	write_to_disk(fd, (char *)ckpt, BLK_SZ, ckpt_pba);
+	free(ckpt);
+}
+
+void read_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
+{
+	struct stl_ckpt *ckpt;
+	unsigned int bitmap_sz = sb->zone_count / BITS_IN_BYTE;
+	unsigned long offset = ckpt_pba * 512;
+	int ret;
+
+	ckpt = (struct stl_ckpt *)malloc(BLK_SZ);
+	if(!ckpt)
+		exit(-1);
+
+	printf("\n Reading from sector: %ld", ckpt_pba);
+
+	ret = lseek(fd, offset, SEEK_SET);
+	if (ret < 0) {
+		perror("in read_ckpt lseek failed: ");
+		exit(-1);
+	}
+
+	ret = read(fd, ckpt, BLK_SZ);
+	printf("\n Read checkpoint, ckpt->cur_frontier_pba: %lld", ckpt->cur_frontier_pba);
+	printf("\n Read checkpoint, ckpt->header.pba: %lld", ckpt->header.pba);
 	free(ckpt);
 }
 
@@ -464,8 +496,9 @@ int main()
 	printf("\n Superblock written at pba: %d", pba + NR_SECTORS_IN_BLK);
 	free(sb2);
 	write_ckpt(fd, sb1, sb1->cp_pba);
+	printf("\n Checkpoint written at offset: %d", sb1->cp_pba);
 	write_ckpt(fd, sb1, sb1->cp_pba + NR_SECTORS_IN_BLK);
-	printf("\n Checkpoint written");
+	printf("\n Checkpoint written at offset: %d", sb1->cp_pba + NR_SECTORS_IN_BLK);
 	nrblks = get_nr_blks(sb1);
 	printf("\n nrblks: %lu", nrblks);
 	write_map(fd, nrblks, sb1->map_pba);
@@ -473,8 +506,10 @@ int main()
 	printf("\n sb1->zone_count: %d", sb1->zone_count);
 	write_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
 	printf("\n Segment Information Table written");
-	free(sb1);
 	pba = 0;
+	read_ckpt(fd, sb1, sb1->cp_pba);
+	read_ckpt(fd, sb1, sb1->cp_pba + NR_SECTORS_IN_BLK);
+	free(sb1);
 	close(fd);
 	/* 0 volume_size: 39321600  nstl  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 524288;
