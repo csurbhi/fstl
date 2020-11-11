@@ -1309,6 +1309,7 @@ static int stl_proc_open(struct inode *inode, struct file *file)
 static long stl_dev_ioctl(struct file *fp, unsigned int num, unsigned long arg)
 {
 	//printk(KERN_INFO "ioctl %d\n", num);
+	dump_stack();
 	switch (num) {
 		case 1:
 			//printk(KERN_INFO "ioctl 1\n");
@@ -1607,6 +1608,11 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	sc->wf_end = zone_end(sc, sc->write_frontier); 
 	printk(KERN_INFO "%s %d kernel wf end: %ld\n", __func__, __LINE__, sc->wf_end);
 	printk(KERN_INFO "max_pba = %lu", sc->max_pba);
+
+	loff_t disk_size = i_size_read(sc->dev->bdev->bd_inode);
+	printk(KERN_INFO "\n The disk size as read from the bd_inode: %llu", disk_size);
+	printk(KERN_INFO "\n max sectors: %llu", disk_size/512);
+	printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
 	spin_lock_init(&sc->lock);
 	init_completion(&sc->init_wait);
 	init_waitqueue_head(&sc->cleaning_wait);
