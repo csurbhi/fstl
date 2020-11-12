@@ -192,6 +192,19 @@ struct free_zone {
 	sector_t end;
 };
 
+
+/* TODO: we keep this in a linked list,
+ * but ideally we should keep this in 
+ * two trees: one for cost benefit 
+ * and one for greedy
+ */
+struct gc_candidate {
+	struct list_head list;
+	unsigned int segment_nr;
+	unsigned int valid_blocks;
+	unsigned long mtime;
+};
+
 struct stl_gc_thread;
 
 /* this has grown kind of organically, and needs to be cleaned up.
@@ -207,7 +220,9 @@ struct ctx {
 	unsigned          sequence;
 	struct list_head  free_zones;
 	int               n_free_zones;
-	sector_t          n_free_sectors;
+	sector_t          free_sectors_in_wf;  /* Indicates the free sectors in the current write frontier */
+	struct list_head  gc_candidates;
+	int		  n_gc_candidates;
 
 	struct rb_root    rb;	          /* map RB tree */
 	struct rb_root	  sit_rb;	  /* SIT RB tree */
@@ -223,17 +238,16 @@ struct ctx {
 	struct dm_dev    *dev;
 
 	struct stl_msg    msg;
-	sector_t          list_lba;
+	sector_t          list_lba;	/* needed for external gc */
 
-	struct completion init_wait; /* before START issued */
-	wait_queue_head_t cleaning_wait;
-	wait_queue_head_t space_wait;
+	wait_queue_head_t cleaning_wait; /* now we do not need this as we will use a lock to coordinate GC and writes */
+	wait_queue_head_t space_wait; /* same comment as above */
 	atomic_t          io_count;
 	struct completion move_done;
 
 	atomic_t          n_reads;
-	sector_t          target;
-	unsigned long     target_seq;
+	sector_t          target;	/* in our case now points to the segment getting GCed */
+	unsigned long     target_seq;   /* Figure out what this is */
 	unsigned          sectors_copied;
 	struct list_head  copyreqs;
 	atomic_t          pages_alloced;
