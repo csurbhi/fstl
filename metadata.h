@@ -16,6 +16,7 @@
 #define STL_SB_MAGIC 0x7853544c
 #define STL_HDR_MAGIC 0x4c545353
 #define NR_SECTORS_IN_BLK 8
+#define BITS_IN_BYTE 8
 
 struct zone_summary_info {
 	sector_t table_lba;	/* start block address of SIT area */
@@ -187,7 +188,7 @@ static struct kmem_cache *_copyreq_cache;
 /* zone free list entry
 */
 struct free_zone {
-	struct list_head list;
+	u64 fz_nr;
 	sector_t start;
 	sector_t end;
 };
@@ -218,8 +219,6 @@ struct ctx {
 	sector_t          wf_end;
 	sector_t          previous;	  /* protected by lock */
 	unsigned          sequence;
-	struct list_head  free_zones;
-	int               n_free_zones;
 	sector_t          free_sectors_in_wf;  /* Indicates the free sectors in the current write frontier */
 	struct list_head  gc_candidates;
 	int		  n_gc_candidates;
@@ -260,6 +259,9 @@ struct ctx {
 	struct stl_sb 	*sb;
 	struct page 	*ckpt_page;
 	struct stl_ckpt *ckpt;
+	char *freezone_bitmap;
+	int 	nr_freezones;
+	int	fz_bitmap_bytes;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 

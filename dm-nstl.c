@@ -33,6 +33,14 @@
 
 #define DM_MSG_PREFIX "stl"
 
+
+/* TODO:
+ * Convert the STL in a block mapped STL rather
+ * than a sector mapped STL
+ * If needed you can migrate to a track mapped
+ * STL
+ */
+
 extern struct bio_set fs_bio_set;
 
 /*
@@ -147,15 +155,25 @@ static void extent_init(struct extent *e, sector_t lba, sector_t pba, unsigned l
 #define MIN_POOL_IOS 16
 #define MIN_COPY_REQS 16
 
-static sector_t zone_start(struct ctx *sc, sector_t pba) {
-	return pba - (pba % sc->nr_lbas_in_zone);
+static sector_t zone_start(struct ctx *ctx, sector_t pba) {
+	return pba - (pba % ctx->nr_lbas_in_zone);
 }
-static sector_t zone_end(struct ctx *sc, sector_t pba) {
-	return zone_start(sc, pba) + sc->nr_lbas_in_zone - 1; 
+static sector_t zone_end(struct ctx *ctx, sector_t pba) {
+	return zone_start(ctx, pba) + ctx->nr_lbas_in_zone - 1; 
 }
-static unsigned room_in_zone(struct ctx *sc, sector_t sector) {
-	return zone_end(sc, sector) - sector + 1;   
+static unsigned room_in_zone(struct ctx *ctx, sector_t sector) {
+	return zone_end(ctx, sector) - sector + 1;   
 }
+
+/* zone numbers begin from 0.
+ * The freebit map is marked with bit 0 representing zone 0
+ */
+static unsigned get_zone_nr(struct ctx *ctx, sector_t sector) {
+	sector_t zone_begins = zone_start(ctx, sector);
+	return (zone_begins / ctx->nr_lbas_in_zone);
+}
+
+
 
 /************** Extent map management *****************/
 
@@ -721,58 +739,110 @@ struct bio *make_trailer(struct ctx *sc, unsigned seq, sector_t here, sector_t p
 }
 
 
+static void mark_zone_free(struct ctx *ctx , int zonenr)
+{
+	char *bitmap = ctx->freezone_bitmap;
+	int nr_freezones = ctx->nr_freezones;
+	int bytenr = zonenr / BITS_IN_BYTE;
+	int bitnr = zonenr % BITS_IN_BYTE;
 
+	if ((bitmap[bytenr] & (1 << bitnr)) == (1 << bitnr)) {
+		panic("\n Trying to free an already free zone! ");
+	}
 
+	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
+	ctx->nr_freezones = ctx->nr_freezones + 1;
+}
+
+static u64 get_next_freezone_nr(struct ctx *ctx)
+{
+	char *bitmap = ctx->freezone_bitmap;
+	int nr_freezones = ctx->nr_freezones;
+	int bytenr = 0;
+	int bitnr = 0;
+	unsigned char allOnes = (char) ~0;
+
+	/* 1 indicates that a zone is occupied
+	 * and is not free
+	 */
+	while(bitmap[bytenr] == allOnes) {
+		bytenr = bytenr + 1;
+		if (bytenr == ctx->fz_bitmap_bytes) {
+			break;
+		}
+	}
+	
+	if (bytenr == ctx->fz_bitmap_bytes) {
+		/* no freezones available */
+		return -1;
+	}
+	/* We have the bytenr from where to return the freezone */
+	bitnr = 0;
+	while (1) {
+		if ((bitmap[bytenr] & (1 << bitnr)) == (1 << bitnr)) {
+			break;
+		}
+		bitnr = bitnr + 1;
+		if (bitnr == BITS_IN_BYTE) {
+			panic ("Wrong byte calculation!");
+		}
+	}
+	return bitnr;
+}
 
 /* moves the write frontier, returns the LBA of the packet trailer
 */
-static int get_new_zone(struct ctx *sc)
+static int get_new_zone(struct ctx *ctx)
 {
-	sector_t old_free = sc->free_sectors_in_wf;
-	struct free_zone *fz = list_first_entry_or_null(&sc->free_zones,
-			struct free_zone, list);
-	if (fz == NULL) {
-		printk(KERN_INFO "no free zones: space %ld\n", sc->free_sectors_in_wf);
-		return 0;
+	sector_t old_free = ctx->free_sectors_in_wf;
+	unsigned long zone_nr;
+	if (ctx->write_frontier > ctx->wf_end)
+		printk(KERN_INFO "kernel wf before BUG: %ld - %ld\n", ctx->write_frontier, ctx->wf_end);
+	BUG_ON(ctx->write_frontier > ctx->wf_end);
+	zone_nr = get_next_freezone_nr(ctx);
+	if (zone_nr < 0) {
+		printk(KERN_WARNING "\n Disk is full, no more writing possible! ");
+		return (zone_nr);
 	}
-
-	list_del(&fz->list);
-	sc->n_free_zones--;
-	if (sc->write_frontier > sc->wf_end)
-		printk(KERN_INFO "kernel wf before BUG: %ld - %ld\n", sc->write_frontier, sc->wf_end);
-	BUG_ON(sc->write_frontier > sc->wf_end);
+	ctx->write_frontier = zone_start(ctx, zone_nr);
+	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
+	ctx->free_sectors_in_wf -= ctx->wf_end - ctx->write_frontier;
+	ctx->nr_freezones--;
 	//printk(KERN_INFO "Num of free sect.: %ld, diff of end and wf:%ld\n", sc->free_sectors_in_wf, sc->wf_end - sc->write_frontier);
-	sc->free_sectors_in_wf -= (sc->wf_end - sc->write_frontier);
-	sc->write_frontier = fz->start;
-	sc->wf_end = zone_end(sc, sc->write_frontier);
-
 	/*printk(KERN_INFO "new zone: %d (%ld->%ld) left %d\n", (int)(fz->start / sc->nr_lbas_in_zone),
 			old_free, sc->free_sectors_in_wf, sc->n_free_zones);
 	*/
 
-	kfree(fz);
-	return sc->write_frontier;
+	return ctx->write_frontier;
 }
 
 
-static sector_t move_write_frontier(struct ctx *sc, sector_t sectors_s8, sector_t* next_header)
+/*
+ * The last entry in a zone should point to the next zone that will
+ * be written. When you check for room in zone, we need to check
+ * requested nr of sectors plus the size to accomodate the trailer.
+ * If there is not enough space, we need to split the bio
+ */
+
+#define SIZEOF_HEADER 4
+#define SIZEOF_TRAILER 4
+static sector_t move_write_frontier(struct ctx *ctx, sector_t sectors_s8, sector_t* next_header)
 {
 	sector_t prev; 
 
-	prev = sc->write_frontier + sectors_s8 -4;
-	if (room_in_zone(sc, sc->write_frontier + sectors_s8 -1 ) - 1 < 16 ){ // We do "-1 ) + -1" because sc->write_frontier + sectors_s8 can move to the next zone in some scenarios
-		if (!(sc->write_frontier = get_new_zone(sc))){
-			printk(KERN_INFO "fail due to get_new_zone at line %d, func: %s", __LINE__, __func__ );
-			return -1;
-	//		goto fail;
+	prev = ctx->write_frontier;
+	if (ctx->free_sectors_in_wf < sectors_s8 + SIZEOF_HEADER + SIZEOF_TRAILER) {
+		if (ctx->free_sectors_in_wf < SIZEOF_HEADER) {
 		}
-	} else {
-		sc->write_frontier += sectors_s8;
-		sc->free_sectors_in_wf -= (sectors_s8);
+		ctx->write_frontier = get_new_zone(ctx);
+		if (ctx->write_frontier < 0) {
+			printk(KERN_INFO "No more disk space available for writing!");
+			return -1;
+		}
 	}
-
-	*next_header = sc->write_frontier;
-	sc->wf_end = zone_end(sc, sc->write_frontier); 
+	ctx->write_frontier += sectors_s8;
+	ctx->free_sectors_in_wf -= (sectors_s8);
+	*next_header = ctx->write_frontier;
 	return prev;
 }
 
@@ -780,14 +850,14 @@ static atomic_t c1, c2, c3, c4, c5;
 
 /* split a write into one or more journalled packets
 */
-static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
+static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 {
 	struct bio *split = NULL, *pad = NULL;
 	struct bio *bios[40];
 	int i;
 	volatile int nbios = 0;
 	unsigned long flags, t1, t2;
-	unsigned sectors = bio_sectors(bio);
+	unsigned nr_sectors = bio_sectors(bio);
 	sector_t s8, sector = bio->bi_iter.bi_sector;
 	struct extent *e;
 	sector_t next_header;
@@ -804,36 +874,37 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		WARN_ON(nbios >= 40);
 
 		//sectors = bio_sectors(bio);
-		s8 = round_up(sectors, 8);
+		//8 sectors form a BLOCK of 4096
+		s8 = round_up(nr_sectors, 8);
 		sector = bio->bi_iter.bi_sector;
 
-		spin_lock_irqsave(&sc->lock, flags);
-		wf = sc->write_frontier;
+		spin_lock_irqsave(&ctx->lock, flags);
+		wf = ctx->write_frontier;
 
-		if (s8 + 8 > room_in_zone(sc, wf)){
-			s8 = sectors = round_down(room_in_zone(sc, wf) - 8, 8);
+		if (s8 + 8 > room_in_zone(ctx, wf)){
+			s8 = nr_sectors = round_down(room_in_zone(ctx, wf) - 8, 8);
 		}
 
-		seq = sc->sequence++;
-		prev = sc->previous;
-		sc->previous = move_write_frontier(sc, s8+8, &next_header);
-		if (sc->previous == -1) {
+		seq = ctx->sequence++;
+		prev = ctx->previous;
+		ctx->previous = move_write_frontier(ctx, s8+8, &next_header);
+		if (ctx->previous == -1) {
 			printk(KERN_ERR "\n failed at move_write_frontier!");
 		       goto fail;	
 		}
-		spin_unlock_irqrestore(&sc->lock, flags);
+		spin_unlock_irqrestore(&ctx->lock, flags);
 
 		printk(KERN_ERR "\n nbios: %d", nbios);
 
-		if (!(bios[nbios++] = make_header(sc, seq, wf, prev, s8, 0, 0, 0))){
+		if (!(bios[nbios++] = make_header(ctx, seq, wf, prev, s8, 0, 0, 0))){
 			printk(KERN_ERR "\n failed at make_header!, bios: %d", nbios);
 			goto fail;
 		}
 		prev = wf;
 		wf += 4;
 
-		if (sectors < bio_sectors(bio)) {
-			if (!(split = bio_split(bio, sectors, GFP_NOIO, sc->bs))){
+		if (nr_sectors < bio_sectors(bio)) {
+			if (!(split = bio_split(bio, nr_sectors, GFP_NOIO, ctx->bs))){
 				printk(KERN_ERR "\n failed at bio_split! nbios: %d", nbios);
 				goto fail;
 			}
@@ -849,25 +920,25 @@ static void map_write_io(struct ctx *sc, struct bio *bio, int priority)
 		 * wait and try again.
 		 */
 again:
-		e = stl_update_range(sc, sector, wf, sectors);
+		e = stl_update_range(ctx, sector, wf, nr_sectors);
 		split->bi_iter.bi_sector = wf;
 		_pba = wf;
-		wf += sectors;
+		wf += nr_sectors;
 
 		/* pad length is in sectors (like arg to alloc_bio)
 		*/
-		if (sectors != s8) {
+		if (nr_sectors != s8) {
 			int padlen = 8 - (bio->bi_iter.bi_size & ~PAGE_MASK)/512;
-			if (!(pad = stl_alloc_bio(sc, padlen, NULL))){
+			if (!(pad = stl_alloc_bio(ctx, padlen, NULL))){
 				printk(KERN_ERR "\n failed at stl_alloc_bio, padlen: %d!", padlen);
 				goto fail;
 			}
-			setup_bio(pad, stl_endio, sc->dev->bdev, wf, sc, WRITE);
+			setup_bio(pad, stl_endio, ctx->dev->bdev, wf, ctx, WRITE);
 			wf += padlen;
 			bios[nbios++] = pad;
 		}
 		
-		if (!(bios[nbios++] = make_trailer(sc, seq, wf, prev, 0, sector, _pba, sectors, next_header))){
+		if (!(bios[nbios++] = make_trailer(ctx, seq, wf, prev, 0, sector, _pba, nr_sectors, next_header))){
 			printk(KERN_ERR "\n failed at make_trailer! at nbios: %d", nbios);
 			goto fail;
 
@@ -878,7 +949,7 @@ again:
 	} while (split != bio);
 
 	for (i = 0; i < nbios; i++) {
-		bio_set_dev(bios[i], sc->dev->bdev);
+		bio_set_dev(bios[i], ctx->dev->bdev);
 		generic_make_request(bios[i]); /* preserves ordering, unlike submit_bio */
 	}
 	atomic_inc(&c4);
@@ -888,7 +959,7 @@ fail:
 	printk(KERN_INFO "FAIL!!!!\n");
 	bio->bi_status = BLK_STS_IOERR; 	
 	for (i = 0; i < nbios; i++)
-		if (bios[i] && bios[i]->bi_private == sc)
+		if (bios[i] && bios[i]->bi_private == ctx)
 			stl_endio(bio);
 	atomic_inc(&c5);
 }
@@ -899,7 +970,7 @@ fail:
 
 
 
-static struct ctx *_sc;
+static struct ctx *_ctx;
 static const struct file_operations stl_misc_fops;
 
 /*
@@ -908,7 +979,7 @@ static const struct file_operations stl_misc_fops;
    argv[2] = zone size (LBAs)
    argv[3] = max pba
    */
-/* TODO: remove _sc and sc. Only one of them is neeeded.
+/* TODO: remove _ctx and ctx. Only one of them is neeeded.
  * The memory for both is the same
  */
 #define BS_NR_POOL_PAGES 128
@@ -929,12 +1000,12 @@ static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t 
 		return -EINVAL;
 	}
 
-	switch (_sc->msg.cmd) {
+	switch (_ctx->msg.cmd) {
 		case STL_GET_WF:
 			m.cmd = STL_PUT_WF;
-			spin_lock_irqsave(&_sc->lock, flags); 
-			m.pba = _sc->write_frontier;
-			spin_unlock_irqrestore(&_sc->lock, flags); 
+			spin_lock_irqsave(&_ctx->lock, flags); 
+			m.pba = _ctx->write_frontier;
+			spin_unlock_irqrestore(&_ctx->lock, flags); 
 			if (copy_to_user(buf, &m, sizeof(m)))
 				return -EFAULT;
 			buf += sizeof(m);
@@ -943,7 +1014,7 @@ static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t 
 
 		case STL_GET_SEQ:
 			m.cmd = STL_PUT_SEQ;
-			m.lba = _sc->sequence;
+			m.lba = _ctx->sequence;
 			if (copy_to_user(buf, &m, sizeof(m)))
 				return -EFAULT;
 			buf += sizeof(m);
@@ -952,7 +1023,7 @@ static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t 
 
 		case STL_GET_READS:
 			m.cmd = STL_VAL_READS;
-			m.lba = atomic_read(&_sc->n_reads);
+			m.lba = atomic_read(&_ctx->n_reads);
 			if (copy_to_user(buf, &m, sizeof(m)))
 				return -EFAULT;
 			buf += sizeof(m);
@@ -961,10 +1032,10 @@ static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t 
 
 		case STL_GET_SPACE:
 			m.cmd = STL_PUT_SPACE;
-			spin_lock_irqsave(&_sc->lock, flags); 
-			m.lba = _sc->free_sectors_in_wf;
-			m.pba = _sc->n_free_zones;
-			spin_unlock_irqrestore(&_sc->lock, flags); 
+			spin_lock_irqsave(&_ctx->lock, flags); 
+			m.lba = _ctx->free_sectors_in_wf;
+			m.pba = _ctx->nr_freezones;
+			spin_unlock_irqrestore(&_ctx->lock, flags); 
 			if (copy_to_user(buf, &m, sizeof(m)))
 				return -EFAULT;
 			buf += sizeof(m);
@@ -973,8 +1044,8 @@ static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t 
 
 		case STL_CMD_DOIT:
 			m.cmd = STL_VAL_COPIED;
-			m.lba = _sc->sectors_copied;
-			m.pba = _sc->target;
+			m.lba = _ctx->sectors_copied;
+			m.pba = _ctx->target;
 			if (copy_to_user(buf, &m, sizeof(m)))
 				return -EFAULT;
 			buf += sizeof(m);
@@ -982,44 +1053,44 @@ static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t 
 			break;
 
 		case STL_GET_EXT:
-			read_lock_irqsave(&_sc->rb_lock, flags); 
-			e = _stl_rb_geq(&_sc->rb, _sc->list_lba);
+			read_lock_irqsave(&_ctx->rb_lock, flags); 
+			e = _stl_rb_geq(&_ctx->rb, _ctx->list_lba);
 			m.cmd = STL_PUT_EXT;
 			while (e != NULL && count > 0) {
 				m.lba = e->lba;
 				m.pba = e->pba;
 				m.len = e->len;
-				_sc->list_lba = e->lba + e->len;
+				_ctx->list_lba = e->lba + e->len;
 				if (copy_to_user(buf, &m, sizeof(m))) {
-					read_unlock_irqrestore(&_sc->rb_lock, flags);
+					read_unlock_irqrestore(&_ctx->rb_lock, flags);
 					return -EFAULT;
 				}
 				buf += sizeof(m); count -= sizeof(m);
 				e = stl_rb_next(e);
 			}
-			read_unlock_irqrestore(&_sc->rb_lock, flags); 
+			read_unlock_irqrestore(&_ctx->rb_lock, flags); 
 			break;
 
 		case STL_GET_FREEZONE:
-			spin_lock_irqsave(&_sc->lock, flags);
-			list_for_each(p, &_sc->free_zones) {
-				struct free_zone *fz = list_entry(p, struct free_zone, list);
-				m.cmd = STL_PUT_FREEZONE;
-				m.lba = fz->start;
-				m.pba = fz->end;
-				if (count <= 0)
-					break;
-				if (copy_to_user(buf, &m, sizeof(m))) {
-					spin_unlock_irqrestore(&_sc->lock, flags); // this unlock had been forgotten
-					return -EFAULT;
-				}
-				buf += sizeof(m); count -= sizeof(m);
+			spin_lock_irqsave(&_ctx->lock, flags);
+			/* TODO: do this for all available freezones
+			 */
+			unsigned long zone_nr = get_next_freezone_nr(_ctx);
+			m.cmd = STL_PUT_FREEZONE;
+			m.lba = zone_start(_ctx, zone_nr);
+			m.pba = zone_end(_ctx, _ctx->write_frontier);
+			if (count <= 0)
+				break;
+			if (copy_to_user(buf, &m, sizeof(m))) {
+				spin_unlock_irqrestore(&_ctx->lock, flags); // this unlock had been forgotten
+				return -EFAULT;
 			}
-			spin_unlock_irqrestore(&_sc->lock, flags);
+			buf += sizeof(m); count -= sizeof(m);
+			spin_unlock_irqrestore(&_ctx->lock, flags);
 			break;
 
 		default:
-			printk(KERN_INFO "invalid cmd: %d\n", _sc->msg.cmd);
+			printk(KERN_INFO "invalid cmd: %d\n", _ctx->msg.cmd);
 			return -EINVAL;
 	}
 
@@ -1028,7 +1099,7 @@ static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t 
 		if (copy_to_user(buf, &m, sizeof(m)))
 			return -EFAULT;
 		buf += sizeof(m); count -= sizeof(m);
-		_sc->msg.cmd = STL_NO_OP;
+		_ctx->msg.cmd = STL_NO_OP;
 	}
 
 	return ocount - count;
@@ -1040,20 +1111,20 @@ static void stl_move_endio(struct bio *bio)
 {
 	int i;
 	struct bio_vec *bv = NULL;
-	struct ctx *sc = bio->bi_private;
+	struct ctx *ctx = bio->bi_private;
 	struct bvec_iter_all iter_all;
 
 	if (bio_data_dir(bio) == WRITE) {
 		bio_for_each_segment_all(bv, bio, iter_all) {
 			WARN_ON(!bv->bv_page);
-			mempool_free(bv->bv_page, sc->page_pool);
-			atomic_dec(&sc->pages_alloced);
+			mempool_free(bv->bv_page, ctx->page_pool);
+			atomic_dec(&ctx->pages_alloced);
 			bv->bv_page = NULL;
 		}
 	}
 	bio_put(bio);
-	if (atomic_dec_and_test(&sc->io_count))
-		complete(&sc->move_done);
+	if (atomic_dec_and_test(&ctx->io_count))
+		complete(&ctx->move_done);
 }
 
 
@@ -1063,7 +1134,7 @@ static void stl_move_endio(struct bio *bio)
  * extent, it takes a reference on that extent and marks it as being
  * cleaned so that writes modifying that extent will be stalled.
  */
-static void stl_add_copy_cmd(struct ctx *sc, struct stl_msg *m)
+static void stl_add_copy_cmd(struct ctx *ctx, struct stl_msg *m)
 {
 	struct extent *e = NULL;
 	unsigned long flags;
@@ -1076,13 +1147,13 @@ static void stl_add_copy_cmd(struct ctx *sc, struct stl_msg *m)
 	 */
 	int nbios = round_up((int)m->len, maxlen) / maxlen;
 
-	read_lock_irqsave(&sc->rb_lock, flags);
-	e = _stl_rb_geq(&sc->rb, m->lba);
-	if (e && e->lba < m->lba + m->len && e->seq <= sc->target_seq) 
+	read_lock_irqsave(&ctx->rb_lock, flags);
+	e = _stl_rb_geq(&ctx->rb, m->lba);
+	if (e && e->lba < m->lba + m->len && e->seq <= ctx->target_seq) 
 		extent_get(e, nbios, IN_CLEANING);
 	else
 		e = NULL;		
-	read_unlock_irqrestore(&sc->rb_lock, flags);
+	read_unlock_irqrestore(&ctx->rb_lock, flags);
 
 	/* note that you can't move data without the LBA */
 	if (!e)
@@ -1090,16 +1161,16 @@ static void stl_add_copy_cmd(struct ctx *sc, struct stl_msg *m)
 
 	for (offset = 0; offset < m->len; offset += maxlen) {
 		int len = min(m->len - offset, maxlen);
-		cr = mempool_alloc(sc->copyreq_pool, GFP_NOIO);
+		cr = mempool_alloc(ctx->copyreq_pool, GFP_NOIO);
 		if (cr == NULL) {
 			int remaining = round_up(m->len - offset, maxlen) / maxlen;
-			extent_put(sc, e, remaining, IN_CLEANING);
+			extent_put(ctx, e, remaining, IN_CLEANING);
 			break;
 		}
 		memset(cr, 0, sizeof(*cr));
 		*cr = (struct copy_req){.lba = m->lba + offset, .pba = m->pba + offset,
 			.len = len, .flags = m->flags, .e = e};
-		list_add_tail(&cr->list, &sc->copyreqs);
+		list_add_tail(&cr->list, &ctx->copyreqs);
 	}
 }
 
@@ -1115,7 +1186,7 @@ int cmp_req_pba(const void *r1, const void *r2)
    global_page_state(NR_SLAB_UNRECLAIMABLE)
    */
 
-static void stl_do_data_move(struct ctx *sc)
+static void stl_do_data_move(struct ctx *ctx)
 {
 	struct list_head *p, *n;
 	struct copy_req *cr;
@@ -1124,102 +1195,93 @@ static void stl_do_data_move(struct ctx *sc)
 	struct copy_req **reqs;
 	int i, m;
 
-	sc->sectors_copied = 0;
-	if (list_empty(&sc->copyreqs))
+	ctx->sectors_copied = 0;
+	if (list_empty(&ctx->copyreqs))
 		goto done;
 
 	/* read everything...
 	 * TODO - read should be sorted in PBA order
 	 */
-	reinit_completion(&sc->move_done);
-	atomic_set(&sc->io_count, 0);
+	reinit_completion(&ctx->move_done);
+	atomic_set(&ctx->io_count, 0);
 
 	m = 0;
-	list_for_each(p, &sc->copyreqs) {
+	list_for_each(p, &ctx->copyreqs) {
 		m++;
 	}
 
 	i = 0;
 	reqs = kmalloc(m*sizeof(*reqs), GFP_NOIO);
-	list_for_each(p, &sc->copyreqs) {
+	list_for_each(p, &ctx->copyreqs) {
 		reqs[i++] = list_entry(p, struct copy_req, list);
 	}
 	sort(reqs, m, sizeof(*reqs), cmp_req_pba, 0);
 	for (i = 0; i < m; i++) {
 		cr = reqs[i];
-		cr->bio = stl_alloc_bio(sc, cr->len, NULL);
-		clone = bio_clone_bioset(cr->bio, GFP_NOIO, sc->bs);
+		cr->bio = stl_alloc_bio(ctx, cr->len, NULL);
+		clone = bio_clone_bioset(cr->bio, GFP_NOIO, ctx->bs);
 		sector = cr->e->pba + (cr->lba - cr->e->lba);
-		setup_bio(clone, stl_move_endio, sc->dev->bdev, sector, sc, READ);
-		atomic_inc(&sc->io_count);
+		setup_bio(clone, stl_move_endio, ctx->dev->bdev, sector, ctx, READ);
+		atomic_inc(&ctx->io_count);
 		generic_make_request(clone);
 	}
 	kfree(reqs);
 #if 0
-	list_for_each(p, &sc->copyreqs) {
+	list_for_each(p, &ctx->copyreqs) {
 		cr = list_entry(p, struct copy_req, list);
-		cr->bio = stl_alloc_bio(sc, cr->len, NULL);
-		clone = bio_clone_bioset(cr->bio, GFP_NOIO, sc->bs);
+		cr->bio = stl_alloc_bio(ctx, cr->len, NULL);
+		clone = bio_clone_bioset(cr->bio, GFP_NOIO, ctx->bs);
 		sector = cr->e->pba + (cr->lba - cr->e->lba);
-		setup_bio(clone, stl_move_endio, sc->dev->bdev, sector, sc, READ);
-		atomic_inc(&sc->io_count);
+		setup_bio(clone, stl_move_endio, ctx->dev->bdev, sector, ctx, READ);
+		atomic_inc(&ctx->io_count);
 		generic_make_request(clone);
 	}
 #endif
-	wait_for_completion(&sc->move_done);
+	wait_for_completion(&ctx->move_done);
 
 	/* write it back
 	*/
-	atomic_set(&sc->io_count, 0);
-	reinit_completion(&sc->move_done);
-	list_for_each(p, &sc->copyreqs) {
+	atomic_set(&ctx->io_count, 0);
+	reinit_completion(&ctx->move_done);
+	list_for_each(p, &ctx->copyreqs) {
 		cr = list_entry(p, struct copy_req, list);
 		bio = cr->bio;
-		cr->pba = sector = sc->target;
-		setup_bio(bio, stl_move_endio, sc->dev->bdev, sector, sc, WRITE);
-		atomic_inc(&sc->io_count);
+		cr->pba = sector = ctx->target;
+		setup_bio(bio, stl_move_endio, ctx->dev->bdev, sector, ctx, WRITE);
+		atomic_inc(&ctx->io_count);
 		generic_make_request(bio);
-		sc->sectors_copied += cr->len;
-		sc->target += cr->len;
+		ctx->sectors_copied += cr->len;
+		ctx->target += cr->len;
 	}
-	wait_for_completion(&sc->move_done);
+	wait_for_completion(&ctx->move_done);
 
 	/* release refs on the old extents before we update the map
 	*/
-	list_for_each_safe(p, n, &sc->copyreqs) {
+	list_for_each_safe(p, n, &ctx->copyreqs) {
 		cr = list_entry(p, struct copy_req, list);
-		extent_put(sc, cr->e, 1, IN_CLEANING);
+		extent_put(ctx, cr->e, 1, IN_CLEANING);
 	}
-	list_for_each_safe(p, n, &sc->copyreqs) {
+	list_for_each_safe(p, n, &ctx->copyreqs) {
 		cr = list_entry(p, struct copy_req, list);
-		stl_update_range(sc, cr->lba, cr->pba, cr->len);
+		stl_update_range(ctx, cr->lba, cr->pba, cr->len);
 		list_del(&cr->list);
-		mempool_free(cr, sc->copyreq_pool);
+		mempool_free(cr, ctx->copyreq_pool);
 	}
 
 	/* notify blocked writes that cleaning is done.
 	*/
 done:
-	wake_up_all(&sc->cleaning_wait);
+	wake_up_all(&ctx->cleaning_wait);
 }
 
-void put_free_zone(struct ctx *sc, struct stl_msg *m)
+void put_free_zone(struct ctx *ctx, struct stl_msg *m)
 {
 	unsigned long flags;
-	struct free_zone *fz = kzalloc(sizeof(*fz), GFP_KERNEL);
+	unsigned long zonenr = get_zone_nr(ctx, m->lba);
 
-	/*printk(KERN_INFO "put free zone %d %ld (wf %ld ns %ld)\n",
-			(int)(m->lba / sc->nr_lbas_in_zone), (long)m->lba, sc->write_frontier, sc->free_sectors_in_wf);
-	*/
-	if (fz == NULL)
-		return;
-	fz->start = m->lba;
-	fz->end = m->pba;
-
-	spin_lock_irqsave(&sc->lock, flags);
-	list_add_tail(&fz->list, &sc->free_zones);
-	sc->n_free_zones++;
-	spin_unlock_irqrestore(&sc->lock, flags);
+	spin_lock_irqsave(&ctx->lock, flags);
+	mark_zone_free(ctx , zonenr);
+	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 static ssize_t stl_proc_write(struct file *filp, const char *buf, 
@@ -1241,45 +1303,45 @@ static ssize_t stl_proc_write(struct file *filp, const char *buf,
 
 		switch (m.cmd) {
 			case STL_GET_EXT: /* more than 1 before next read will result */
-				_sc->list_lba = 0;
+				_ctx->list_lba = 0;
 			case STL_GET_WF:  /* in the first ones being dropped */
 			case STL_GET_SEQ:
 			case STL_GET_READS:
 			case STL_GET_FREEZONE:
 			case STL_GET_SPACE:
-				_sc->msg = m;
+				_ctx->msg = m;
 				break;
 			case STL_PUT_WF: /* only before startup: no locking */
-				spin_lock_irqsave(&_sc->lock, flags);
-				_sc->write_frontier = m.pba;
+				spin_lock_irqsave(&_ctx->lock, flags);
+				_ctx->write_frontier = m.pba;
 				//printk(KERN_INFO "PUT_WF %ld\n", (long)m.pba);
-				_sc->wf_end = zone_end(_sc, m.pba);
-				spin_unlock_irqrestore(&_sc->lock, flags);
+				_ctx->wf_end = zone_end(_ctx, m.pba);
+				spin_unlock_irqrestore(&_ctx->lock, flags);
 				break;
 			case STL_PUT_EXT:
 				/* maybe validate the data ? */
-				stl_update_range(_sc, m.lba, m.pba, m.len);
+				stl_update_range(_ctx, m.lba, m.pba, m.len);
 				break;
 			case STL_PUT_FREEZONE:
-				put_free_zone(_sc, &m);
+				put_free_zone(_ctx, &m);
 				break;
 			case STL_PUT_SPACE:
-				//printk(KERN_INFO "put_space: %ld (%ld)\n", (long)m.lba, _sc->free_sectors_in_wf);
-				spin_lock_irqsave(&_sc->lock, flags);
-				_sc->free_sectors_in_wf += m.lba;
-				wake_up_all(&_sc->space_wait);
-				spin_unlock_irqrestore(&_sc->lock, flags);
+				//printk(KERN_INFO "put_space: %ld (%ld)\n", (long)m.lba, _ctx->free_sectors_in_wf);
+				spin_lock_irqsave(&_ctx->lock, flags);
+				_ctx->free_sectors_in_wf += m.lba;
+				wake_up_all(&_ctx->space_wait);
+				spin_unlock_irqrestore(&_ctx->lock, flags);
 				break;
 			case STL_PUT_TGT:
-				_sc->target = m.pba;
-				_sc->target_seq = m.lba;
+				_ctx->target = m.pba;
+				_ctx->target_seq = m.lba;
 				break;
 			case STL_PUT_COPY:
-				stl_add_copy_cmd(_sc, &m);
+				stl_add_copy_cmd(_ctx, &m);
 				break;
 			case STL_CMD_DOIT:
-				_sc->msg = m;
-				stl_do_data_move(_sc);
+				_ctx->msg = m;
+				stl_do_data_move(_ctx);
 				break;
 			case STL_NO_OP:
 			case STL_END:
@@ -1295,8 +1357,8 @@ static ssize_t stl_proc_write(struct file *filp, const char *buf,
 
 static int stl_proc_open(struct inode *inode, struct file *file)
 {
-	if (_sc != NULL)
-		_sc->list_lba = 0;
+	if (_ctx != NULL)
+		_ctx->list_lba = 0;
 	printk(KERN_INFO "OPEN\n");
 
 	return 0;
@@ -1373,6 +1435,7 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	ckpt2 = read_checkpoint(ctx, pba);
 	if (ckpt1->elapsed_time >= ckpt2->elapsed_time) {
 		ckpt = ckpt1;
+		put_page(ctx->ckpt_page);
 		ctx->ckpt_page = page1;
 	}
 	else {
@@ -1393,6 +1456,8 @@ void read_extents_from_block(struct ctx * sc, struct extent_entry *entry, unsign
 		 */
 		if ((entry->lba == 0) && (entry->len == 0))
 			break;
+		/* TODO: right now everything should be zeroed out */
+		panic("Why are there any already mapped extents?");
 		stl_update_range(sc, entry->lba, entry->pba, entry->len);
 		entry = entry + sizeof(struct extent_entry);
 		i++;
@@ -1492,9 +1557,9 @@ int read_seg_entries_from_block(struct ctx *sc, struct stl_seg_entry *entry, uns
 			fz->start = get_zone_pba(sb, *segnr);
 			fz->end = get_zone_end(sb, fz->start);
 			spin_lock_irqsave(&sc->lock, flags);
-			list_add_tail(&fz->list, &sc->free_zones);
+			//list_add_tail(&fz->list, &sc->free_zones);
 			spin_unlock_irqrestore(&sc->lock, flags);
-			sc->n_free_zones++;
+			sc->nr_freezones++;
 			continue;
 		}
 		if (entry->vblocks < nr_blks_in_zone) {
@@ -1562,7 +1627,7 @@ int read_seg_info_table(struct ctx *sc)
 			nr_seg_entries_read = nr_seg_entries_blk;
 		else
 			nr_seg_entries_read = nr_data_zones;
-		read_seg_entries_from_block(sc, entry0, nr_seg_entries_read, &zonenr);
+		//read_seg_entries_from_block(sc, entry0, nr_seg_entries_read, &zonenr);
 		nr_data_zones = nr_data_zones - nr_seg_entries_read;
 		i = i + 1;
 		blknr = blknr + 1;
@@ -1604,6 +1669,7 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 	return sb;
 }
 
+
 int read_metadata(struct ctx * ctx)
 {
 	int ret;
@@ -1615,8 +1681,10 @@ int read_metadata(struct ctx * ctx)
 
 	pba = 0;
 	sb1 = read_superblock(ctx, pba);
-	if (NULL == sb1)
+	if (NULL == sb1) {
+		printk(KERN_ERR "\n read_superblock failed! cannot read the metadata ");
 		return -1;
+	}
 	/*
 	 * we need to verify that sb1 is uptodate.
 	 * Right now we do nothing. we assume
@@ -1638,21 +1706,23 @@ int read_metadata(struct ctx * ctx)
 	if (0 > ret) {
 		put_page(ctx->sb_page);
 		put_page(ctx->ckpt_page);
+		printk(KERN_ERR "\n read_extent_map failed! cannot read the metadata ");
 		return ret;
 	}
 
-	INIT_LIST_HEAD(&ctx->free_zones);
 	INIT_LIST_HEAD(&ctx->gc_candidates);
-	ctx->n_free_zones = 0;
-	ctx->n_gc_candidates = 0;
+	ctx->nr_freezones = 0;
+	ctx->fz_bitmap_bytes = ckpt->user_block_count /BITS_IN_BYTE;
+	if (ckpt->user_block_count % BITS_IN_BYTE > 0)
+		ctx->fz_bitmap_bytes += 1;
 	read_seg_info_table(ctx);
-	if (ctx->n_free_zones != ckpt->free_segment_count) {
+	if (ctx->nr_freezones != ckpt->free_segment_count) { 
 		/* TODO: Do some recovery here.
 		 * For now we panic!!
 		 * SIT is flushed before CP. So CP could be stale.
 		 * Update checkpoint accordingly and record!
 		 */
-		panic("free zones in SIT and checkpoint does not match!");
+		//panic("free zones in SIT and checkpoint does not match!");
 	}
 	return 0;
 }
@@ -1660,7 +1730,7 @@ int read_metadata(struct ctx * ctx)
 static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 {
 	int r = -ENOMEM;
-	struct ctx *sc;
+	struct ctx *ctx;
 	unsigned long long tmp, max_pba;
 	char d;
 
@@ -1676,143 +1746,143 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	printk(KERN_INFO "\n argv[0]: %s, argv[1]: %s", argv[0], argv[1]);
 
-	if (!(_sc = sc = kzalloc(sizeof(*sc), GFP_KERNEL)))
+	if (!(_ctx = ctx = kzalloc(sizeof(struct ctx), GFP_KERNEL)))
 		goto fail;
-	ti->private = sc;
+	ti->private = ctx;
 
-	if ((r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &sc->dev))) {
+	if ((r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &ctx->dev))) {
 		ti->error = "dm-nstl: Device lookup failed.";
 		goto fail0;
 	}
 
-	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", sc->dev->bdev->bd_part->start_sect);
-	printk(KERN_INFO "\n sc->dev->bdev->bd_part->nr_sects: %llu", sc->dev->bdev->bd_part->nr_sects);
+	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", ctx->dev->bdev->bd_part->start_sect);
+	printk(KERN_INFO "\n sc->dev->bdev->bd_part->nr_sects: %llu", ctx->dev->bdev->bd_part->nr_sects);
 
-	sc->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, _extent_cache);
-	if (!sc->extent_pool)
+	ctx->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, _extent_cache);
+	if (!ctx->extent_pool)
 		goto fail1;
 	
-	r = read_metadata(sc);
+	r = read_metadata(ctx);
 	if (r < 0)
 		goto fail2;
 
-	max_pba = sc->dev->bdev->bd_inode->i_size / 512;
+	max_pba = ctx->dev->bdev->bd_inode->i_size / 512;
 
 
-	sprintf(sc->nodename, "stl/%s", argv[1]);
+	sprintf(ctx->nodename, "stl/%s", argv[1]);
 
 	r = -EINVAL;
 
-	sc->nr_lbas_in_zone = (1 << (sc->sb->log_zone_size - sc->sb->log_sector_size));
+	ctx->nr_lbas_in_zone = (1 << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	printk(KERN_INFO "\n device records max_pba: %llu", max_pba);
-	sc->max_pba = sc->sb->max_pba;
-	printk(KERN_INFO "\n formatted max_pba: %llu", sc->max_pba);
-	if (sc->max_pba > max_pba) {
+	ctx->max_pba = ctx->sb->max_pba;
+	printk(KERN_INFO "\n formatted max_pba: %llu", ctx->max_pba);
+	if (ctx->max_pba > max_pba) {
 		ti->error = "dm-stl: Invalid max pba found on sb";
 		goto fail3;
 	}
-	sc->write_frontier = sc->ckpt->cur_frontier_pba;
+	ctx->write_frontier = ctx->ckpt->cur_frontier_pba;
 
-	printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, sc->write_frontier);
-	sc->wf_end = zone_end(sc, sc->write_frontier);
-	sc->previous = 0;
+	printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, ctx->write_frontier);
+	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
+	ctx->previous = 0;
 	/* TODO: figure out the use of sequence */
-	sc->sequence = 0;
-	printk(KERN_INFO "%s %d kernel wf end: %ld\n", __func__, __LINE__, sc->wf_end);
-	printk(KERN_INFO "max_pba = %lu", sc->max_pba);
-	sc->free_sectors_in_wf = sc->wf_end - sc->write_frontier;
+	ctx->sequence = 0;
+	printk(KERN_INFO "%s %d kernel wf end: %ld\n", __func__, __LINE__, ctx->wf_end);
+	printk(KERN_INFO "max_pba = %lu", ctx->max_pba);
+	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier;
 
 
-	loff_t disk_size = i_size_read(sc->dev->bdev->bd_inode);
+	loff_t disk_size = i_size_read(ctx->dev->bdev->bd_inode);
 	printk(KERN_INFO "\n The disk size as read from the bd_inode: %llu", disk_size);
 	printk(KERN_INFO "\n max sectors: %llu", disk_size/512);
 	printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
-	spin_lock_init(&sc->lock);
-	init_waitqueue_head(&sc->cleaning_wait);
-	init_completion(&sc->move_done);
-	init_waitqueue_head(&sc->space_wait);
+	spin_lock_init(&ctx->lock);
+	init_waitqueue_head(&ctx->cleaning_wait);
+	init_completion(&ctx->move_done);
+	init_waitqueue_head(&ctx->space_wait);
 
-	INIT_LIST_HEAD(&sc->copyreqs);
-	atomic_set(&sc->io_count, 0);
-	atomic_set(&sc->n_reads, 0);
-	atomic_set(&sc->pages_alloced, 0);
-	sc->target = 0;
+	INIT_LIST_HEAD(&ctx->copyreqs);
+	atomic_set(&ctx->io_count, 0);
+	atomic_set(&ctx->n_reads, 0);
+	atomic_set(&ctx->pages_alloced, 0);
+	ctx->target = 0;
 
 	r = -ENOMEM;
 	ti->error = "dm-stl: No memory";
 
-	sc->copyreq_pool = mempool_create_slab_pool(MIN_COPY_REQS, _copyreq_cache);
-	if (!sc->copyreq_pool)
+	ctx->copyreq_pool = mempool_create_slab_pool(MIN_COPY_REQS, _copyreq_cache);
+	if (!ctx->copyreq_pool)
 		goto fail4;
-	sc->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
-	if (!sc->page_pool)
+	ctx->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
+	if (!ctx->page_pool)
 		goto fail5;
 
 	//printk(KERN_INFO "about to call bioset_init()");
-	sc->bs = kzalloc(sizeof(*(sc->bs)), GFP_KERNEL);
-	if (!sc->bs)
+	ctx->bs = kzalloc(sizeof(*(ctx->bs)), GFP_KERNEL);
+	if (!ctx->bs)
 		goto fail6;
-	if(bioset_init(sc->bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS|BIOSET_NEED_RESCUER) == -ENOMEM) {
+	if(bioset_init(ctx->bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS|BIOSET_NEED_RESCUER) == -ENOMEM) {
 		printk(KERN_ERR "\n bioset_init failed!");
 		goto fail7;
 	}
 
-	sc->rb = RB_ROOT;
-	rwlock_init(&sc->rb_lock);
+	ctx->rb = RB_ROOT;
+	rwlock_init(&ctx->rb_lock);
 
-	sc->sit_rb = RB_ROOT;
-	rwlock_init(&sc->sit_rb_lock);
+	ctx->sit_rb = RB_ROOT;
+	rwlock_init(&ctx->sit_rb_lock);
 	
 
 	ti->error = "dm-stl: misc_register failed";
-	sc->misc.minor = MISC_DYNAMIC_MINOR;
-	sc->misc.name = "dm-nstl";
-	sc->misc.nodename = sc->nodename;
-	sc->misc.fops = &stl_misc_fops;
-	sc->target_seq = 0;
-	sc->sectors_copied = 0;
+	ctx->misc.minor = MISC_DYNAMIC_MINOR;
+	ctx->misc.name = "dm-nstl";
+	ctx->misc.nodename = ctx->nodename;
+	ctx->misc.fops = &stl_misc_fops;
+	ctx->target_seq = 0;
+	ctx->sectors_copied = 0;
 
 
 	printk(KERN_INFO "About to call misc_register");
 
-	r = misc_register(&sc->misc);
+	r = misc_register(&ctx->misc);
 	if (r)
 		goto fail7;
 	printk(KERN_INFO "\n Miscellaneous device registered!");
 
-	r = stl_gc_thread_start(sc);
+	r = stl_gc_thread_start(ctx);
 	if (!r) {
 		return 0;
 	}
 /* failed case */
-	misc_deregister(&sc->misc);
+	misc_deregister(&ctx->misc);
 fail7:
-	bioset_exit(sc->bs);
+	bioset_exit(ctx->bs);
 fail6:
-	kfree(sc->bs);
+	kfree(ctx->bs);
 fail5:
-	if (sc->page_pool)
-		mempool_destroy(sc->page_pool);
+	if (ctx->page_pool)
+		mempool_destroy(ctx->page_pool);
 fail4:
-	if (sc->copyreq_pool)
-		mempool_destroy(sc->copyreq_pool);
+	if (ctx->copyreq_pool)
+		mempool_destroy(ctx->copyreq_pool);
 fail3:
-	put_page(sc->sb_page);
-	put_page(sc->ckpt_page);
+	put_page(ctx->sb_page);
+	put_page(ctx->ckpt_page);
 fail2:
-	if (sc->sb_page)
-		put_page(sc->sb_page);
-	if (sc->ckpt_page)
-		put_page(sc->ckpt_page);
+	if (ctx->sb_page)
+		put_page(ctx->sb_page);
+	if (ctx->ckpt_page)
+		put_page(ctx->ckpt_page);
 	/* TODO : free extent page
 	 * and segentries page */
 		
-	if (sc->extent_pool)
-		mempool_destroy(sc->extent_pool);
+	if (ctx->extent_pool)
+		mempool_destroy(ctx->extent_pool);
 fail1:
-	dm_put_device(ti, sc->dev);
+	dm_put_device(ti, ctx->dev);
 fail0:
-	kfree(sc);
+	kfree(ctx);
 
 fail:
 	return r;
