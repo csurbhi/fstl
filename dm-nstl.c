@@ -1023,129 +1023,6 @@ static const struct file_operations stl_misc_fops;
  */
 #define BS_NR_POOL_PAGES 128
 
-static ssize_t stl_proc_read(struct file *filp, char *buf, size_t count, loff_t *offp)
-{
-	struct stl_msg m = {.cmd = 0, .flags = 0, .lba = 0, .pba = 0, .len = 0};
-	ssize_t ocount = count;
-	struct extent *e;
-	unsigned long flags;
-	struct list_head *p;
-
-	dump_stack();
-
-	/* reads must be a multiple of the message size */
-	if (count % (sizeof(m)) != 0) {
-		printk(KERN_INFO "invalid read count %ld\n", count);
-		return -EINVAL;
-	}
-
-	switch (_ctx->msg.cmd) {
-		case STL_GET_WF:
-			m.cmd = STL_PUT_WF;
-			spin_lock_irqsave(&_ctx->lock, flags); 
-			m.pba = _ctx->write_frontier;
-			spin_unlock_irqrestore(&_ctx->lock, flags); 
-			if (copy_to_user(buf, &m, sizeof(m)))
-				return -EFAULT;
-			buf += sizeof(m);
-			count -= sizeof(m);
-			break;
-
-		case STL_GET_SEQ:
-			m.cmd = STL_PUT_SEQ;
-			m.lba = _ctx->sequence;
-			if (copy_to_user(buf, &m, sizeof(m)))
-				return -EFAULT;
-			buf += sizeof(m);
-			count -= sizeof(m);
-			break;
-
-		case STL_GET_READS:
-			m.cmd = STL_VAL_READS;
-			m.lba = atomic_read(&_ctx->n_reads);
-			if (copy_to_user(buf, &m, sizeof(m)))
-				return -EFAULT;
-			buf += sizeof(m);
-			count -= sizeof(m);
-			break;
-
-		case STL_GET_SPACE:
-			m.cmd = STL_PUT_SPACE;
-			spin_lock_irqsave(&_ctx->lock, flags); 
-			m.lba = _ctx->free_sectors_in_wf;
-			m.pba = _ctx->nr_freezones;
-			spin_unlock_irqrestore(&_ctx->lock, flags); 
-			if (copy_to_user(buf, &m, sizeof(m)))
-				return -EFAULT;
-			buf += sizeof(m);
-			count -= sizeof(m);
-			break;
-
-		case STL_CMD_DOIT:
-			m.cmd = STL_VAL_COPIED;
-			m.lba = _ctx->sectors_copied;
-			m.pba = _ctx->target;
-			if (copy_to_user(buf, &m, sizeof(m)))
-				return -EFAULT;
-			buf += sizeof(m);
-			count -= sizeof(m);
-			break;
-
-		case STL_GET_EXT:
-			read_lock_irqsave(&_ctx->rb_lock, flags); 
-			e = _stl_rb_geq(&_ctx->rb, _ctx->list_lba);
-			m.cmd = STL_PUT_EXT;
-			while (e != NULL && count > 0) {
-				m.lba = e->lba;
-				m.pba = e->pba;
-				m.len = e->len;
-				_ctx->list_lba = e->lba + e->len;
-				if (copy_to_user(buf, &m, sizeof(m))) {
-					read_unlock_irqrestore(&_ctx->rb_lock, flags);
-					return -EFAULT;
-				}
-				buf += sizeof(m); count -= sizeof(m);
-				e = stl_rb_next(e);
-			}
-			read_unlock_irqrestore(&_ctx->rb_lock, flags); 
-			break;
-
-		case STL_GET_FREEZONE:
-			spin_lock_irqsave(&_ctx->lock, flags);
-			/* TODO: do this for all available freezones
-			 */
-			unsigned long zone_nr = get_next_freezone_nr(_ctx);
-			m.cmd = STL_PUT_FREEZONE;
-			m.lba = zone_start(_ctx, zone_nr);
-			m.pba = zone_end(_ctx, _ctx->write_frontier);
-			if (count <= 0)
-				break;
-			if (copy_to_user(buf, &m, sizeof(m))) {
-				spin_unlock_irqrestore(&_ctx->lock, flags); // this unlock had been forgotten
-				return -EFAULT;
-			}
-			buf += sizeof(m); count -= sizeof(m);
-			spin_unlock_irqrestore(&_ctx->lock, flags);
-			break;
-
-		default:
-			printk(KERN_INFO "invalid cmd: %d\n", _ctx->msg.cmd);
-			return -EINVAL;
-	}
-
-	if (count > 0) {
-		m.cmd = STL_END;
-		if (copy_to_user(buf, &m, sizeof(m)))
-			return -EFAULT;
-		buf += sizeof(m); count -= sizeof(m);
-		_ctx->msg.cmd = STL_NO_OP;
-	}
-
-	return ocount - count;
-}
-
-
-
 static void stl_move_endio(struct bio *bio)
 {
 	int i;
@@ -1323,86 +1200,6 @@ void put_free_zone(struct ctx *ctx, struct stl_msg *m)
 	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
-static ssize_t stl_proc_write(struct file *filp, const char *buf, 
-		size_t count, loff_t *offp)
-{
-	struct stl_msg m;
-	size_t ocount = count;
-	unsigned long flags;
-
-	/* writes must be a multiple of the message size */
-	if (count % (sizeof(m)) != 0) {
-		printk(KERN_INFO "invalid count %ld\n", count);
-		return -EINVAL;
-	}
-
-	while (count > 0) {
-		if (copy_from_user(&m, buf, sizeof(m)))
-			return -EFAULT;
-
-		switch (m.cmd) {
-			case STL_GET_EXT: /* more than 1 before next read will result */
-				_ctx->list_lba = 0;
-			case STL_GET_WF:  /* in the first ones being dropped */
-			case STL_GET_SEQ:
-			case STL_GET_READS:
-			case STL_GET_FREEZONE:
-			case STL_GET_SPACE:
-				_ctx->msg = m;
-				break;
-			case STL_PUT_WF: /* only before startup: no locking */
-				spin_lock_irqsave(&_ctx->lock, flags);
-				_ctx->write_frontier = m.pba;
-				//printk(KERN_INFO "PUT_WF %ld\n", (long)m.pba);
-				_ctx->wf_end = zone_end(_ctx, m.pba);
-				spin_unlock_irqrestore(&_ctx->lock, flags);
-				break;
-			case STL_PUT_EXT:
-				/* maybe validate the data ? */
-				stl_update_range(_ctx, m.lba, m.pba, m.len);
-				break;
-			case STL_PUT_FREEZONE:
-				put_free_zone(_ctx, &m);
-				break;
-			case STL_PUT_SPACE:
-				//printk(KERN_INFO "put_space: %ld (%ld)\n", (long)m.lba, _ctx->free_sectors_in_wf);
-				spin_lock_irqsave(&_ctx->lock, flags);
-				_ctx->free_sectors_in_wf += m.lba;
-				wake_up_all(&_ctx->space_wait);
-				spin_unlock_irqrestore(&_ctx->lock, flags);
-				break;
-			case STL_PUT_TGT:
-				_ctx->target = m.pba;
-				_ctx->target_seq = m.lba;
-				break;
-			case STL_PUT_COPY:
-				stl_add_copy_cmd(_ctx, &m);
-				break;
-			case STL_CMD_DOIT:
-				_ctx->msg = m;
-				stl_do_data_move(_ctx);
-				break;
-			case STL_NO_OP:
-			case STL_END:
-				break;
-			default:
-				printk(KERN_INFO "invalid: %d\n", m.cmd);
-				return -EINVAL;
-		}
-		buf += sizeof(m); count -= sizeof(m);
-	}
-	return ocount;
-}
-
-static int stl_proc_open(struct inode *inode, struct file *file)
-{
-	if (_ctx != NULL)
-		_ctx->list_lba = 0;
-	printk(KERN_INFO "OPEN\n");
-
-	return 0;
-}
-
 static long stl_dev_ioctl(struct file *fp, unsigned int num, unsigned long arg)
 {
 	//printk(KERN_INFO "ioctl %d\n", num);
@@ -1426,9 +1223,6 @@ static long stl_dev_ioctl(struct file *fp, unsigned int num, unsigned long arg)
 
 static const struct file_operations stl_misc_fops = {
 	.owner          = THIS_MODULE,
-	.open           = stl_proc_open,
-	.read           = stl_proc_read,
-	.write          = stl_proc_write,
 	.unlocked_ioctl = stl_dev_ioctl,
 };
 
@@ -1803,6 +1597,7 @@ int read_metadata(struct ctx * ctx)
 	if (sb1->zone_count_main % BITS_IN_BYTE > 0)
 		ctx->bitmap_bytes += 1;
 	read_seg_info_table(ctx);
+	printk(KERN_INFO "\n read segment entries, free bitmap created!");
 	if (ctx->nr_freezones != ckpt->free_segment_count) { 
 		/* TODO: Do some recovery here.
 		 * For now we panic!!
