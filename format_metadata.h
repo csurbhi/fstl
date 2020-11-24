@@ -20,7 +20,7 @@ typedef u64 sector_t;
 
 
 #define STL_SB_MAGIC 0x7853544c
-#define STL_HDR_MAGIC 0x4c545353
+#define STL_CKPT_MAGIC 0x1A2B3C4D
 
 /* Each zone is 256MB in size.
  * there are 65536 blocks in a zone

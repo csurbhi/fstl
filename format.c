@@ -275,21 +275,6 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	return sb;
 }
 
-void prepare_header(struct stl_header *header, unsigned long pba, unsigned long lba)
-{
-	header->magic = STL_HDR_MAGIC;
-	header->nonce = 0;
-	header->crc32 = 0;
-	header->flags = 0;
-	header->len = 0;
-	header->prev_pba = pba; 
-	header->next_pba = pba;
-	header->lba = lba;
-	header->pba = pba;
-	header->seq = 1;
-}
-
-
 __le64 get_lba(unsigned int zonenr, unsigned int blknr)
 {
 	int nrblks = (zonenr * NR_BLKS_PER_ZONE) + blknr;
@@ -337,6 +322,20 @@ void prepare_cur_seg_entry(struct stl_seg_entry *entry)
 }
 
 
+void prepare_prev_seg_entry(struct stl_seg_entry *entry)
+{
+	entry->vblocks = NR_BLKS_PER_ZONE;
+	entry->mtime = 0;
+}
+
+void prepare_ckpt_translation_table(struct stl_ckpt_entry * table)
+{
+	table->prev_zonenr = 0;
+	table->cur_zonenr = 0;
+	table->prev_count = 0;
+	table->cur_count = 0;
+}
+
 void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 {
 	struct stl_ckpt *ckpt;
@@ -347,16 +346,19 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 		exit(-1);
 
 	memset(ckpt, 0, BLK_SZ);
+	ckpt->magic = STL_CKPT_MAGIC;
+	ckpt->elapsed_time = 0;
 	ckpt->checkpoint_ver = 0;
+	ckpt->user_block_count = sb->zone_count_main << (sb->log_zone_size - sb->log_block_size);
 	ckpt->valid_block_count = ckpt->user_block_count;
-	ckpt->rsvd_segment_count = sb->zone_count_reserved;
 	ckpt->free_segment_count = sb->zone_count_main - 1; //1 for the current frontier
 	ckpt->cur_frontier_pba = get_current_frontier(sb);
 	printf("\n checkpoint: cur_frontier_pba: %lld", ckpt->cur_frontier_pba);
-	ckpt->user_block_count = get_user_block_count(sb);
-	ckpt->elapsed_time = 0;
 	prepare_cur_seg_entry(&ckpt->cur_seg_entry);
-	prepare_header(&ckpt->header, ckpt->cur_frontier_pba, 0);
+	prepare_prev_seg_entry(&ckpt->cur_seg_entry);
+	/* the next is not needed as it is writing 0s anyway.
+	prepare_ckpt_translation_table(&ckp->ckpt_translation_table);
+	*/
 	write_to_disk(fd, (char *)ckpt, BLK_SZ, ckpt_pba);
 	free(ckpt);
 }
@@ -382,7 +384,6 @@ void read_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 
 	ret = read(fd, ckpt, BLK_SZ);
 	printf("\n Read checkpoint, ckpt->cur_frontier_pba: %lld", ckpt->cur_frontier_pba);
-	printf("\n Read checkpoint, ckpt->header.pba: %lld", ckpt->header.pba);
 	free(ckpt);
 }
 
