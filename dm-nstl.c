@@ -739,6 +739,24 @@ struct bio *make_trailer(struct ctx *sc, unsigned seq, sector_t here, sector_t p
 }
 
 
+/*
+ * We construct the freebitmap using the
+ * translation table
+ */
+static void construct_freebitmap(struct ctx *ctx)
+{
+
+}
+
+static void construct gc_bitmap(struct ctx *ctx)
+{
+
+}
+
+
+/* 
+ * 1 indicates that the zone is occupied
+ */
 static void mark_zone_free(struct ctx *ctx , int zonenr)
 {
 	char *bitmap = ctx->freezone_bitmap;
@@ -746,11 +764,15 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	int bytenr = zonenr / BITS_IN_BYTE;
 	int bitnr = zonenr % BITS_IN_BYTE;
 
-	if ((bitmap[bytenr] & (1 << bitnr)) == (1 << bitnr)) {
+	if ((bitmap[bytenr] & (1 << bitnr)) == 0) {
+		/* This bit was unset and hence free */
 		panic("\n Trying to free an already free zone! ");
 	}
 
-	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
+	/* The bit was 1 as its in use and hence we xor it with
+	 * one more 1 to unset it
+	 */
+	bitmap[bytenr] = bitmap[bytenr] ^ (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
 }
 
@@ -766,6 +788,7 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 	 * and is not free
 	 */
 	while(bitmap[bytenr] == allOnes) {
+		/* All these zones are occupied */
 		bytenr = bytenr + 1;
 		if (bytenr == ctx->fz_bitmap_bytes) {
 			break;
@@ -779,7 +802,8 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 	/* We have the bytenr from where to return the freezone */
 	bitnr = 0;
 	while (1) {
-		if ((bitmap[bytenr] & (1 << bitnr)) == (1 << bitnr)) {
+		if ((bitmap[bytenr] & (1 << bitnr)) == 0) {
+			/* this bit is free, hence marked 0 */
 			break;
 		}
 		bitnr = bitnr + 1;
@@ -787,7 +811,7 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 			panic ("Wrong byte calculation!");
 		}
 	}
-	return bitnr;
+	return ((bytenr * BITS_IN_BYTE) + bitnr);
 }
 
 /* moves the write frontier, returns the LBA of the packet trailer
@@ -818,10 +842,23 @@ static int get_new_zone(struct ctx *ctx)
 
 
 /*
- * The last entry in a zone should point to the next zone that will
- * be written. When you check for room in zone, we need to check
- * requested nr of sectors plus the size to accomodate the trailer.
- * If there is not enough space, we need to split the bio
+ * We do not write any header or trailer. If the write pointer of the
+ * SMR zone moved forward, then we know that the write was written.
+ * TODO: At mount time, we check the zone write pointer using smr primitives
+ * and that is our last valid write.
+ *
+ * This is the report zones scsi command.
+ *
+ * We write the data first to the zones. We write the LBA
+ * corresponding to the sequential PBAs at checkpoint time.
+ * For a 256MB zone i.e 65536 blocks, we need 128 blocks of 
+ * 4096 bytes if we store only the LBA.
+ * If we store LBA, len, we might need much lesser entries.
+ * Worth checking this too.
+ *
+ * If there is less space in this zone, we need to record the LBAs
+ * but we need to allocate a new zone and record this new zone nr.
+ * A ckpt will atmost hold entries for blocks in 2 zones.
  */
 
 #define SIZEOF_HEADER 4
@@ -831,7 +868,7 @@ static sector_t move_write_frontier(struct ctx *ctx, sector_t sectors_s8, sector
 	sector_t prev; 
 
 	prev = ctx->write_frontier;
-	if (ctx->free_sectors_in_wf < sectors_s8 + SIZEOF_HEADER + SIZEOF_TRAILER) {
+	if (ctx->free_sectors_in_wf < sectors_s8)  {
 		if (ctx->free_sectors_in_wf < SIZEOF_HEADER) {
 		}
 		ctx->write_frontier = get_new_zone(ctx);
@@ -1446,19 +1483,70 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	return ckpt;
 }
 
-void read_extents_from_block(struct ctx * sc, struct extent_entry *entry, unsigned int nr_extents)
+
+int mark_all_zones_free(struct ctx *ctx)
+{
+	char * free_bitmap = (char *)zalloc(ctx->fz_bitmap_bytes);
+	if (!free_bitmap)
+		return -1;
+
+}
+
+/* 
+ * 1 indicates the zone is occupied 
+ */
+
+static void mark_zone_occupied(struct ctx *ctx , int zonenr)
+{
+	char *bitmap = ctx->freezone_bitmap;
+	int nr_freezones = ctx->nr_freezones;
+	int bytenr = zonenr / BITS_IN_BYTE;
+	int bitnr = zonenr % BITS_IN_BYTE;
+
+	if (bytenr < ctx->fz_bitmap_bytes)
+		panic("\n Trying to set an invalid bit in the free zone bitmap. bytenr > fz_bitmap_bytes");
+
+	if ((bitmap[bytenr] & (1 << bitnr)) == (1 << bitnr)) {
+		/* This function can be called multiple times for the
+		 * same zone
+		 */
+		return;
+	}
+
+	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
+	ctx->nr_freezones = ctx->nr_freezones + 1;
+}
+
+
+
+int read_extents_from_block(struct ctx * ctx, struct extent_entry *entry, unsigned int nr_extents)
 {
 	int i = 0;
+	int ret;
+	unsigned long zonenr = 0;
+
+	//ret = mark_all_zones_free(ctx);
+	if (ret < 0)
+		return ret;
 	
 	while (i <= nr_extents) {
 		/* If there are no more recorded entries on disk, then
 		 * dont add an entries further
 		 */
-		if ((entry->lba == 0) && (entry->len == 0))
-			break;
+		if ((entry->lba == 0) && (entry->len == 0)) {
+			i++;
+			continue;
+			
+		}
 		/* TODO: right now everything should be zeroed out */
 		panic("Why are there any already mapped extents?");
-		stl_update_range(sc, entry->lba, entry->pba, entry->len);
+		stl_update_range(ctx, entry->lba, entry->pba, entry->len);
+		zonenr = get_zone(ctx, entry->pba);
+		/* at the end of marking all such zones in use, we
+		 * will find out zones that are not in use.
+		 * That is our free zone bitmap
+		 */
+	       	//mark_zone_occupied(zonenr);
 		entry = entry + sizeof(struct extent_entry);
 		i++;
 	}
@@ -1533,8 +1621,6 @@ int read_seg_entries_from_block(struct ctx *sc, struct stl_seg_entry *entry, uns
 {
 	int i = 0;
 	struct stl_sb *sb;
-	struct free_zone *fz;
-	struct gc_candidate *gc;
 	unsigned long flags;
 	unsigned int nr_blks_in_zone;
        
@@ -1553,12 +1639,7 @@ int read_seg_entries_from_block(struct ctx *sc, struct stl_seg_entry *entry, uns
 				release_gc_list(sc);
 				return -ENOMEM;
 			}
-
-			fz->start = get_zone_pba(sb, *segnr);
-			fz->end = get_zone_end(sb, fz->start);
-			spin_lock_irqsave(&sc->lock, flags);
-			//list_add_tail(&fz->list, &sc->free_zones);
-			spin_unlock_irqrestore(&sc->lock, flags);
+			mark_zone_free(ctx, *segnr);
 			sc->nr_freezones++;
 			continue;
 		}
@@ -1569,12 +1650,7 @@ int read_seg_entries_from_block(struct ctx *sc, struct stl_seg_entry *entry, uns
 				release_gc_list(sc);
 				return -ENOMEM;
 			}
-			gc->segment_nr = *segnr;
-			gc->valid_blocks = entry->vblocks;
-			gc->mtime = entry->mtime;
-			spin_lock_irqsave(&sc->lock, flags);
-			list_add_tail(&gc->list, &sc->gc_candidates);
-			spin_unlock_irqrestore(&sc->lock, flags);
+			mark_zone_gc_candidate(ctx, *segnr);
 			sc->n_gc_candidates++;
 			continue;
 		}
