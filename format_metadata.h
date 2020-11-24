@@ -75,24 +75,43 @@ struct stl_header {
 	uint64_t seq;
 } __attribute__((packed));
 
-/* Type of segments could be
- * Read Hot, Read Warm
- * Write Hot, Write Warm.
- * Read-Write Cold
+
+
+/* In the worst case, we spend 80 bytes per block. There are 65536
+ * such blocks. So we need 65536 such entries */
+struct stl_ckpt_extent {
+	__le64 lba;
+	__le16 len; /* At a maximum there are 65536 blocks in a zone */
+}__attribute__((packed));
+
+
+#define NR_EXT_ENTRIES_PER_BLK 		BLK_SIZE/sizeof(struct stl_ckp_extent)
+
+/* We flush after every 655536 block writes or when the timer goes
+ * off. prev_zonenr may not be recorded, in case we are recording the
+ * mapping for the current zone alone. In that case prev_count will be
+ * 0 as there are 0 entries recorded for previous zone
  */
+struct stl_ckpt_entry {
+	__le64 prev_zonenr;
+	__le64 cur_zonenr;
+	__le16 prev_count;
+	__le16 cur_count;
+	struct stl_ckpt_extent extents[0];
+}__attribute__((packed));
+
 
 struct stl_ckpt {
+	uint32_t magic;
+	__le64 elapsed_time;
 	__le64 checkpoint_ver;
 	__le64 user_block_count;
 	__le64 valid_block_count;
-	__le32 rsvd_segment_count;
 	__le32 free_segment_count;
-	__le32 blk_nr; 		/* write at this blk nr */
 	__le64 cur_frontier_pba;
-	__le64 elapsed_time;
+	struct stl_seg_entry prev_seg_entry;
 	struct stl_seg_entry cur_seg_entry;
-	struct stl_header header;
-	char reserved[0];
+	struct stl_ckpt_entry ckpt_translation_table;
 } __attribute__((packed));
 
 
@@ -123,14 +142,18 @@ struct stl_sb {
 	__u8 reserved[0];		/* valid reserved region. Rest of the block space */
 } __attribute__((packed));
 
-
+/*
+ *
+ * In theory we do not need to store the LBA on the disk.
+ * We can calculate the LBA, depending on the location of the
+ * sequential entry on the disk. However, we do need to store
+ * this in memory. For now, not optimizing on disk structure.
+ */
 struct extent_map {
 	__le64 lba;
 	__le64 pba;
 	__le32 len;
 } __attribute__((packed));
-
-
 
 
 

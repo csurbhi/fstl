@@ -738,24 +738,8 @@ struct bio *make_trailer(struct ctx *sc, unsigned seq, sector_t here, sector_t p
 	return bio;
 }
 
-
-/*
- * We construct the freebitmap using the
- * translation table
- */
-static void construct_freebitmap(struct ctx *ctx)
-{
-
-}
-
-static void construct gc_bitmap(struct ctx *ctx)
-{
-
-}
-
-
 /* 
- * 1 indicates that the zone is occupied
+ * 1 indicates that the zone is free 
  */
 static void mark_zone_free(struct ctx *ctx , int zonenr)
 {
@@ -764,16 +748,35 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	int bytenr = zonenr / BITS_IN_BYTE;
 	int bitnr = zonenr % BITS_IN_BYTE;
 
-	if ((bitmap[bytenr] & (1 << bitnr)) == 0) {
-		/* This bit was unset and hence free */
+	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
+		/* This bit was 1 and hence already free*/
 		panic("\n Trying to free an already free zone! ");
 	}
 
-	/* The bit was 1 as its in use and hence we xor it with
+	/* The bit was 0 as its in use and hence we xor it with
 	 * one more 1 to unset it
 	 */
-	bitmap[bytenr] = bitmap[bytenr] ^ (1 << bitnr);
+	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
+}
+
+static void mark_zone_gc_candidate(struct ctx *ctx , int zonenr)
+{
+	char *bitmap = ctx->gc_zone_bitmap;
+	int nr_gc_zones = ctx->nr_gc_zones;
+	int bytenr = zonenr / BITS_IN_BYTE;
+	int bitnr = zonenr % BITS_IN_BYTE;
+
+	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
+		/* This bit was 1 and hence already free*/
+		panic("\n Trying to free an already free zone! ");
+	}
+
+	/* The bit was 0 as its in use and hence we xor it with
+	 * one more 1 to unset it
+	 */
+	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
+	ctx->nr_gc_zones = ctx->nr_freezones + 1;
 }
 
 static u64 get_next_freezone_nr(struct ctx *ctx)
@@ -782,28 +785,27 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 	int nr_freezones = ctx->nr_freezones;
 	int bytenr = 0;
 	int bitnr = 0;
-	unsigned char allOnes = (char) ~0;
+	unsigned char allZeroes = 0;
 
-	/* 1 indicates that a zone is occupied
-	 * and is not free
+	/* 1 indicates that a zone is free. 
 	 */
-	while(bitmap[bytenr] == allOnes) {
+	while(bitmap[bytenr] == allZeroes) {
 		/* All these zones are occupied */
 		bytenr = bytenr + 1;
-		if (bytenr == ctx->fz_bitmap_bytes) {
+		if (bytenr == ctx->bitmap_bytes) {
 			break;
 		}
 	}
 	
-	if (bytenr == ctx->fz_bitmap_bytes) {
+	if (bytenr == ctx->bitmap_bytes) {
 		/* no freezones available */
 		return -1;
 	}
 	/* We have the bytenr from where to return the freezone */
 	bitnr = 0;
 	while (1) {
-		if ((bitmap[bytenr] & (1 << bitnr)) == 0) {
-			/* this bit is free, hence marked 0 */
+		if ((bitmap[bytenr] & (1 << bitnr)) == (1 << bitnr)) {
+			/* this bit is free, hence marked 1 */
 			break;
 		}
 		bitnr = bitnr + 1;
@@ -1441,7 +1443,6 @@ struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 		return NULL;
 	struct stl_ckpt *ckpt = (struct stl_ckpt *)bh->b_data;
 	printk(KERN_INFO "\n ** pba: %lu, ckpt->cur_frontier_pba: %lld", pba, ckpt->cur_frontier_pba);
-	printk(KERN_INFO "\n ckpt->header.pba: %lld", ckpt->header.pba);
 	ctx->ckpt_page = bh->b_page;
 	return ckpt;
 }
@@ -1483,17 +1484,8 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	return ckpt;
 }
 
-
-int mark_all_zones_free(struct ctx *ctx)
-{
-	char * free_bitmap = (char *)zalloc(ctx->fz_bitmap_bytes);
-	if (!free_bitmap)
-		return -1;
-
-}
-
 /* 
- * 1 indicates the zone is occupied 
+ * 1 indicates the zone is free 
  */
 
 static void mark_zone_occupied(struct ctx *ctx , int zonenr)
@@ -1503,17 +1495,19 @@ static void mark_zone_occupied(struct ctx *ctx , int zonenr)
 	int bytenr = zonenr / BITS_IN_BYTE;
 	int bitnr = zonenr % BITS_IN_BYTE;
 
-	if (bytenr < ctx->fz_bitmap_bytes)
-		panic("\n Trying to set an invalid bit in the free zone bitmap. bytenr > fz_bitmap_bytes");
+	if (bytenr < ctx->bitmap_bytes)
+		panic("\n Trying to set an invalid bit in the free zone bitmap. bytenr > bitmap_bytes");
 
-	if ((bitmap[bytenr] & (1 << bitnr)) == (1 << bitnr)) {
+	if ((bitmap[bytenr] & (1 << bitnr)) == 0) {
 		/* This function can be called multiple times for the
-		 * same zone
+		 * same zone. The bit is already unset and the zone 
+		 * is marked occupied already.
 		 */
 		return;
 	}
-
-	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
+	/* This bit is set and the zone is free. We want to unset it
+	 */
+	bitmap[bytenr] = bitmap[bytenr] ^ (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
 }
 
@@ -1525,7 +1519,6 @@ int read_extents_from_block(struct ctx * ctx, struct extent_entry *entry, unsign
 	int ret;
 	unsigned long zonenr = 0;
 
-	//ret = mark_all_zones_free(ctx);
 	if (ret < 0)
 		return ret;
 	
@@ -1541,12 +1534,7 @@ int read_extents_from_block(struct ctx * ctx, struct extent_entry *entry, unsign
 		/* TODO: right now everything should be zeroed out */
 		panic("Why are there any already mapped extents?");
 		stl_update_range(ctx, entry->lba, entry->pba, entry->len);
-		zonenr = get_zone(ctx, entry->pba);
-		/* at the end of marking all such zones in use, we
-		 * will find out zones that are not in use.
-		 * That is our free zone bitmap
-		 */
-	       	//mark_zone_occupied(zonenr);
+		zonenr = get_zone_nr(ctx, entry->pba);
 		entry = entry + sizeof(struct extent_entry);
 		i++;
 	}
@@ -1613,45 +1601,56 @@ sector_t get_zone_end(struct stl_sb *sb, sector_t pba_start)
 }
 
 
+int allocate_freebitmap(struct ctx *ctx)
+{
+	char * free_bitmap = (char *)kzalloc(ctx->bitmap_bytes, GFP_KERNEL);
+	if (!free_bitmap)
+		return -1;
+
+	ctx->freezone_bitmap = free_bitmap;
+	return 0;
+}
+
+int allocate_gc_zone_bitmap(struct ctx *ctx)
+{
+	char * gc_zone_bitmap = (char *)kzalloc(ctx->bitmap_bytes, GFP_KERNEL);
+	if (!gc_zone_bitmap)
+		return -1;
+
+	ctx->gc_zone_bitmap = gc_zone_bitmap;
+	return 0;
+}
+
+
+
+
 /* TODO: create a freezone cache
  * create a gc zone cache
  * currently calling kzalloc
  */
-int read_seg_entries_from_block(struct ctx *sc, struct stl_seg_entry *entry, unsigned int nr_seg_entries, unsigned int *segnr)
+int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, unsigned int nr_seg_entries, unsigned int *segnr)
 {
 	int i = 0;
 	struct stl_sb *sb;
 	unsigned long flags;
 	unsigned int nr_blks_in_zone;
        
-	if (!sc)
+	if (!ctx)
 		return -1;
 
-	sb = sc->sb;
+	sb = ctx->sb;
 
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
 
 	while (i <= nr_seg_entries) {
 		if (entry->vblocks == 0) {
-			fz = kzalloc(sizeof(struct free_zone), GFP_KERNEL);
-			if (fz == NULL) {
-				release_free_zone_list(sc);
-				release_gc_list(sc);
-				return -ENOMEM;
-			}
 			mark_zone_free(ctx, *segnr);
-			sc->nr_freezones++;
+			ctx->nr_freezones++;
 			continue;
 		}
 		if (entry->vblocks < nr_blks_in_zone) {
-			gc = kzalloc(sizeof(struct gc_candidate), GFP_KERNEL);
-			if (NULL == gc) {
-				release_free_zone_list(sc);
-				release_gc_list(sc);
-				return -ENOMEM;
-			}
 			mark_zone_gc_candidate(ctx, *segnr);
-			sc->n_gc_candidates++;
+			ctx->nr_gc_zones++;
 			continue;
 		}
 		entry = entry + sizeof(struct stl_seg_entry);
@@ -1670,14 +1669,14 @@ int read_seg_entries_from_block(struct ctx *sc, struct stl_seg_entry *entry, uns
  *
  * TODO: replace sc with ctx in the entire file
  */
-int read_seg_info_table(struct ctx *sc)
+int read_seg_info_table(struct ctx *ctx)
 {
 	unsigned long pba;
 	unsigned int nrblks = 0;
 	struct block_device *bdev;
 	struct buffer_head *bh = NULL;
 	int nr_seg_entries_blk = BLK_SZ / sizeof(struct stl_seg_entry);
-	int i = 0;
+	int i = 0, ret=0;
 	struct stl_seg_entry *entry0;
 	unsigned int blknr;
 	unsigned int zonenr = 0;
@@ -1686,24 +1685,36 @@ int read_seg_info_table(struct ctx *sc)
 	unsigned long nr_data_zones = sb->zone_count_main; /* these are the number of segment entries to read */
 	unsigned long nr_seg_entries_read = 0;
        
-	if (!sc)
+	if (!ctx)
 		return -1;
 
-	bdev = sc->dev->bdev;
-	pba = sc->sb->sit_pba;
+	ret = allocate_freebitmap(ctx);
+	if (0 > ret)
+		return ret;
+	ret = allocate_gc_zone_bitmap(ctx);
+	if (0 > ret) {
+		kfree(ctx->freezone_bitmap);
+		return ret;
+	}
+
+	bdev = ctx->dev->bdev;
+	pba = ctx->sb->sit_pba;
 	blknr = pba/NR_SECTORS_PER_BLK;
-	nrblks = sc->sb->blk_count_sit;
+	nrblks = ctx->sb->blk_count_sit;
 
 	while (i < nrblks) {
 		bh = __bread(bdev, blknr, BLK_SZ);
-		if (!bh)
+		if (!bh) {
+			kfree(ctx->freezone_bitmap);
+			kfree(ctx->gc_zone_bitmap);
 			return -1;
+		}
 		entry0 = (struct stl_seg_entry *) bh->b_data;
 		if (nr_data_zones > nr_seg_entries_blk)
 			nr_seg_entries_read = nr_seg_entries_blk;
 		else
 			nr_seg_entries_read = nr_data_zones;
-		//read_seg_entries_from_block(sc, entry0, nr_seg_entries_read, &zonenr);
+		read_seg_entries_from_block(ctx, entry0, nr_seg_entries_read, &zonenr);
 		nr_data_zones = nr_data_zones - nr_seg_entries_read;
 		i = i + 1;
 		blknr = blknr + 1;
@@ -1788,9 +1799,9 @@ int read_metadata(struct ctx * ctx)
 
 	INIT_LIST_HEAD(&ctx->gc_candidates);
 	ctx->nr_freezones = 0;
-	ctx->fz_bitmap_bytes = ckpt->user_block_count /BITS_IN_BYTE;
-	if (ckpt->user_block_count % BITS_IN_BYTE > 0)
-		ctx->fz_bitmap_bytes += 1;
+	ctx->bitmap_bytes = sb1->zone_count_main /BITS_IN_BYTE;
+	if (sb1->zone_count_main % BITS_IN_BYTE > 0)
+		ctx->bitmap_bytes += 1;
 	read_seg_info_table(ctx);
 	if (ctx->nr_freezones != ckpt->free_segment_count) { 
 		/* TODO: Do some recovery here.

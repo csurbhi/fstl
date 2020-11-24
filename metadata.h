@@ -261,7 +261,9 @@ struct ctx {
 	struct stl_ckpt *ckpt;
 	char *freezone_bitmap;
 	int 	nr_freezones;
-	int	fz_bitmap_bytes;
+	char *gc_zone_bitmap;
+	int nr_gc_zones;
+	int	bitmap_bytes;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 
