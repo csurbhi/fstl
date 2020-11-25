@@ -85,6 +85,7 @@ struct stl_ckpt_extent {
 }__attribute__((packed));
 
 
+#define BLK_SIZE			4096
 #define NR_EXT_ENTRIES_PER_BLK 		BLK_SIZE/sizeof(struct stl_ckp_extent)
 
 /* We flush after every 655536 block writes or when the timer goes
@@ -93,8 +94,8 @@ struct stl_ckpt_extent {
  * 0 as there are 0 entries recorded for previous zone
  */
 struct stl_ckpt_entry {
-	__le64 prev_zonenr;
-	__le64 cur_zonenr;
+	__le64 prev_zone_pba; /* This may not begin at 0th block in this zone */
+	__le64 cur_zone_pba;
 	__le16 prev_count;
 	__le16 cur_count;
 	struct stl_ckpt_extent extents[0];
@@ -103,7 +104,6 @@ struct stl_ckpt_entry {
 
 struct stl_ckpt {
 	uint32_t magic;
-	__le64 elapsed_time;
 	__le64 checkpoint_ver;
 	__le64 user_block_count;
 	__le64 valid_block_count;

@@ -790,24 +790,23 @@ static int get_new_zone(struct ctx *ctx)
  * The later one belong to the current wf
  */
 
-static void add_ckpt_new_wf(ctx, wf)
+static void add_ckpt_new_wf(struct ctx * ctx, sector_t wf)
 {
-	struct stl_ckpt_entry * table = ctx->ckpt->ckpt_translation_table;
-	table->prev_zone_nr = table->cur_zone_nr;
+	struct stl_ckpt_entry * table = &ctx->ckpt->ckpt_translation_table;
+	table->prev_zone_pba = table->cur_zone_pba;
 	table->prev_count = table->cur_count;
-	table->cur_zone_nr = get_zone_nr(wf);
+	table->cur_zone_pba = wf;
 	table->cur_count = 0;
 }
 
 static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 {
-	sector_t prev; 
+	sector_t wf = ctx->write_frontier;
 
-	prev = ctx->write_frontier;
 	if (ctx->free_sectors_in_wf < sectors_s8) {
 		panic("Wrong manipulation of wf; used unavailable sectors in a log");
 	}
-	if (ctx->free_sectors_in_wf < sectors_s8 + 1)  {
+	if (ctx->free_sectors_in_wf < sectors_s8 + 1) {
 		ctx->write_frontier = get_new_zone(ctx);
 		add_ckpt_new_wf(ctx, wf);
 		if (ctx->write_frontier < 0) {
@@ -819,14 +818,15 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 
 /* We store only the LBA. We can calculate the PBA from the wf
  */
-static void add_ckpt_mapping(ctx, sector, wf, sector, s8)
+static void add_ckpt_mapping(struct ctx * ctx, sector_t lba, unsigned int nrsectors)
 {
-	struct stl_ckpt_entry * table = ctx->ckpt->ckpt_translation_table;
+	struct stl_ckpt_entry * table = &ctx->ckpt->ckpt_translation_table;
 	table->cur_count += 1;
 	unsigned int index = table->cur_count + table->prev_count;
 
-	table->extents[lba] = sector;
-	table->extents[index].len = s8;
+	table->extents[index].lba = lba;
+	/* we store the length in terms of blocks */
+	table->extents[index].len = nrsectors/NR_SECTORS_IN_BLK;
 	return;
 }
 
@@ -903,8 +903,9 @@ again:
 		e = stl_update_range(ctx, sector, wf, nr_sectors);
 		split->bi_iter.bi_sector = wf;
 		_pba = wf;
-		add_ckpt_mapping(ctx, sector, wf, s8);
-		wf = move_write_frontier(ctx, s8);
+		add_ckpt_mapping(ctx, sector, s8);
+		move_write_frontier(ctx, s8);
+		wf = ctx->write_frontier;
 		/* Add this mapping the ckpt region */
 		//printk(KERN_ERR "\n split!=bio");
 	} while (split != bio);
@@ -1009,10 +1010,10 @@ struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 static void reset_ckpt(struct stl_ckpt * ckpt)
 {
 	ckpt->checkpoint_ver += 1;
-	ckpt->ckpt_translation_table->prev_zone_pba = 0;
-	ckpt->ckpt_translation_table->prev_count = 0;
-	ckpt->ckpt_translation_table->cur_zone_pba = 0;
-	ckpt->ckpt_translation_table->cur_count = 0;
+	ckpt->ckpt_translation_table.prev_zone_pba = 0;
+	ckpt->ckpt_translation_table.prev_count = 0;
+	ckpt->ckpt_translation_table.cur_zone_pba = 0;
+	ckpt->ckpt_translation_table.cur_count = 0;
 	/* We do not need to reset the LBA addresses
 	 * as we only read upto prev_count + cur_count
 	 * addresses and these should be overwritten

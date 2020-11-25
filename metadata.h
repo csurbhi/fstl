@@ -17,6 +17,8 @@
 #define STL_HDR_MAGIC 0x4c545353
 #define NR_SECTORS_IN_BLK 8
 #define BITS_IN_BYTE 8
+#define LOG_SECTOR_SIZE 9
+static atomic_t c1, c2, c3, c4, c5;
 
 struct zone_summary_info {
 	sector_t table_lba;	/* start block address of SIT area */
