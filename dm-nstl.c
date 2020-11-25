@@ -1349,6 +1349,8 @@ int read_metadata(struct ctx * ctx)
 		printk(KERN_ERR "\n read_superblock failed! cannot read the metadata ");
 		return -1;
 	}
+
+	printk(KERN_INFO "\n superblock read!");
 	/*
 	 * we need to verify that sb1 is uptodate.
 	 * Right now we do nothing. we assume
@@ -1374,7 +1376,7 @@ int read_metadata(struct ctx * ctx)
 		return ret;
 	}
 
-	INIT_LIST_HEAD(&ctx->gc_candidates);
+	printk(KERN_INFO "\n checkpoint read!");
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb1->zone_count_main /BITS_IN_BYTE;
 	if (sb1->zone_count_main % BITS_IN_BYTE > 0)
@@ -1467,7 +1469,6 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	init_completion(&ctx->move_done);
 	init_waitqueue_head(&ctx->space_wait);
 
-	INIT_LIST_HEAD(&ctx->copyreqs);
 	atomic_set(&ctx->io_count, 0);
 	atomic_set(&ctx->n_reads, 0);
 	atomic_set(&ctx->pages_alloced, 0);

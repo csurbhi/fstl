@@ -222,7 +222,6 @@ struct ctx {
 	sector_t          previous;	  /* protected by lock */
 	unsigned          sequence;
 	sector_t          free_sectors_in_wf;  /* Indicates the free sectors in the current write frontier */
-	struct list_head  gc_candidates;
 	int		  n_gc_candidates;
 
 	struct rb_root    rb;	          /* map RB tree */
@@ -239,7 +238,6 @@ struct ctx {
 	struct dm_dev    *dev;
 
 	struct stl_msg    msg;
-	sector_t          list_lba;	/* needed for external gc */
 
 	wait_queue_head_t cleaning_wait; /* now we do not need this as we will use a lock to coordinate GC and writes */
 	wait_queue_head_t space_wait; /* same comment as above */
@@ -250,7 +248,6 @@ struct ctx {
 	sector_t          target;	/* in our case now points to the segment getting GCed */
 	unsigned long     target_seq;   /* Figure out what this is */
 	unsigned          sectors_copied;
-	struct list_head  copyreqs;
 	atomic_t          pages_alloced;
 
 	char              nodename[32];
