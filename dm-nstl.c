@@ -653,91 +653,6 @@ fail0:
 	return NULL;
 }
 
-void inline prepare_header(struct stl_header *h)
-{
-	h->magic = STL_HDR_MAGIC;
-	h->nonce = 0;
-	h->crc32 = 0;
-	h->flags = 0;
-}
-
-
-/* create a bio for a journal header (if len=0) or trailer (if len>0).
-*/
-struct bio *make_header(struct ctx *sc, unsigned seq, sector_t here, sector_t prev,
-		unsigned sectors, sector_t lba, sector_t pba, unsigned len)
-{
-	struct page *page = NULL;
-	struct bio *bio = stl_alloc_bio(sc, 4, &page);
-	struct stl_header *h = NULL;
-	sector_t next = here + 4 + sectors;
-
-	printk(KERN_ERR "\n entering make_header");
-
-	if (bio == NULL) {
-		printk(KERN_ERR "\n failed at stl_alloc_bio, perhaps this is a low memory issue");
-		return NULL;
-	}
-
-	if (page == NULL) {
-		printk(KERN_ERR "\n failed to get a page for the bio ");
-		return NULL;
-	}
-
-	/* min space for an extent at the end of a zone is 8K - wrap if less.
-	*/
-//	if (sc->nr_lbas_in_zone - (next % sc->nr_lbas_in_zone) < 16) {
-//		next = next + 16;
-//		next = next - (next % sc->nr_lbas_in_zone);
-//	}
-
-	h = page_address(page);
-	prepare_header(h);
-	h->prev_pba = prev;
-	h->next_pba = next;
-	h->lba = lba;
-	h->pba = pba;
-	h->len = 0;
-	h->seq = seq;
-	get_random_bytes(&h->nonce, sizeof(h->nonce));
-	h->crc32 = crc32_le(0, (u8 *)h, STL_HDR_SIZE);
-	bio_add_page(bio, page, STL_HDR_SIZE, 0);
-	setup_bio(bio, stl_endio, sc->dev->bdev, here, sc, WRITE);
-	printk(KERN_ERR "\n returning from make_header");
-	return bio;
-}
-
-
-struct bio *make_trailer(struct ctx *sc, unsigned seq, sector_t here, sector_t prev,
-		unsigned sectors, sector_t lba, sector_t pba, unsigned len, sector_t next_head)
-{
-	struct page *page;
-	struct bio *bio = stl_alloc_bio(sc, 4, &page);
-	struct stl_header *h = NULL;
-//	sector_t next = here + 4;
-
-	if (bio == NULL)
-		return NULL;
-
-	/* min space for an extent at the end of a zone is 8K - wrap if less.
-	 *          */
-//	if (sc->nr_lbas_in_zone - (next % sc->nr_lbas_in_zone) < 16) {
-//		next = next + 16;
-//		next = next - (next % sc->nr_lbas_in_zone);
-//	}
-
-	h = page_address(page);
-	*h = (struct stl_header){.magic = STL_HDR_MAGIC, .nonce = 0, .crc32 = 0, .flags = 0,
-		.prev_pba = prev, .next_pba = next_head/*here+4+sectors*/, .lba = lba,
-		.pba = pba, .len = len, .seq = seq};
-	get_random_bytes(&h->nonce, sizeof(h->nonce));
-	h->crc32 = crc32_le(0, (u8 *)h, STL_HDR_SIZE);
-	bio_add_page(bio, page, STL_HDR_SIZE, 0);
-	setup_bio(bio, stl_endio, sc->dev->bdev, here, sc, WRITE);
-
-	return bio;
-}
-
 /* 
  * 1 indicates that the zone is free 
  */
@@ -865,34 +780,62 @@ static int get_new_zone(struct ctx *ctx)
 
 #define SIZEOF_HEADER 4
 #define SIZEOF_TRAILER 4
-static sector_t move_write_frontier(struct ctx *ctx, sector_t sectors_s8, sector_t* next_header)
+
+/* When we take a checkpoint
+ * we need to reset the prev_zone_nr to 0
+ * and the cur_zone_nr to 0
+ *
+ * The first prev_count entries in the table
+ * belong to the previous wf.
+ * The later one belong to the current wf
+ */
+
+static void add_ckpt_new_wf(ctx, wf)
+{
+	struct stl_ckpt_entry * table = ctx->ckpt->ckpt_translation_table;
+	table->prev_zone_nr = table->cur_zone_nr;
+	table->prev_count = table->cur_count;
+	table->cur_zone_nr = get_zone_nr(wf);
+	table->cur_count = 0;
+}
+
+static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 {
 	sector_t prev; 
 
 	prev = ctx->write_frontier;
-	if (ctx->free_sectors_in_wf < sectors_s8)  {
-		if (ctx->free_sectors_in_wf < SIZEOF_HEADER) {
-		}
+	if (ctx->free_sectors_in_wf < sectors_s8) {
+		panic("Wrong manipulation of wf; used unavailable sectors in a log");
+	}
+	if (ctx->free_sectors_in_wf < sectors_s8 + 1)  {
 		ctx->write_frontier = get_new_zone(ctx);
+		add_ckpt_new_wf(ctx, wf);
 		if (ctx->write_frontier < 0) {
 			printk(KERN_INFO "No more disk space available for writing!");
 			return -1;
 		}
 	}
-	ctx->write_frontier += sectors_s8;
-	ctx->free_sectors_in_wf -= (sectors_s8);
-	*next_header = ctx->write_frontier;
-	return prev;
 }
 
-static atomic_t c1, c2, c3, c4, c5;
+/* We store only the LBA. We can calculate the PBA from the wf
+ */
+static void add_ckpt_mapping(ctx, sector, wf, sector, s8)
+{
+	struct stl_ckpt_entry * table = ctx->ckpt->ckpt_translation_table;
+	table->cur_count += 1;
+	unsigned int index = table->cur_count + table->prev_count;
+
+	table->extents[lba] = sector;
+	table->extents[index].len = s8;
+	return;
+}
 
 /* split a write into one or more journalled packets
 */
 static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 {
 	struct bio *split = NULL, *pad = NULL;
-	struct bio *bios[40];
+	struct bio *bios[100];
 	int i;
 	volatile int nbios = 0;
 	unsigned long flags, t1, t2;
@@ -911,38 +854,24 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 		volatile sector_t _pba, wf, prev;
 
 		WARN_ON(nbios >= 40);
-
-		//sectors = bio_sectors(bio);
-		//8 sectors form a BLOCK of 4096
-		s8 = round_up(nr_sectors, 8);
+		/* 8 sectors (s8) forms a nr of BLOCKs of 4096 bytes */
+		nr_sectors = bio_sectors(bio);
+		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+		/* Next we fetch the LBA that our DM got */
 		sector = bio->bi_iter.bi_sector;
 
 		spin_lock_irqsave(&ctx->lock, flags);
+		/*-------------------------------*/
 		wf = ctx->write_frontier;
 
-		if (s8 + 8 > room_in_zone(ctx, wf)){
-			s8 = nr_sectors = round_down(room_in_zone(ctx, wf) - 8, 8);
-		}
-
-		seq = ctx->sequence++;
-		prev = ctx->previous;
-		ctx->previous = move_write_frontier(ctx, s8+8, &next_header);
-		if (ctx->previous == -1) {
-			printk(KERN_ERR "\n failed at move_write_frontier!");
-		       goto fail;	
-		}
+		if (s8 > room_in_zone(ctx, wf)){
+			s8 = round_down(room_in_zone(ctx, wf), NR_SECTORS_IN_BLK);
+			nr_sectors = s8;
+		} /* else we need to add a pad to rounded up value (nr_sectors < s8) */
+		/*-------------------------------*/
 		spin_unlock_irqrestore(&ctx->lock, flags);
-
 		printk(KERN_ERR "\n nbios: %d", nbios);
-
-		if (!(bios[nbios++] = make_header(ctx, seq, wf, prev, s8, 0, 0, 0))){
-			printk(KERN_ERR "\n failed at make_header!, bios: %d", nbios);
-			goto fail;
-		}
-		prev = wf;
-		wf += 4;
-
-		if (nr_sectors < bio_sectors(bio)) {
+		if (s8 < bio_sectors(bio)) {
 			if (!(split = bio_split(bio, nr_sectors, GFP_NOIO, ctx->bs))){
 				printk(KERN_ERR "\n failed at bio_split! nbios: %d", nbios);
 				goto fail;
@@ -953,38 +882,31 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 			bios[nbios++] = bio;
 			split = bio;
 		}
-
-		/* if we try to touch an extent that is being cleaned,
-		 * stl_update_range will return that extent, and we can
-		 * wait and try again.
-		 */
 again:
-		e = stl_update_range(ctx, sector, wf, nr_sectors);
-		split->bi_iter.bi_sector = wf;
-		_pba = wf;
-		wf += nr_sectors;
-
 		/* pad length is in sectors (like arg to alloc_bio)
 		*/
-		if (nr_sectors != s8) {
-			int padlen = 8 - (bio->bi_iter.bi_size & ~PAGE_MASK)/512;
+		if (nr_sectors < s8) {
+			/* we are here when we did not split */
+			int padlen = s8 - nr_sectors;
 			if (!(pad = stl_alloc_bio(ctx, padlen, NULL))){
 				printk(KERN_ERR "\n failed at stl_alloc_bio, padlen: %d!", padlen);
 				goto fail;
 			}
-			setup_bio(pad, stl_endio, ctx->dev->bdev, wf, ctx, WRITE);
+			setup_bio(pad, stl_endio, ctx->dev->bdev, wf+nr_sectors, ctx, WRITE);
 			wf += padlen;
 			bios[nbios++] = pad;
 		}
-		
-		if (!(bios[nbios++] = make_trailer(ctx, seq, wf, prev, 0, sector, _pba, nr_sectors, next_header))){
-			printk(KERN_ERR "\n failed at make_trailer! at nbios: %d", nbios);
-			goto fail;
 
-		}
-		wf += 4;
+		/*Update the translation table with the LBA:sector and
+		 * our new PBA: wf
+		 */
+		e = stl_update_range(ctx, sector, wf, nr_sectors);
+		split->bi_iter.bi_sector = wf;
+		_pba = wf;
+		add_ckpt_mapping(ctx, sector, wf, s8);
+		wf = move_write_frontier(ctx, s8);
+		/* Add this mapping the ckpt region */
 		//printk(KERN_ERR "\n split!=bio");
-
 	} while (split != bio);
 
 	for (i = 0; i < nbios; i++) {
@@ -1003,13 +925,6 @@ fail:
 	atomic_inc(&c5);
 }
 
-
-
-
-
-
-
-static struct ctx *_ctx;
 static const struct file_operations stl_misc_fops;
 
 /*
@@ -1018,9 +933,6 @@ static const struct file_operations stl_misc_fops;
    argv[2] = zone size (LBAs)
    argv[3] = max pba
    */
-/* TODO: remove _ctx and ctx. Only one of them is neeeded.
- * The memory for both is the same
- */
 #define BS_NR_POOL_PAGES 128
 
 static void stl_move_endio(struct bio *bio)
@@ -1041,153 +953,6 @@ static void stl_move_endio(struct bio *bio)
 	bio_put(bio);
 	if (atomic_dec_and_test(&ctx->io_count))
 		complete(&ctx->move_done);
-}
-
-
-
-
-/* store a request to copy data for cleaning. If it overlaps with an
- * extent, it takes a reference on that extent and marks it as being
- * cleaned so that writes modifying that extent will be stalled.
- */
-static void stl_add_copy_cmd(struct ctx *ctx, struct stl_msg *m)
-{
-	struct extent *e = NULL;
-	unsigned long flags;
-	struct copy_req *cr;
-	int offset, maxlen = 2048; /* 2K sectors = 1MB */
-
-	/* we rely on user space to send requests that don't cross
-	 * multiple extents, but we may have to split requests into
-	 * multiple bios
-	 */
-	int nbios = round_up((int)m->len, maxlen) / maxlen;
-
-	read_lock_irqsave(&ctx->rb_lock, flags);
-	e = _stl_rb_geq(&ctx->rb, m->lba);
-	if (e && e->lba < m->lba + m->len && e->seq <= ctx->target_seq) 
-		extent_get(e, nbios, IN_CLEANING);
-	else
-		e = NULL;		
-	read_unlock_irqrestore(&ctx->rb_lock, flags);
-
-	/* note that you can't move data without the LBA */
-	if (!e)
-		return;
-
-	for (offset = 0; offset < m->len; offset += maxlen) {
-		int len = min(m->len - offset, maxlen);
-		cr = mempool_alloc(ctx->copyreq_pool, GFP_NOIO);
-		if (cr == NULL) {
-			int remaining = round_up(m->len - offset, maxlen) / maxlen;
-			extent_put(ctx, e, remaining, IN_CLEANING);
-			break;
-		}
-		memset(cr, 0, sizeof(*cr));
-		*cr = (struct copy_req){.lba = m->lba + offset, .pba = m->pba + offset,
-			.len = len, .flags = m->flags, .e = e};
-		list_add_tail(&cr->list, &ctx->copyreqs);
-	}
-}
-
-int cmp_req_pba(const void *r1, const void *r2)
-{
-	struct copy_req *cr1 = *(struct copy_req**)r1;
-	struct copy_req *cr2 = *(struct copy_req**)r2;
-	return (cr1->e->pba < cr2->e->pba) ? -1 : (cr1->e->pba > cr2->e->pba);
-}
-
-/*
-   global_page_state(NR_SLAB_RECLAIMABLE) +
-   global_page_state(NR_SLAB_UNRECLAIMABLE)
-   */
-
-static void stl_do_data_move(struct ctx *ctx)
-{
-	struct list_head *p, *n;
-	struct copy_req *cr;
-	struct bio *bio, *clone;
-	sector_t sector; 
-	struct copy_req **reqs;
-	int i, m;
-
-	ctx->sectors_copied = 0;
-	if (list_empty(&ctx->copyreqs))
-		goto done;
-
-	/* read everything...
-	 * TODO - read should be sorted in PBA order
-	 */
-	reinit_completion(&ctx->move_done);
-	atomic_set(&ctx->io_count, 0);
-
-	m = 0;
-	list_for_each(p, &ctx->copyreqs) {
-		m++;
-	}
-
-	i = 0;
-	reqs = kmalloc(m*sizeof(*reqs), GFP_NOIO);
-	list_for_each(p, &ctx->copyreqs) {
-		reqs[i++] = list_entry(p, struct copy_req, list);
-	}
-	sort(reqs, m, sizeof(*reqs), cmp_req_pba, 0);
-	for (i = 0; i < m; i++) {
-		cr = reqs[i];
-		cr->bio = stl_alloc_bio(ctx, cr->len, NULL);
-		clone = bio_clone_bioset(cr->bio, GFP_NOIO, ctx->bs);
-		sector = cr->e->pba + (cr->lba - cr->e->lba);
-		setup_bio(clone, stl_move_endio, ctx->dev->bdev, sector, ctx, READ);
-		atomic_inc(&ctx->io_count);
-		generic_make_request(clone);
-	}
-	kfree(reqs);
-#if 0
-	list_for_each(p, &ctx->copyreqs) {
-		cr = list_entry(p, struct copy_req, list);
-		cr->bio = stl_alloc_bio(ctx, cr->len, NULL);
-		clone = bio_clone_bioset(cr->bio, GFP_NOIO, ctx->bs);
-		sector = cr->e->pba + (cr->lba - cr->e->lba);
-		setup_bio(clone, stl_move_endio, ctx->dev->bdev, sector, ctx, READ);
-		atomic_inc(&ctx->io_count);
-		generic_make_request(clone);
-	}
-#endif
-	wait_for_completion(&ctx->move_done);
-
-	/* write it back
-	*/
-	atomic_set(&ctx->io_count, 0);
-	reinit_completion(&ctx->move_done);
-	list_for_each(p, &ctx->copyreqs) {
-		cr = list_entry(p, struct copy_req, list);
-		bio = cr->bio;
-		cr->pba = sector = ctx->target;
-		setup_bio(bio, stl_move_endio, ctx->dev->bdev, sector, ctx, WRITE);
-		atomic_inc(&ctx->io_count);
-		generic_make_request(bio);
-		ctx->sectors_copied += cr->len;
-		ctx->target += cr->len;
-	}
-	wait_for_completion(&ctx->move_done);
-
-	/* release refs on the old extents before we update the map
-	*/
-	list_for_each_safe(p, n, &ctx->copyreqs) {
-		cr = list_entry(p, struct copy_req, list);
-		extent_put(ctx, cr->e, 1, IN_CLEANING);
-	}
-	list_for_each_safe(p, n, &ctx->copyreqs) {
-		cr = list_entry(p, struct copy_req, list);
-		stl_update_range(ctx, cr->lba, cr->pba, cr->len);
-		list_del(&cr->list);
-		mempool_free(cr, ctx->copyreq_pool);
-	}
-
-	/* notify blocked writes that cleaning is done.
-	*/
-done:
-	wake_up_all(&ctx->cleaning_wait);
 }
 
 void put_free_zone(struct ctx *ctx, struct stl_msg *m)
@@ -1241,6 +1006,37 @@ struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 	return ckpt;
 }
 
+static void reset_ckpt(struct stl_ckpt * ckpt)
+{
+	ckpt->checkpoint_ver += 1;
+	ckpt->ckpt_translation_table->prev_zone_pba = 0;
+	ckpt->ckpt_translation_table->prev_count = 0;
+	ckpt->ckpt_translation_table->cur_zone_pba = 0;
+	ckpt->ckpt_translation_table->cur_count = 0;
+	/* We do not need to reset the LBA addresses
+	 * as we only read upto prev_count + cur_count
+	 * addresses and these should be overwritten
+	 * appropriately
+	 */
+}
+
+/* How do you know that recovery is necessary?
+ * Go through the existing translation table
+ * and check if the records mentioned in the 
+ * ckpt match with that in the extent map
+ * So read the extent map before this step
+ */
+static void do_recovery(struct stl_ckpt * ckpt)
+{
+	/* Once necessary steps are taken for recovery (if needed),
+	 * then we can reset the checkpoint and prepare it for the 
+	 * next round
+	 */
+	reset_ckpt(ckpt);
+}
+
+
+
 /* we write the checkpoints alternately.
  * Only one of them is more recent than
  * the other
@@ -1265,7 +1061,7 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	 */
 	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %lu", pba);
 	ckpt2 = read_checkpoint(ctx, pba);
-	if (ckpt1->elapsed_time >= ckpt2->elapsed_time) {
+	if (ckpt1->checkpoint_ver >= ckpt2->checkpoint_ver) {
 		ckpt = ckpt1;
 		put_page(ctx->ckpt_page);
 		ctx->ckpt_page = page1;
@@ -1275,6 +1071,8 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 		//page2 is rightly set by read_ckpt();
 		put_page(page1);
 	}
+	/* TODO: Do recovery if necessary */
+	do_recovery(ckpt);
 	return ckpt;
 }
 
@@ -1304,8 +1102,6 @@ static void mark_zone_occupied(struct ctx *ctx , int zonenr)
 	bitmap[bytenr] = bitmap[bytenr] ^ (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
 }
-
-
 
 int read_extents_from_block(struct ctx * ctx, struct extent_entry *entry, unsigned int nr_extents)
 {
@@ -1372,17 +1168,6 @@ int read_extent_map(struct ctx *sc)
 	}
 }
 
-void release_free_zone_list(struct ctx *ctx)
-{
-	return;
-}
-
-void release_gc_list(struct ctx *ctx)
-{
-	return;
-}
-
-
 sector_t get_zone_pba(struct stl_sb * sb, unsigned int segnr)
 {
 	return (segnr * (1 << (sb->log_zone_size - sb->log_sector_size)));
@@ -1414,9 +1199,6 @@ int allocate_gc_zone_bitmap(struct ctx *ctx)
 	ctx->gc_zone_bitmap = gc_zone_bitmap;
 	return 0;
 }
-
-
-
 
 /* TODO: create a freezone cache
  * create a gc zone cache
@@ -1628,7 +1410,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	printk(KERN_INFO "\n argv[0]: %s, argv[1]: %s", argv[0], argv[1]);
 
-	if (!(_ctx = ctx = kzalloc(sizeof(struct ctx), GFP_KERNEL)))
+	if (!(ctx = kzalloc(sizeof(struct ctx), GFP_KERNEL)))
 		goto fail;
 	ti->private = ctx;
 

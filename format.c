@@ -166,11 +166,6 @@ __le64 get_cp_pba()
 	return (NR_BLKS_SB * NR_SECTORS_IN_BLK);
 }
 
-/* 
- * We store 2 copies of a checkpoint;
- * one per block
- */
-
 __le64 get_map_pba(struct stl_sb *sb)
 {
 
@@ -236,10 +231,25 @@ __le64 get_max_pba(struct stl_sb *sb)
 
 }
 
+int get_translation_blks_for_zone(struct stl_sb *sb)
+{
+	int nr_blks_in_zone = 1 << (sb->log_zone_size - sb->log_block_size);
+	int sizeof_each_entry = sizeof(struct stl_ckpt_entry);
+	int nr_entries_in_blk = BLK_SIZE / sizeof_each_entry;
+	int i = 0;
+	int rem_size_of_ckpt_blk = BLK_SIZE - sizeof(struct stl_ckpt);
+	int entries_in_ckpt_blk = rem_size_of_ckpt_blk / sizeof_each_entry;
+	int rem_entries = nr_blks_in_zone - entries_in_ckpt_blk;
+	int nr_blks = rem_entries / nr_entries_in_blk;
+
+	return nr_blks + 1; /* we add the 1 for the CKPT block itself */
+}
+
 struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 {
 	struct stl_sb *sb;
 	int ret = 0;
+	int translation_blks = 0;
 
 	sb = (struct stl_sb *)malloc(BLK_SZ);
 	if (!sb)
@@ -254,7 +264,8 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	sb->checksum_offset = offsetof(struct stl_sb, crc);
 	sb->zone_count = get_zone_count(sb);
 	printf("\n sb->zone_count: %d", sb->zone_count);
-	sb->blk_count_ckpt = NR_CKPT_COPIES;
+	translation_blks = get_translation_blks_for_zone(sb);
+	sb->blk_count_ckpt = NR_CKPT_COPIES * translation_blks;
 	sb->blk_count_map = get_map_blk_count(sb);
 	sb->blk_count_sit = get_sit_blk_count(sb);
     	sb->zone_count_reserved = get_reserved_zone_count(sb);
@@ -330,8 +341,8 @@ void prepare_prev_seg_entry(struct stl_seg_entry *entry)
 
 void prepare_ckpt_translation_table(struct stl_ckpt_entry * table)
 {
-	table->prev_zonenr = 0;
-	table->cur_zonenr = 0;
+	table->prev_zone_pba = 0;
+	table->cur_zone_pba = 0;
 	table->prev_count = 0;
 	table->cur_count = 0;
 }
@@ -347,7 +358,6 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 
 	memset(ckpt, 0, BLK_SZ);
 	ckpt->magic = STL_CKPT_MAGIC;
-	ckpt->elapsed_time = 0;
 	ckpt->checkpoint_ver = 0;
 	ckpt->user_block_count = sb->zone_count_main << (sb->log_zone_size - sb->log_block_size);
 	ckpt->valid_block_count = ckpt->user_block_count;
