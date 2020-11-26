@@ -1079,7 +1079,7 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 		put_page(page1);
 	}
 	/* TODO: Do recovery if necessary */
-	do_recovery(ckpt);
+	//do_recovery(ckpt);
 	return ckpt;
 }
 
@@ -1374,6 +1374,8 @@ int read_metadata(struct ctx * ctx)
 		return -1;
 	}	
 	ctx->ckpt = ckpt;
+
+	printk(KERN_INFO "\n checkpoint read!");
 	ret = read_extent_map(ctx);
 	if (0 > ret) {
 		put_page(ctx->sb_page);
@@ -1381,8 +1383,8 @@ int read_metadata(struct ctx * ctx)
 		printk(KERN_ERR "\n read_extent_map failed! cannot read the metadata ");
 		return ret;
 	}
+	printk(KERN_INFO "\n extent_map read!");
 
-	printk(KERN_INFO "\n checkpoint read!");
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb1->zone_count_main /BITS_IN_BYTE;
 	if (sb1->zone_count_main % BITS_IN_BYTE > 0)
