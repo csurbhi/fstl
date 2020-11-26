@@ -8,7 +8,7 @@ KDIR := /lib/modules/$(shell uname -r)/build
 
 
 PWD := $(shell pwd)
-CFLAGS_dm-$(module).o += -DDEBUG
+CFLAGS_dm-$(module).o += -DDEBUG -g
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules

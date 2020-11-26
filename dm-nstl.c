@@ -661,13 +661,29 @@ fail0:
 
 /* 
  * 1 indicates that the zone is free 
+ *
+ * Zone numbers start from 0
  */
 static void mark_zone_free(struct ctx *ctx , int zonenr)
 {
+
+	if (unlikely(NULL == ctx)) {
+		panic("This is a ctx bug");
+	}
+		
 	char *bitmap = ctx->freezone_bitmap;
 	int nr_freezones = ctx->nr_freezones;
 	int bytenr = zonenr / BITS_IN_BYTE;
 	int bitnr = zonenr % BITS_IN_BYTE;
+
+	if(unlikely(bytenr > ctx->bitmap_bytes)) {
+		panic("bytenr: %d > bitmap_bytes: %d", bytenr, ctx->bitmap_bytes);
+	}
+
+
+	if (unlikely(NULL == bitmap)) {
+		panic("This is a ctx freezone bitmap bug!");
+	}
 
 	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
 		/* This bit was 1 and hence already free*/
@@ -1227,6 +1243,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 
 	while (i < nr_seg_entries) {
 		if (entry->vblocks == 0) {
+			printk(KERN_ERR "\m *segnr: %u", segnr);
 			mark_zone_free(ctx, *segnr);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
