@@ -1229,12 +1229,10 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 		if (entry->vblocks == 0) {
 			mark_zone_free(ctx, *segnr);
 			ctx->nr_freezones++;
-			continue;
 		}
-		if (entry->vblocks < nr_blks_in_zone) {
+		else if (entry->vblocks < nr_blks_in_zone) {
 			mark_zone_gc_candidate(ctx, *segnr);
 			ctx->nr_gc_zones++;
-			continue;
 		}
 		entry = entry + sizeof(struct stl_seg_entry);
 		*segnr++;
