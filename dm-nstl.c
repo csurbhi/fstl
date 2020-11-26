@@ -509,6 +509,12 @@ blocked:
 static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 {
 	struct bio *split = NULL;
+
+	if (!bio) {
+		dump_stack();
+		return;
+	}
+
 	bio_end_io_t *fn_end_io = bio->bi_end_io;
 
 	printk(KERN_ERR "Read begins! ");
