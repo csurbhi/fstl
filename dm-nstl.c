@@ -697,7 +697,7 @@ static void mark_zone_gc_candidate(struct ctx *ctx , int zonenr)
 	 * one more 1 to unset it
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
-	ctx->nr_gc_zones = ctx->nr_freezones + 1;
+	ctx->nr_gc_zones = ctx->nr_gc_zones + 1;
 }
 
 static u64 get_next_freezone_nr(struct ctx *ctx)
@@ -1225,14 +1225,12 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
 
-	while (i <= nr_seg_entries) {
+	while (i < nr_seg_entries) {
 		if (entry->vblocks == 0) {
 			mark_zone_free(ctx, *segnr);
-			ctx->nr_freezones++;
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
 			mark_zone_gc_candidate(ctx, *segnr);
-			ctx->nr_gc_zones++;
 		}
 		entry = entry + sizeof(struct stl_seg_entry);
 		*segnr++;
