@@ -1243,7 +1243,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 
 	while (i < nr_seg_entries) {
 		if (entry->vblocks == 0) {
-			printk(KERN_ERR "\m *segnr: %u", segnr);
+			printk(KERN_ERR "\m *segnr: %u", *segnr);
 			mark_zone_free(ctx, *segnr);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
@@ -1298,7 +1298,7 @@ int read_seg_info_table(struct ctx *ctx)
 	blknr = pba/NR_SECTORS_PER_BLK;
 	nrblks = ctx->sb->blk_count_sit;
 
-	while (i < nrblks) {
+	while (zonenr < sb->zone_count_main) {
 		bh = __bread(bdev, blknr, BLK_SZ);
 		if (!bh) {
 			kfree(ctx->freezone_bitmap);
@@ -1312,7 +1312,6 @@ int read_seg_info_table(struct ctx *ctx)
 			nr_seg_entries_read = nr_data_zones;
 		read_seg_entries_from_block(ctx, entry0, nr_seg_entries_read, &zonenr);
 		nr_data_zones = nr_data_zones - nr_seg_entries_read;
-		i = i + 1;
 		blknr = blknr + 1;
 		put_bh(bh);
 	}
@@ -1400,6 +1399,7 @@ int read_metadata(struct ctx * ctx)
 
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb1->zone_count_main /BITS_IN_BYTE;
+	printk(KERN_INFO "\n Nr of zones in main are: %lu, bitmap_bytes: %d", sb1->zone_count_main, ctx->bitmap_bytes);
 	if (sb1->zone_count_main % BITS_IN_BYTE > 0)
 		ctx->bitmap_bytes += 1;
 	read_seg_info_table(ctx);
