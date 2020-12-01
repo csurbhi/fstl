@@ -1299,6 +1299,10 @@ int read_seg_info_table(struct ctx *ctx)
 	nrblks = ctx->sb->blk_count_sit;
 
 	while (zonenr < sb->zone_count_main) {
+		printk(KERN_INFO "\n blknr: %lu", blknr);
+		if (blknr > ctx->sb->zone0_pba) {
+			panic("seg entry blknr cannot be bigger than the data blknr");
+		}
 		bh = __bread(bdev, blknr, BLK_SZ);
 		if (!bh) {
 			kfree(ctx->freezone_bitmap);
@@ -1399,6 +1403,8 @@ int read_metadata(struct ctx * ctx)
 
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb1->zone_count_main /BITS_IN_BYTE;
+	if (sb1->zone_count_main % BITS_IN_BYTE)
+		ctx->bitmap_bytes = ctx->bitmap_bytes + 1;
 	printk(KERN_INFO "\n Nr of zones in main are: %lu, bitmap_bytes: %d", sb1->zone_count_main, ctx->bitmap_bytes);
 	if (sb1->zone_count_main % BITS_IN_BYTE > 0)
 		ctx->bitmap_bytes += 1;
