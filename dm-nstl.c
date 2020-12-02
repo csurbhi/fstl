@@ -959,26 +959,6 @@ fail:
    */
 #define BS_NR_POOL_PAGES 128
 
-static void stl_move_endio(struct bio *bio)
-{
-	int i;
-	struct bio_vec *bv = NULL;
-	struct ctx *ctx = bio->bi_private;
-	struct bvec_iter_all iter_all;
-
-	if (bio_data_dir(bio) == WRITE) {
-		bio_for_each_segment_all(bv, bio, iter_all) {
-			WARN_ON(!bv->bv_page);
-			mempool_free(bv->bv_page, ctx->page_pool);
-			atomic_dec(&ctx->pages_alloced);
-			bv->bv_page = NULL;
-		}
-	}
-	bio_put(bio);
-	if (atomic_dec_and_test(&ctx->io_count))
-		complete(&ctx->move_done);
-}
-
 void put_free_zone(struct ctx *ctx, u64 pba)
 {
 	unsigned long flags;
