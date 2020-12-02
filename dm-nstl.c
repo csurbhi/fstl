@@ -361,10 +361,10 @@ static int gc_thread_fn(void * data)
  * On error returns 0
  *
  */
-int stl_gc_thread_start(struct ctx *sc)
+int stl_gc_thread_start(struct ctx *ctx)
 {
 	struct stl_gc_thread *gc_th;
-	dev_t dev = sc->dev->bdev->bd_dev;
+	dev_t dev = ctx->dev->bdev->bd_dev;
 	int err=0;
 
 	printk(KERN_ERR "\n About to start GC thread");
@@ -381,20 +381,25 @@ int stl_gc_thread_start(struct ctx *sc)
 
         gc_th->gc_wake= 0;
 
-        sc->gc_th = gc_th;
+        ctx->gc_th = gc_th;
 	init_waitqueue_head(&gc_th->stl_gc_wait_queue);
-	sc->gc_th->stl_gc_task = kthread_run(gc_thread_fn, sc,
+	ctx->gc_th->stl_gc_task = kthread_run(gc_thread_fn, ctx,
 			"stl-gc%u:%u", MAJOR(dev), MINOR(dev));
 
 	if (IS_ERR(gc_th->stl_gc_task)) {
 		err = PTR_ERR(gc_th->stl_gc_task);
 		kvfree(gc_th);
-		sc->gc_th = NULL;
+		ctx->gc_th = NULL;
 		return err;
 	}
 
 	printk(KERN_ERR "\n Created a STL GC thread ");
 	return 0;	
+}
+
+int stl_gc_thread_stop(struct ctx *ctx)
+{
+	kvfree(ctx->gc_th);
 }
 
 
@@ -1510,15 +1515,16 @@ fail:
 
 static void stl_dtr(struct dm_target *ti)
 {
-	struct ctx *sc = ti->private;
+	struct ctx *ctx = ti->private;
 	ti->private = NULL;
 
-	bioset_exit(sc->bs);
-	kfree(sc->bs);
-	mempool_destroy(sc->page_pool);
-	mempool_destroy(sc->extent_pool);
-	dm_put_device(ti, sc->dev);
-	kfree(sc);
+	stl_gc_thread_stop(ctx);
+	bioset_exit(ctx->bs);
+	kfree(ctx->bs);
+	mempool_destroy(ctx->page_pool);
+	mempool_destroy(ctx->extent_pool);
+	dm_put_device(ti, ctx->dev);
+	kfree(ctx);
 }
 
 static int stl_map(struct dm_target *ti, struct bio *bio)
