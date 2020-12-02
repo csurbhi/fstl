@@ -35,10 +35,13 @@
 
 
 /* TODO:
- * Convert the STL in a block mapped STL rather
+ * 1) Convert the STL in a block mapped STL rather
  * than a sector mapped STL
  * If needed you can migrate to a track mapped
  * STL
+ * 2) write checkpointing - flush the translation table
+ * to the checkpoint area
+ * 3) GC
  */
 
 extern struct bio_set fs_bio_set;
@@ -978,41 +981,15 @@ static void stl_move_endio(struct bio *bio)
 		complete(&ctx->move_done);
 }
 
-void put_free_zone(struct ctx *ctx, struct stl_msg *m)
+void put_free_zone(struct ctx *ctx, u64 pba)
 {
 	unsigned long flags;
-	unsigned long zonenr = get_zone_nr(ctx, m->lba);
+	unsigned long zonenr = get_zone_nr(ctx, pba);
 
 	spin_lock_irqsave(&ctx->lock, flags);
 	mark_zone_free(ctx , zonenr);
 	spin_unlock_irqrestore(&ctx->lock, flags);
 }
-
-static long stl_dev_ioctl(struct file *fp, unsigned int num, unsigned long arg)
-{
-	//printk(KERN_INFO "ioctl %d\n", num);
-	dump_stack();
-	switch (num) {
-		case 1:
-			//printk(KERN_INFO "ioctl 1\n");
-			break;
-		case 2:
-			//printk(KERN_INFO "ioctl 2\n");
-			break;
-		case 3:
-			//printk(KERN_INFO "ioctl 3\n");
-			break;
-		default:
-			break;
-	}
-
-	return 0;
-}
-
-static const struct file_operations stl_misc_fops = {
-	.owner          = THIS_MODULE,
-	.unlocked_ioctl = stl_dev_ioctl,
-};
 
 #define BLK_SZ 4096
 
@@ -1479,9 +1456,6 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	printk(KERN_INFO "%s %d kernel wf: %ld\n", __func__, __LINE__, ctx->write_frontier);
 	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
-	ctx->previous = 0;
-	/* TODO: figure out the use of sequence */
-	ctx->sequence = 0;
 	printk(KERN_INFO "%s %d kernel wf end: %ld\n", __func__, __LINE__, ctx->wf_end);
 	printk(KERN_INFO "max_pba = %lu", ctx->max_pba);
 	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier;
@@ -1492,9 +1466,6 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	printk(KERN_INFO "\n max sectors: %llu", disk_size/512);
 	printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
 	spin_lock_init(&ctx->lock);
-	init_waitqueue_head(&ctx->cleaning_wait);
-	init_completion(&ctx->move_done);
-	init_waitqueue_head(&ctx->space_wait);
 
 	atomic_set(&ctx->io_count, 0);
 	atomic_set(&ctx->n_reads, 0);
@@ -1504,9 +1475,6 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	r = -ENOMEM;
 	ti->error = "dm-stl: No memory";
 
-	ctx->copyreq_pool = mempool_create_slab_pool(MIN_COPY_REQS, _copyreq_cache);
-	if (!ctx->copyreq_pool)
-		goto fail4;
 	ctx->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
 	if (!ctx->page_pool)
 		goto fail5;
@@ -1525,30 +1493,14 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	ctx->sit_rb = RB_ROOT;
 	rwlock_init(&ctx->sit_rb_lock);
-	
-
-	ti->error = "dm-stl: misc_register failed";
-	ctx->misc.minor = MISC_DYNAMIC_MINOR;
-	ctx->misc.name = "dm-nstl";
-	ctx->misc.nodename = ctx->nodename;
-	ctx->misc.fops = &stl_misc_fops;
-	ctx->target_seq = 0;
 	ctx->sectors_copied = 0;
 
-
-	printk(KERN_INFO "About to call misc_register");
-
-	r = misc_register(&ctx->misc);
-	if (r)
-		goto fail7;
-	printk(KERN_INFO "\n Miscellaneous device registered!");
 
 	r = stl_gc_thread_start(ctx);
 	if (!r) {
 		return 0;
 	}
 /* failed case */
-	misc_deregister(&ctx->misc);
 fail7:
 	bioset_exit(ctx->bs);
 fail6:
@@ -1556,9 +1508,6 @@ fail6:
 fail5:
 	if (ctx->page_pool)
 		mempool_destroy(ctx->page_pool);
-fail4:
-	if (ctx->copyreq_pool)
-		mempool_destroy(ctx->copyreq_pool);
 fail3:
 	put_page(ctx->sb_page);
 	put_page(ctx->ckpt_page);
@@ -1590,7 +1539,6 @@ static void stl_dtr(struct dm_target *ti)
 	bioset_exit(sc->bs);
 	kfree(sc->bs);
 	mempool_destroy(sc->page_pool);
-	mempool_destroy(sc->copyreq_pool);
 	mempool_destroy(sc->extent_pool);
 	dm_put_device(ti, sc->dev);
 	kfree(sc);
@@ -1655,17 +1603,12 @@ static int __init dm_stl_init(void)
 
 	if (!(_extent_cache = KMEM_CACHE(extent, 0)))
 		return r;
-	if (!(_copyreq_cache = KMEM_CACHE(copy_req, 0)))
-		goto fail1;
 	if ((r = dm_register_target(&stl_target)) < 0)
 		goto fail;
 	printk(KERN_INFO "dm-nstl\n %s %d", __func__, __LINE__);
 	return 0;
 
 fail:
-	if (_copyreq_cache)
-		kmem_cache_destroy(_extent_cache);
-fail1:
 	if (_extent_cache)
 		kmem_cache_destroy(_extent_cache);
 	return r;

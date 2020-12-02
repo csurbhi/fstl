@@ -103,110 +103,11 @@ struct stl_dev_info {
  */
 #define MAX_TIME 5
 
-
-struct stl_sb_info {
-	struct proc_dir_entry *s_proc;		/* proc entry */
-	struct stl_sb *raw_super;		/* raw super block pointer */
-	struct rw_semaphore sb_lock;		/* lock for raw super block */
-	int valid_super_block;			/* valid super block no */
-	unsigned long s_flag;				/* flags for sbi */
-	struct mutex writepages;		/* mutex for writepages() */
-	unsigned int blocks_per_zone;		/* blocks per zone */
-	unsigned int log_blocks_per_blkz;	/* log2 blocks per zone */
-
-	/* for segment-related operations */
-	struct stl_sm_info *sm_info;		/* segment manager */
-
-	/* keep migration IO order for LFS mode */
-	struct rw_semaphore io_order_lock;
-
-	/* for checkpoint */
-	struct stl_ckpt *ckpt;			/* raw checkpoint pointer */
-	int cur_cp_pack;			/* remain current cp pack */
-	spinlock_t cp_lock;			/* for flag in ckpt */
-	struct mutex cp_mutex;			/* checkpoint procedure lock */
-	struct rw_semaphore cp_rwsem;		/* blocking FS operations */
-	struct rw_semaphore node_write;		/* locking node writes */
-	struct rw_semaphore node_change;	/* locking node change */
-	wait_queue_head_t cp_wait;
-	unsigned long last_time[MAX_TIME];	/* to store time in jiffies */
-	long interval_time[MAX_TIME];		/* to store thresholds */
-
-
-	spinlock_t fsync_node_lock;		/* for node entry lock */
-
-
-	/* for extent tree cache */
-	struct radix_tree_root extent_tree_root;/* cache extent cache entries */
-	struct mutex extent_tree_lock;	/* locking extent radix tree */
-	atomic_t total_ext_tree;		/* extent tree count */
-
-	/* basic device mapper units */
-	unsigned int log_sectors_per_block;	/* log2 sectors per block */
-	unsigned int log_blocksize;		/* log2 block size */
-	unsigned int blocksize;			/* block size */
-	unsigned int log_blocks_per_seg;	/* log2 blocks per segment */
-	unsigned int blocks_per_seg;		/* blocks per segment */
-
-	sector_t user_block_count;		/* # of user blocks */
-	sector_t total_valid_block_count;	/* # of valid blocks */
-	sector_t discard_blks;			/* discard command candidats */
-	sector_t last_valid_block_count;	/* for recovery */
-	sector_t reserved_blocks;		/* configurable reserved blocks */
-
-	/* # of allocated blocks */
-	struct percpu_counter alloc_valid_block_count;
-
-	/* for cleaning operations */
-	struct mutex gc_mutex;			/* mutex for GC */
-	struct stl_gc_kthread	*gc_thread;	/* GC thread */
-	unsigned int cur_victim_zone;		/* current victim section num */
-	unsigned int gc_mode;			/* current GC state */
-	unsigned int next_victim_zone[2];	/* next segment in victim section */
-	/* maximum # of trials to find a victim segment for SSR and GC */
-	unsigned int max_victim_search;
-};
-
 struct extent_entry {
 	sector_t lba;
 	sector_t pba;
 	size_t   len;
 }__packed;
-
-
-/* used to hold a range to be copied.
-*/
-struct copy_req {
-	struct list_head list;
-	sector_t lba;
-	sector_t pba;
-	int len;
-	int flags;
-	struct bio *bio;
-	struct extent *e;
-};
-static struct kmem_cache *_copyreq_cache;
-
-/* zone free list entry
-*/
-struct free_zone {
-	u64 fz_nr;
-	sector_t start;
-	sector_t end;
-};
-
-
-/* TODO: we keep this in a linked list,
- * but ideally we should keep this in 
- * two trees: one for cost benefit 
- * and one for greedy
- */
-struct gc_candidate {
-	struct list_head list;
-	unsigned int segment_nr;
-	unsigned int valid_blocks;
-	unsigned long mtime;
-};
 
 struct stl_gc_thread;
 
@@ -219,8 +120,6 @@ struct ctx {
 	spinlock_t        lock;
 	sector_t          write_frontier; /* LBA, protected by lock */
 	sector_t          wf_end;
-	sector_t          previous;	  /* protected by lock */
-	unsigned          sequence;
 	sector_t          free_sectors_in_wf;  /* Indicates the free sectors in the current write frontier */
 	int		  n_gc_candidates;
 
@@ -231,22 +130,15 @@ struct ctx {
 	int               n_extents;      /* map size */
 
 	mempool_t        *extent_pool;
-	mempool_t        *copyreq_pool;
 	mempool_t        *page_pool;
 	struct bio_set   * bs;
 
 	struct dm_dev    *dev;
 
-	struct stl_msg    msg;
-
-	wait_queue_head_t cleaning_wait; /* now we do not need this as we will use a lock to coordinate GC and writes */
-	wait_queue_head_t space_wait; /* same comment as above */
 	atomic_t          io_count;
-	struct completion move_done;
 
 	atomic_t          n_reads;
 	sector_t          target;	/* in our case now points to the segment getting GCed */
-	unsigned long     target_seq;   /* Figure out what this is */
 	unsigned          sectors_copied;
 	atomic_t          pages_alloced;
 
