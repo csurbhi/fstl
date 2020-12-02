@@ -830,20 +830,32 @@ static void add_ckpt_new_wf(struct ctx * ctx, sector_t wf)
 
 static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 {
+	static int nrwrites = 0;
 	sector_t wf = ctx->write_frontier;
 
+	/* We should have adjusted sectors_s8 to accomodate
+	 * for the rooms in the zone before calling this function.
+	 * Its how we split the bio
+	 */
 	if (ctx->free_sectors_in_wf < sectors_s8) {
 		panic("Wrong manipulation of wf; used unavailable sectors in a log");
 	}
 	if (ctx->free_sectors_in_wf < sectors_s8 + 1) {
 		ctx->write_frontier = get_new_zone(ctx);
+		ctx->free_sectors_in_wf = ctx->nr_lbas_in_zone;
 		add_ckpt_new_wf(ctx, wf);
 		if (ctx->write_frontier < 0) {
 			printk(KERN_INFO "No more disk space available for writing!");
 			return -1;
 		}
+	} else {
+		ctx->write_frontier = ctx->write_frontier + sectors_s8;
+		ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
+
 	}
 }
+
+
 
 /* We store only the LBA. We can calculate the PBA from the wf
  */
@@ -893,8 +905,11 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 		/*-------------------------------*/
 		wf = ctx->write_frontier;
 
-		if (s8 > room_in_zone(ctx, wf)){
-			s8 = round_down(room_in_zone(ctx, wf), NR_SECTORS_IN_BLK);
+		/* room_in_zone should be same as
+		 * ctx->nr_free_sectors_in_wf
+		 */
+		if (s8 > ctx->free_sectors_in_wf){
+			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			nr_sectors = s8;
 		} /* else we need to add a pad to rounded up value (nr_sectors < s8) */
 		/*-------------------------------*/
