@@ -143,7 +143,6 @@ struct ctx {
 	atomic_t          pages_alloced;
 
 	char              nodename[32];
-	struct miscdevice misc;
   
 	struct stl_gc_thread *gc_th;
 	struct page 	*sb_page;

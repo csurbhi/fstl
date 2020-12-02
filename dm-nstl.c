@@ -20,7 +20,6 @@
 #include <linux/completion.h>
 #include <linux/jiffies.h>
 #include <linux/sort.h>
-#include <linux/miscdevice.h>
 #include <linux/freezer.h>
 #include <linux/kthread.h>
 #include <linux/buffer_head.h>
@@ -951,7 +950,6 @@ fail:
 	atomic_inc(&c5);
 }
 
-static const struct file_operations stl_misc_fops;
 
 /*
    argv[0] = devname
@@ -1535,7 +1533,6 @@ static void stl_dtr(struct dm_target *ti)
 	struct ctx *sc = ti->private;
 	ti->private = NULL;
 
-	misc_deregister(&sc->misc);
 	bioset_exit(sc->bs);
 	kfree(sc->bs);
 	mempool_destroy(sc->page_pool);
