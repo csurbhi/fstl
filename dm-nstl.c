@@ -161,7 +161,7 @@ static sector_t zone_start(struct ctx *ctx, sector_t pba) {
 	return pba - (pba % ctx->nr_lbas_in_zone);
 }
 static sector_t zone_end(struct ctx *ctx, sector_t pba) {
-	return zone_start(ctx, pba) + ctx->nr_lbas_in_zone - 1; 
+	return zone_start(ctx, pba) + ctx->nr_lbas_in_zone;
 }
 static unsigned room_in_zone(struct ctx *ctx, sector_t sector) {
 	return zone_end(ctx, sector) - sector + 1;   
@@ -774,7 +774,10 @@ static int get_new_zone(struct ctx *ctx)
 		printk(KERN_WARNING "\n Disk is full, no more writing possible! ");
 		return (zone_nr);
 	}
-	ctx->write_frontier = zone_start(ctx, zone_nr);
+	/* get_next_freezone_nr() starts from 0. We need to adjust
+	 * the pba with that of the actual first PBA of data segment 0
+	 */
+	ctx->write_frontier = zone_start(ctx, zone_nr) + ctx->sb->zone0_pba;
 	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
 	ctx->free_sectors_in_wf -= ctx->wf_end - ctx->write_frontier;
 	ctx->nr_freezones--;
@@ -888,6 +891,8 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 	/* wait until there's room
 	*/
 
+	printk(KERN_ERR "\n write frontier: %lu", ctx->write_frontier);
+
 	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
 	do {
 
@@ -909,15 +914,7 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 		if (s8 > ctx->free_sectors_in_wf){
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			if (s8 <= 0) {
-				ctx->write_frontier = get_new_zone(ctx);
-				ctx->free_sectors_in_wf = ctx->nr_lbas_in_zone;
-				add_ckpt_new_wf(ctx, ctx->write_frontier);
-				if (ctx->write_frontier < 0) {
-					printk(KERN_INFO "No more disk space available for writing!");
-					return -1;
-				}
-				/* we need to retry! */
-				continue;
+				panic("Should always have atleast a block left ");
 			}
 			nr_sectors = s8;
 		} /* else we need to add a pad to rounded up value (nr_sectors < s8) */
@@ -957,7 +954,7 @@ again:
 		e = stl_update_range(ctx, sector, ctx->write_frontier, nr_sectors);
 		split->bi_iter.bi_sector = ctx->write_frontier;
 		add_ckpt_mapping(ctx, sector, s8);
-		printk(KERN_ERR "\n nr_sectors: %d, s8 = %d, free_sectors_in_wf: %d, PBA: %ull", nr_sectors, s8, ctx->free_sectors_in_wf, ctx->write_frontier);
+		//printk(KERN_ERR "\n nr_sectors: %d, s8 = %d, free_sectors_in_wf: %d, PBA: %ull", nr_sectors, s8, ctx->free_sectors_in_wf, ctx->write_frontier);
 		move_write_frontier(ctx, s8);
 		/* Add this mapping the ckpt region */
 	} while (split != bio);
