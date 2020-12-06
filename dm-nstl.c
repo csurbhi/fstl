@@ -779,7 +779,7 @@ static int get_new_zone(struct ctx *ctx)
 	 */
 	ctx->write_frontier = zone_start(ctx, zone_nr) + ctx->sb->zone0_pba;
 	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
-	ctx->free_sectors_in_wf -= ctx->wf_end - ctx->write_frontier;
+	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier;
 	ctx->nr_freezones--;
 	//printk(KERN_INFO "Num of free sect.: %ld, diff of end and wf:%ld\n", sc->free_sectors_in_wf, sc->wf_end - sc->write_frontier);
 	/*printk(KERN_INFO "new zone: %d (%ld->%ld) left %d\n", (int)(fz->start / sc->nr_lbas_in_zone),
@@ -891,7 +891,7 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 	/* wait until there's room
 	*/
 
-	printk(KERN_ERR "\n write frontier: %lu", ctx->write_frontier);
+	printk(KERN_ERR "\n write frontier: %lu free_sectors_in_wf: %lu", ctx->write_frontier, ctx->free_sectors_in_wf);
 
 	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
 	do {
