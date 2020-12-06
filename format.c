@@ -328,14 +328,15 @@ unsigned long long get_user_block_count(struct stl_sb *sb)
 
 void prepare_cur_seg_entry(struct stl_seg_entry *entry)
 {
-	entry->vblocks = NR_BLKS_PER_ZONE;
+	/* Initially no block has any valid data */
+	entry->vblocks = 0;
 	entry->mtime = 0;
 }
 
 
 void prepare_prev_seg_entry(struct stl_seg_entry *entry)
 {
-	entry->vblocks = NR_BLKS_PER_ZONE;
+	entry->vblocks = 0;
 	entry->mtime = 0;
 }
 
@@ -462,7 +463,7 @@ void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_
 
 	memset(buf, 0, BLK_SZ);
 
-	seg_entry.vblocks = NR_BLKS_PER_ZONE;
+	seg_entry.vblocks = 0;
 	seg_entry.mtime = 0;
 	orig_addr = buf;
 	size_t size = 0;

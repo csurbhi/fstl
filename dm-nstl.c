@@ -840,7 +840,11 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	if (ctx->free_sectors_in_wf < sectors_s8) {
 		panic("Wrong manipulation of wf; used unavailable sectors in a log");
 	}
-	if (ctx->free_sectors_in_wf < sectors_s8 + 1) {
+	
+	ctx->write_frontier = ctx->write_frontier + sectors_s8;
+	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
+
+	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
 		ctx->write_frontier = get_new_zone(ctx);
 		ctx->free_sectors_in_wf = ctx->nr_lbas_in_zone;
 		add_ckpt_new_wf(ctx, wf);
@@ -848,10 +852,6 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 			printk(KERN_INFO "No more disk space available for writing!");
 			return -1;
 		}
-	} else {
-		ctx->write_frontier = ctx->write_frontier + sectors_s8;
-		ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
-
 	}
 }
 
@@ -890,26 +890,35 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 
 	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
 	do {
-		printk(KERN_ERR "\n %s %s %d nbios: %d ", __FILE__, __func__, __LINE__, nbios);
-		unsigned seq;
-		volatile sector_t _pba, wf, prev;
 
 		WARN_ON(nbios >= 40);
 		/* 8 sectors (s8) forms a nr of BLOCKs of 4096 bytes */
 		nr_sectors = bio_sectors(bio);
+		if (unlikely(nr_sectors <= 0)) {
+			printk(KERN_ERR "\n Less than 0 sectors (%d) requested!, nbios: %u", nr_sectors, nbios);
+			break;
+		}
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
-		/* Next we fetch the LBA that our DM got */
-		sector = bio->bi_iter.bi_sector;
 
 		spin_lock_irqsave(&ctx->lock, flags);
 		/*-------------------------------*/
-		wf = ctx->write_frontier;
 
 		/* room_in_zone should be same as
 		 * ctx->nr_free_sectors_in_wf
 		 */
 		if (s8 > ctx->free_sectors_in_wf){
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
+			if (s8 <= 0) {
+				ctx->write_frontier = get_new_zone(ctx);
+				ctx->free_sectors_in_wf = ctx->nr_lbas_in_zone;
+				add_ckpt_new_wf(ctx, ctx->write_frontier);
+				if (ctx->write_frontier < 0) {
+					printk(KERN_INFO "No more disk space available for writing!");
+					return -1;
+				}
+				/* we need to retry! */
+				continue;
+			}
 			nr_sectors = s8;
 		} /* else we need to add a pad to rounded up value (nr_sectors < s8) */
 		/*-------------------------------*/
@@ -936,24 +945,25 @@ again:
 				printk(KERN_ERR "\n failed at stl_alloc_bio, padlen: %d!", padlen);
 				goto fail;
 			}
-			setup_bio(pad, stl_endio, ctx->dev->bdev, wf+nr_sectors, ctx, WRITE);
-			wf += padlen;
+			setup_bio(pad, stl_endio, ctx->dev->bdev, ctx->write_frontier + nr_sectors, ctx, WRITE);
 			bios[nbios++] = pad;
 		}
 
+		/* Next we fetch the LBA that our DM got */
+		sector = bio->bi_iter.bi_sector;
 		/*Update the translation table with the LBA:sector and
 		 * our new PBA: wf
 		 */
-		e = stl_update_range(ctx, sector, wf, nr_sectors);
-		split->bi_iter.bi_sector = wf;
-		_pba = wf;
+		e = stl_update_range(ctx, sector, ctx->write_frontier, nr_sectors);
+		split->bi_iter.bi_sector = ctx->write_frontier;
 		add_ckpt_mapping(ctx, sector, s8);
+		printk(KERN_ERR "\n nr_sectors: %d, s8 = %d, free_sectors_in_wf: %d, PBA: %ull", nr_sectors, s8, ctx->free_sectors_in_wf, ctx->write_frontier);
 		move_write_frontier(ctx, s8);
-		wf = ctx->write_frontier;
 		/* Add this mapping the ckpt region */
-		//printk(KERN_ERR "\n split!=bio");
 	} while (split != bio);
 
+
+	//printk(KERN_ERR "\n %s %s %d nbios: %d ", __FILE__, __func__, __LINE__, nbios);
 	for (i = 0; i < nbios; i++) {
 		bio_set_dev(bios[i], ctx->dev->bdev);
 		generic_make_request(bios[i]); /* preserves ordering, unlike submit_bio */
@@ -1180,7 +1190,10 @@ sector_t get_zone_end(struct stl_sb *sb, sector_t pba_start)
 
 int allocate_freebitmap(struct ctx *ctx)
 {
-	char * free_bitmap = (char *)kzalloc(ctx->bitmap_bytes, GFP_KERNEL);
+	if (!ctx)
+		return -1;
+	printk(KERN_INFO "\n ctx->bitmap_bytes: %d ", ctx->bitmap_bytes);
+	char * free_bitmap = (char *)kzalloc(11, GFP_KERNEL);
 	if (!free_bitmap)
 		return -1;
 
@@ -1190,6 +1203,8 @@ int allocate_freebitmap(struct ctx *ctx)
 
 int allocate_gc_zone_bitmap(struct ctx *ctx)
 {
+	if (!ctx)
+		return -1;
 	char * gc_zone_bitmap = (char *)kzalloc(ctx->bitmap_bytes, GFP_KERNEL);
 	if (!gc_zone_bitmap)
 		return -1;
@@ -1215,17 +1230,18 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 	sb = ctx->sb;
 
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
+	printk(KERN_ERR "\n Number of seg entries: %u", nr_seg_entries);
 
 	while (i < nr_seg_entries) {
 		if (entry->vblocks == 0) {
-			printk(KERN_ERR "\m *segnr: %u", *segnr);
+			printk(KERN_ERR "\n *segnr: %u", *segnr);
 			mark_zone_free(ctx, *segnr);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
 			mark_zone_gc_candidate(ctx, *segnr);
 		}
 		entry = entry + sizeof(struct stl_seg_entry);
-		*segnr++;
+		*segnr = *segnr + 1;
 		i++;
 	}
 	return;
@@ -1252,32 +1268,49 @@ int read_seg_info_table(struct ctx *ctx)
 	unsigned int blknr;
 	unsigned int zonenr = 0;
 	struct stl_sb *sb;
-
-	unsigned long nr_data_zones = sb->zone_count_main; /* these are the number of segment entries to read */
-	unsigned long nr_seg_entries_read = 0;
-       
-	if (!ctx)
+	unsigned long nr_data_zones;
+	unsigned long nr_seg_entries_read;
+	
+	/*
+	if (NULL == ctx)
 		return -1;
+	*/
+	bdev = ctx->dev->bdev;
+	/*
+	if (bdev) {
+		panic("bdev is not set, is NULL!");
+	}*/
 
+	sb = ctx->sb;
+
+	nr_data_zones = sb->zone_count_main; /* these are the number of segment entries to read */
+	nr_seg_entries_read = 0;
+	
 	ret = allocate_freebitmap(ctx);
+	printk(KERN_INFO "\n Allocated free bitmap, ret: %d", ret);
 	if (0 > ret)
 		return ret;
 	ret = allocate_gc_zone_bitmap(ctx);
+	printk(KERN_INFO "\n Allocated gc zone bitmap, ret: %d", ret);
 	if (0 > ret) {
 		kfree(ctx->freezone_bitmap);
 		return ret;
 	}
 
-	bdev = ctx->dev->bdev;
-	pba = ctx->sb->sit_pba;
-	blknr = pba/NR_SECTORS_PER_BLK;
-	nrblks = ctx->sb->blk_count_sit;
 
+	pba = sb->sit_pba;
+	blknr = pba/NR_SECTORS_PER_BLK;
+	nrblks = sb->blk_count_sit;
+	printk(KERN_INFO "\n blknr of first SIT is: %u", blknr);
+	printk(KERN_ERR "\n zone_count_main: %u", sb->zone_count_main);
 	while (zonenr < sb->zone_count_main) {
-		printk(KERN_INFO "\n blknr: %lu", blknr);
+		printk(KERN_ERR "\n zonenr: %u", zonenr);
 		if (blknr > ctx->sb->zone0_pba) {
-			panic("seg entry blknr cannot be bigger than the data blknr");
+			//panic("seg entry blknr cannot be bigger than the data blknr");
+			printk(KERN_ERR "seg entry blknr cannot be bigger than the data blknr");
+			break;
 		}
+		printk(KERN_INFO "\n blknr: %lu", blknr);
 		bh = __bread(bdev, blknr, BLK_SZ);
 		if (!bh) {
 			kfree(ctx->freezone_bitmap);
@@ -1456,7 +1489,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
 	printk(KERN_INFO "%s %d kernel wf end: %ld\n", __func__, __LINE__, ctx->wf_end);
 	printk(KERN_INFO "max_pba = %lu", ctx->max_pba);
-	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier;
+	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier + 1;
 
 
 	loff_t disk_size = i_size_read(ctx->dev->bdev->bd_inode);
