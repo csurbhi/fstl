@@ -772,6 +772,7 @@ static int get_new_zone(struct ctx *ctx)
 	zone_nr = get_next_freezone_nr(ctx);
 	if (zone_nr < 0) {
 		printk(KERN_WARNING "\n Disk is full, no more writing possible! ");
+		ctx->write_frontier = -1;
 		return (zone_nr);
 	}
 	/* get_next_freezone_nr() starts from 0. We need to adjust
@@ -779,9 +780,9 @@ static int get_new_zone(struct ctx *ctx)
 	 */
 	ctx->write_frontier = zone_start(ctx, zone_nr) + ctx->sb->zone0_pba;
 	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
-	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier;
+	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier + 1;
 	ctx->nr_freezones--;
-	//printk(KERN_INFO "Num of free sect.: %ld, diff of end and wf:%ld\n", sc->free_sectors_in_wf, sc->wf_end - sc->write_frontier);
+	printk(KERN_INFO "Num of free sect.: %ld, diff of end and wf:%ld\n", ctx->free_sectors_in_wf, ctx->wf_end - ctx->write_frontier);
 	/*printk(KERN_INFO "new zone: %d (%ld->%ld) left %d\n", (int)(fz->start / sc->nr_lbas_in_zone),
 			old_free, sc->free_sectors_in_wf, sc->n_free_zones);
 	*/
@@ -848,13 +849,15 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
 
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
-		ctx->write_frontier = get_new_zone(ctx);
-		ctx->free_sectors_in_wf = ctx->nr_lbas_in_zone;
+		get_new_zone(ctx);
 		add_ckpt_new_wf(ctx, wf);
 		if (ctx->write_frontier < 0) {
 			printk(KERN_INFO "No more disk space available for writing!");
 			return -1;
 		}
+	}
+	if (ctx->write_frontier > ctx->wf_end) {
+		panic("wf > wf_end!!, nr_free_sectors: %d", ctx->free_sectors_in_wf );
 	}
 }
 
