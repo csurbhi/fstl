@@ -115,7 +115,7 @@ static struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
        return bio;
 }
 
-static struct kmem_cache *_extent_cache;
+static struct kmem_cache * extents_slab;
 #define IN_MAP 0
 #define IN_CLEANING 1
 #define STALLED_WRITE 2
@@ -760,12 +760,22 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 	return ((bytenr * BITS_IN_BYTE) + bitnr);
 }
 
+
+
+void update_elapsed_time(struct ctx *ctx, struct stl_seg_entry * cur_entry)
+{
+	time64_t elapsed_time, now = ktime_get_real_seconds();
+
+	elapsed_time = now - ctx->mounted_time;
+	cur_entry->mtime = elapsed_time;
+}
+
 /* moves the write frontier, returns the LBA of the packet trailer
 */
 static int get_new_zone(struct ctx *ctx)
 {
-	sector_t old_free = ctx->free_sectors_in_wf;
 	unsigned long zone_nr;
+	sector_t old_free = ctx->free_sectors_in_wf;
 	if (ctx->write_frontier > ctx->wf_end)
 		printk(KERN_INFO "kernel wf before BUG: %ld - %ld\n", ctx->write_frontier, ctx->wf_end);
 	BUG_ON(ctx->write_frontier > ctx->wf_end);
@@ -775,6 +785,7 @@ static int get_new_zone(struct ctx *ctx)
 		ctx->write_frontier = -1;
 		return (zone_nr);
 	}
+
 	/* get_next_freezone_nr() starts from 0. We need to adjust
 	 * the pba with that of the actual first PBA of data segment 0
 	 */
@@ -825,11 +836,19 @@ static int get_new_zone(struct ctx *ctx)
 
 static void add_ckpt_new_wf(struct ctx * ctx, sector_t wf)
 {
-	struct stl_ckpt_entry * table = &ctx->ckpt->ckpt_translation_table;
+	struct stl_ckpt *ckpt = ctx->ckpt;
+	struct stl_ckpt_entry * table = &ckpt->ckpt_translation_table;
 	table->prev_zone_pba = table->cur_zone_pba;
 	table->prev_count = table->cur_count;
 	table->cur_zone_pba = wf;
 	table->cur_count = 0;
+}
+
+static void do_checkpoint(struct ctx *ctx)
+{
+	struct stl_ckpt *ckpt = ctx->ckpt;
+	
+	ctx->flag_ckpt = 0;
 }
 
 static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
@@ -847,8 +866,18 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	
 	ctx->write_frontier = ctx->write_frontier + sectors_s8;
 	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
-
+	if (ctx->flag_ckpt == 0)
+		update_elapsed_time(ctx, &ctx->ckpt->prev_seg_entry);
+	else
+		update_elapsed_time(ctx, &ctx->ckpt->cur_seg_entry);
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
+		if (ctx->flag_ckpt == 1) {
+			/* prev_seg_entry and cur_seg_entry are both
+			 * full. Its time to flush the checkpoint
+			 */
+			//do_checkpoint();
+
+		}
 		get_new_zone(ctx);
 		add_ckpt_new_wf(ctx, wf);
 		if (ctx->write_frontier < 0) {
@@ -898,7 +927,6 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 
 	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
 	do {
-
 		WARN_ON(nbios >= 40);
 		/* 8 sectors (s8) forms a nr of BLOCKs of 4096 bytes */
 		nr_sectors = bio_sectors(bio);
@@ -968,7 +996,7 @@ again:
 		bio_set_dev(bios[i], ctx->dev->bdev);
 		generic_make_request(bios[i]); /* preserves ordering, unlike submit_bio */
 	}
-	atomic_inc(&c4);
+	atomic_inc(&nr_writes);
 	return;
 
 fail:
@@ -977,7 +1005,7 @@ fail:
 	for (i = 0; i < nbios; i++)
 		if (bios[i] && bios[i]->bi_private == ctx)
 			stl_endio(bio);
-	atomic_inc(&c5);
+	atomic_inc(&nr_failed_writes);
 }
 
 
@@ -1460,10 +1488,10 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", ctx->dev->bdev->bd_part->start_sect);
 	printk(KERN_INFO "\n sc->dev->bdev->bd_part->nr_sects: %llu", ctx->dev->bdev->bd_part->nr_sects);
 
-	ctx->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, _extent_cache);
+	ctx->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, extents_slab);
 	if (!ctx->extent_pool)
 		goto fail1;
-	
+
 	r = read_metadata(ctx);
 	if (r < 0)
 		goto fail2;
@@ -1632,7 +1660,7 @@ static int __init dm_stl_init(void)
 {
 	int r = -ENOMEM;
 
-	if (!(_extent_cache = KMEM_CACHE(extent, 0)))
+	if (!(extents_slab = KMEM_CACHE(extent, 0)))
 		return r;
 	if ((r = dm_register_target(&stl_target)) < 0)
 		goto fail;
@@ -1640,8 +1668,8 @@ static int __init dm_stl_init(void)
 	return 0;
 
 fail:
-	if (_extent_cache)
-		kmem_cache_destroy(_extent_cache);
+	if (extents_slab)
+		kmem_cache_destroy(extents_slab);
 	return r;
 }
 
@@ -1649,8 +1677,8 @@ fail:
 static void __exit dm_stl_exit(void)
 {
 	dm_unregister_target(&stl_target);
-	if(_extent_cache)
-		kmem_cache_destroy(_extent_cache);
+	if(extents_slab)
+		kmem_cache_destroy(extents_slab);
 }
 
 

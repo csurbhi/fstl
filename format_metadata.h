@@ -53,65 +53,48 @@ struct stl_seg_entry {
 } __attribute__((packed));
 
 
-/* The same structure is used for writing the header/trailer.
- * header->len is always 0. If you crash after writing the header
- * and some data but not the trailer, at remount time, you read
- * the blocks after the header till the end of the zone. If you
- * don't find the trailer, then you do not trust the trailing
- * data. When found, the trailer->len should
- * indicate the data that it covers. Every zone must have atleast
- * one header and trailer, but it could be multiple as well.
- */
-struct stl_header {
-	uint32_t magic;
-	uint32_t nonce;
-	uint32_t crc32;
-	uint16_t flags;
-	uint16_t len;
-	uint64_t prev_pba;
-	uint64_t next_pba;
-	uint64_t lba;
-	uint64_t pba;
-	uint64_t seq;
-} __attribute__((packed));
-
-
-
 /* In the worst case, we spend 80 bytes per block. There are 65536
  * such blocks. So we need 65536 such entries */
-struct stl_ckpt_extent {
+struct stl_revmap_extent {
 	__le64 lba;
 	__le16 len; /* At a maximum there are 65536 blocks in a zone */
 }__attribute__((packed));
 
 
-#define BLK_SIZE			4096
-#define NR_EXT_ENTRIES_PER_BLK 		BLK_SIZE/sizeof(struct stl_ckp_extent)
 
 /* We flush after every 655536 block writes or when the timer goes
  * off. prev_zonenr may not be recorded, in case we are recording the
  * mapping for the current zone alone. In that case prev_count will be
  * 0 as there are 0 entries recorded for previous zone
  */
-struct stl_ckpt_entry {
-	__le64 prev_zone_pba; /* This may not begin at 0th block in this zone */
-	__le64 cur_zone_pba;
-	__le16 prev_count;
-	__le16 cur_count;
-	struct stl_ckpt_extent extents[0];
-}__attribute__((packed));
 
+#define BLK_SIZE			4096
+#define NR_EXT_ENTRIES_PER_BLK 		BLK_SIZE/sizeof(struct stl_revmap_extent)
+#define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct stl_revmap_extent)
+#define MAX_EXTENTS_PER_ZONE		65536
+struct stl_revmap_entry_sector{
+	struct stl_revmap_extent extents[MAX_EXT_ENTRIES_PER_SEC];
+	__le32 crc;	/* We use 31 bits to indicate the crc and LSB bit maintains 0/1 for
+			   identifying if the sector belongs to this iteration or next
+			  */
+ }__attribute__((packed));
+
+/* first sector */
+struct stl_revmap_metadata {
+	__le32 zone_nr_0;
+	__le32 zone_nr_1;
+	__le8 version:1;  /* flips between 1 and 0 and is maintained in the crc */
+	__le8 padding[0]; /* padding for the sector */
+}__attribute__((packed));
 
 struct stl_ckpt {
 	uint32_t magic;
-	__le64 checkpoint_ver;
 	__le64 user_block_count;
 	__le64 valid_block_count;
 	__le32 free_segment_count;
 	__le64 cur_frontier_pba;
-	struct stl_seg_entry prev_seg_entry;
-	struct stl_seg_entry cur_seg_entry;
-	struct stl_ckpt_entry ckpt_translation_table;
+	__le64 elapsed_time;		/* records the time elapsed since all the mounts */
+	__le8 padding[0]; /* write all this in the padding */
 } __attribute__((packed));
 
 
@@ -130,7 +113,7 @@ struct stl_sb {
 	__le32 blk_count_sit;		/* # of segments for SIT */
 	__le32 zone_count_reserved;	/* # CMR zones that are reserved */
 	__le32 zone_count_main;		/* # of segments for main area */
-	__le32 cp_pba;			/* start block address of checkpoint */
+	__le32 rev_pba;			/* start block address of checkpoint */
 	__le32 map_pba;			/* start block address of NAT */
 	__le32 sit_pba;			/* start block address of SIT */
 	__le32 zone0_pba;		/* start block address of segment 0 */

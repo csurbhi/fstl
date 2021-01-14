@@ -507,20 +507,19 @@ int main()
 	read_sb(fd, 8);
 	printf("\n Superblock written at pba: %d", pba + NR_SECTORS_IN_BLK);
 	free(sb2);
+	write_revmap();
 	write_ckpt(fd, sb1, sb1->cp_pba);
 	printf("\n Checkpoint written at offset: %d", sb1->cp_pba);
-	write_ckpt(fd, sb1, sb1->cp_pba + NR_SECTORS_IN_BLK);
-	printf("\n Checkpoint written at offset: %d", sb1->cp_pba + NR_SECTORS_IN_BLK);
 	nrblks = get_nr_blks(sb1);
 	printf("\n nrblks: %lu", nrblks);
 	write_map(fd, nrblks, sb1->map_pba);
+	write_translation_table();
 	printf("\n Extent map written");
 	printf("\n sb1->zone_count: %d", sb1->zone_count);
 	write_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
 	printf("\n Segment Information Table written");
 	pba = 0;
 	read_ckpt(fd, sb1, sb1->cp_pba);
-	read_ckpt(fd, sb1, sb1->cp_pba + NR_SECTORS_IN_BLK);
 	free(sb1);
 	close(fd);
 	/* 0 volume_size: 39321600  nstl  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */

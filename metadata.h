@@ -18,7 +18,8 @@
 #define NR_SECTORS_IN_BLK 8
 #define BITS_IN_BYTE 8
 #define LOG_SECTOR_SIZE 9
-static atomic_t c1, c2, c3, c4, c5;
+static atomic_t nr_writes, nr_failed_writes;
+
 
 struct zone_summary_info {
 	sector_t table_lba;	/* start block address of SIT area */
@@ -154,6 +155,9 @@ struct ctx {
 	char *gc_zone_bitmap;
 	int nr_gc_zones;
 	int	bitmap_bytes;
+	time64_t mounted_time;
+	time64_t elapsed_time;
+	unsigned int flag_ckpt;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 
