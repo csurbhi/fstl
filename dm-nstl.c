@@ -580,23 +580,54 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 	printk(KERN_ERR "\n Read end");
 }
 
-
-static void stl_endio(struct bio *bio)
+/* can you create the translation entry here?
+ * What happens if you put a translation entry
+ * for some data that did not make it to
+ * the disk? Partial writes to such block
+ * entries can end up rewriting data that
+ * is partially uptodate and correct, and partially
+ * stale and wrong. Thus there should be no wrong
+ * entry in the translation map.
+ */
+static void nstl_clone_endio(struct bio * clone)
 {
-	int i = 0;
-	struct bio_vec * bv;
-	struct ctx *sc = bio->bi_private;
-	struct bvec_iter_all iter_all;
-
-	bio_for_each_segment_all(bv, bio, iter_all) {
-		WARN_ON(!bv->bv_page);
-		mempool_free(bv->bv_page, sc->page_pool);
-		atomic_dec(&sc->pages_alloced);
-		bv->bv_page = NULL;
-		i++;
+	struct nstl_bioctx *bioctx = clone->private;
+	struct bio *bio = bioctx->orig;
+	struct ctx * ctx = bioctx->ctx;
+	if (private->magic != BIOCTX_MAGIC) {
+		/* private has been overwritten */
+		return;
 	}
-	WARN_ON(i != 1);
-	bio_put(bio);
+	/* If a single segment of the bio fails, the bio should be
+	 * recorded with this status. No translation entry
+	 * for the entire original bio should be maintained
+	 */
+	if (clone->bi_status != BLK_STATS_OK && bio->bi_status == BLK_STATS_OK) {
+		bio->bi_status = clone->bi_satus;
+		/* we don't keep partial bio translation map entries.
+		 * The write either succeeds atomically or does not at
+		 * all
+		 */
+		remove_revmap_entry(ctx, bio);
+		reduce_nr_valid_blocks(ctx, bio);
+		/* If this is a SMR zone, then a sector write failure
+		 * causes all further I/O in that zone to fail.
+		 * Hence we can no longer write to this zone
+		 */
+		if(nstl_zone_seq())
+			mark_zone_erroneous();
+		/* If this zone is sequential, then we do not have
+		 * to do anything. There will be a gap in this
+		 * segment. But thats about it.
+		 */
+	}
+	/* When the refcount becomes 0, we need to call the bio_endio
+	 * of the original bio
+	 */
+	if (refcount_dec_and_test(&bioctx->ref))
+		bio_endio(bio);
+
+	bio_put(clone);
 }
 
 /* could be a macro, I guess */
@@ -851,6 +882,8 @@ static void do_checkpoint(struct ctx *ctx)
 	ctx->flag_ckpt = 0;
 }
 
+/* TODO: We need to do this under a lock for concurrent writes
+ */
 static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 {
 	static int nrwrites = 0;
@@ -890,19 +923,62 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	}
 }
 
+void wait_on_barrier(struct ctx * ctx, waitqueue_t flushq_head, all_sectors_on_disk == 1, )
+{
+	spin_lock_irq(&ctx->flush_lock);
+	wait_event_lock_irq(flushq_head, !atomic_read(ctx->pending_writes), &ctx->flush_lock);
+	spin_unlock_irq(&ctx->flush_lock);
+}
 
+/*
+ * a) before flushing the translation entries to the disk, we need to
+ * make sure that the corresponding data blocks are on the disk. 
+ * b) create a bio from the page, associate a endio with it.
+ * c) flush the page
+ * d) make sure the entries are on the disk, before we overwrite.
+ */
+void flush_revmap_sector_disk()
+{
+	
 
+}
 /* We store only the LBA. We can calculate the PBA from the wf
  */
-static void add_ckpt_mapping(struct ctx * ctx, sector_t lba, unsigned int nrsectors)
+static void add_revmap_entries(struct ctx * ctx, sector_t lba, unsigned int nrsectors)
 {
-	struct stl_ckpt_entry * table = &ctx->ckpt->ckpt_translation_table;
-	table->cur_count += 1;
-	unsigned int index = table->cur_count + table->prev_count;
+	struct stl_revmap_entry_sector * revmap_ptr;
+	int i;
 
-	table->extents[index].lba = lba;
-	/* we store the length in terms of blocks */
-	table->extents[index].len = nrsectors/NR_SECTORS_IN_BLK;
+	i = atomic_read(&ctx->revmap_blk_count);
+	if (0 == i) {
+		/* we need to make sure the previous block is on the
+		 * disk. We cannot overwrite without that.
+		 */
+		ptr = ctx->rev_ent_page;
+	}
+	i = atomic_read(&ctx->revmap_sector_count);
+	if (NR_EXT_ENTRIES_PER_SEC == i) {
+		ptr->crc = calculate_crc();
+		/* Flush the entries to the disk */
+		flush_revmap_sector_disk();
+		atomic_set(&ctx->revmap_sector_count, 0);
+		ptr = ptr + SECTOR_SIZE;
+		if (NR_ENTRIES_PER_BLK == j) {
+#ifdef BARRIER_NSTL
+			wait_on_barrier();
+#endif                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+			atomic_set(&ctx->revmap_blk_count, 0);
+		}
+	}
+	ptr->extents[i].lba = lba;
+	/* we store the len in terms of sectors. If we stored in
+	 * terms of number of blocks, then we would have to
+	 * store 0s on the disk when the writes are not
+	 * complete blocks
+	 */
+	ptr->extents[i].len = nrsectors;
+	atomic_inc(&ctx->revmap_sector_count);
+	atomic_inc(&ctx->revmap_blk_count);
 	return;
 }
 
@@ -912,6 +988,8 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 {
 	struct bio *split = NULL, *pad = NULL;
 	struct bio *bios[100];
+	struct bio * clone;
+	struct nstl_bioctx * bioctx;
 	int i;
 	volatile int nbios = 0;
 	unsigned long flags, t1, t2;
@@ -919,9 +997,38 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 	sector_t s8, sector = bio->bi_iter.bi_sector;
 	struct extent *e;
 	sector_t next_header;
+	struct stl_rev_map_entry_sector revmap_sector;
+	
 
 	/* wait until there's room
 	*/
+
+	bioctx = kmem_cache_alloc(ctx->bioctx_cache, GFP_KERNEL)l;
+	if (!bioctx) {
+		printf(KERN_ERR "\n Insufficient memory!");
+		bio->bi_status = BLK_STS_RESOURCE;
+		bio_endio(bio);
+		/* We dont call bio_put() because the bio should not
+		 * get freed by memory management before bio_endio()
+		 */
+		return;
+	}
+	
+	bioctx->clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
+	if (!clone) {
+		printf(KERN_ERR "\n Insufficient memory!");
+		bio->bi_status = BLK_STS_RESOURCE;
+		bio_endio(bio);
+		/* We dont call bio_put() because the bio should not
+		 * get freed by memory management before bio_endio()
+		 */
+		return;
+	}
+	bioctx->orig = bio;
+	clone = bioctx->clone;
+	/* TODO: Initialize refcount in bioctx and increment it every
+	 * time bio is split or padded */
+	refcount_set(&bioctx->ref, 1);
 
 	printk(KERN_ERR "\n write frontier: %lu free_sectors_in_wf: %lu", ctx->write_frontier, ctx->free_sectors_in_wf);
 
@@ -929,16 +1036,16 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 	do {
 		WARN_ON(nbios >= 40);
 		/* 8 sectors (s8) forms a nr of BLOCKs of 4096 bytes */
-		nr_sectors = bio_sectors(bio);
+		nr_sectors = bio_sectors(clone);
 		if (unlikely(nr_sectors <= 0)) {
 			printk(KERN_ERR "\n Less than 0 sectors (%d) requested!, nbios: %u", nr_sectors, nbios);
 			break;
 		}
-		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
-
 		spin_lock_irqsave(&ctx->lock, flags);
 		/*-------------------------------*/
 
+		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+		wf = get_write_frontier(ctx);
 		/* room_in_zone should be same as
 		 * ctx->nr_free_sectors_in_wf
 		 */
@@ -949,31 +1056,37 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 			}
 			nr_sectors = s8;
 		} /* else we need to add a pad to rounded up value (nr_sectors < s8) */
+		move_write_frontier(ctx, s8);
+
 		/*-------------------------------*/
 		spin_unlock_irqrestore(&ctx->lock, flags);
 		printk(KERN_ERR "\n nbios: %d", nbios);
-		if (s8 < bio_sectors(bio)) {
-			if (!(split = bio_split(bio, nr_sectors, GFP_NOIO, ctx->bs))){
+		if (s8 < bio_sectors(clone)) {
+			if (!(split = bio_split(clone, nr_sectors, GFP_NOIO, ctx->bs))){
 				printk(KERN_ERR "\n failed at bio_split! nbios: %d", nbios);
 				goto fail;
 			}
-			bio_chain(split, bio);
+			bio_chain(split, clone);
 			bios[nbios++] = split;
 		} else {
-			bios[nbios++] = bio;
-			split = bio;
+			bios[nbios++] = clone;
+			split = clone;
 		}
 again:
 		/* pad length is in sectors (like arg to alloc_bio)
 		*/
 		if (nr_sectors < s8) {
-			/* we are here when we did not split */
+			/* we are here when we did not split and when
+			 * the request is not block size aligned,
+			 * and can be satisfied from the number of
+			 * free blocks in the current write frontier.
+			 */
 			int padlen = s8 - nr_sectors;
 			if (!(pad = stl_alloc_bio(ctx, padlen, NULL))){
 				printk(KERN_ERR "\n failed at stl_alloc_bio, padlen: %d!", padlen);
 				goto fail;
 			}
-			setup_bio(pad, stl_endio, ctx->dev->bdev, ctx->write_frontier + nr_sectors, ctx, WRITE);
+			setup_bio(pad, nstl_clone_endio, ctx->dev->bdev, wf + nr_sectors, ctx, WRITE);
 			bios[nbios++] = pad;
 		}
 
@@ -982,19 +1095,21 @@ again:
 		/*Update the translation table with the LBA:sector and
 		 * our new PBA: wf
 		 */
-		e = stl_update_range(ctx, sector, ctx->write_frontier, nr_sectors);
-		split->bi_iter.bi_sector = ctx->write_frontier;
-		add_ckpt_mapping(ctx, sector, s8);
+		e = stl_update_range(ctx, sector, wf, nr_sectors);
+		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
+		add_revmap_entries(ctx, wf, sector, s8);
 		//printk(KERN_ERR "\n nr_sectors: %d, s8 = %d, free_sectors_in_wf: %d, PBA: %ull", nr_sectors, s8, ctx->free_sectors_in_wf, ctx->write_frontier);
-		move_write_frontier(ctx, s8);
 		/* Add this mapping the ckpt region */
-	} while (split != bio);
+	} while (split != clone);
 
 
 	//printk(KERN_ERR "\n %s %s %d nbios: %d ", __FILE__, __func__, __LINE__, nbios);
 	for (i = 0; i < nbios; i++) {
 		bio_set_dev(bios[i], ctx->dev->bdev);
+		bios[i]->bi_end_io = nstl_clone_endio;
+		bios[i]->private = bioctx;
 		generic_make_request(bios[i]); /* preserves ordering, unlike submit_bio */
+		refcount_inc(&bioctx->ref);
 	}
 	atomic_inc(&nr_writes);
 	return;
@@ -1004,7 +1119,7 @@ fail:
 	bio->bi_status = BLK_STS_IOERR; 	
 	for (i = 0; i < nbios; i++)
 		if (bios[i] && bios[i]->bi_private == ctx)
-			stl_endio(bio);
+			nstl_clone_endio(bio);
 	atomic_inc(&nr_failed_writes);
 }
 
@@ -1529,6 +1644,10 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	atomic_set(&ctx->io_count, 0);
 	atomic_set(&ctx->n_reads, 0);
 	atomic_set(&ctx->pages_alloced, 0);
+	atomic_set(&ctx->nr_writes, 0);
+	atomic_set(&ctx->nr_failed_writes, 0);
+	atomic_set(&ctx->revmap_sector_count, 0);
+	atomic_set(&ctx->revmap_blk_count, 0);
 	ctx->target = 0;
 
 	r = -ENOMEM;
@@ -1556,10 +1675,24 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 
 	r = stl_gc_thread_start(ctx);
-	if (!r) {
-		return 0;
+	if (r) {
+		goto stop_gc_thread;
+	}
+
+	ctx->rev_ent_page = get_zeroed_page(GFP_KERNEL);
+	if (!ctx->page) {
+		goto fail8;
+	}
+
+	ctx->bioctx_cache = kmem_cache_create("nstl_bioctx_cache", sizeof(struct nstl_bioctx), 0, NULL);
+	if (!ctx->bioctx_cache) {
+		goto free_zeroed_page;
 	}
 /* failed case */
+free_zeroed_page:
+	free_page(ctx->rev_ent_page);
+stop_gc_thread:
+	stl_gc_thread_stop(ctx);
 fail7:
 	bioset_exit(ctx->bs);
 fail6:
@@ -1594,6 +1727,8 @@ static void stl_dtr(struct dm_target *ti)
 	struct ctx *ctx = ti->private;
 	ti->private = NULL;
 
+	kmem_cache_destroy(ctx->bioctx_cache);
+	free_page(ctx->rev_ent_page);
 	stl_gc_thread_stop(ctx);
 	bioset_exit(ctx->bs);
 	kfree(ctx->bs);

@@ -18,25 +18,24 @@
 #define NR_SECTORS_IN_BLK 8
 #define BITS_IN_BYTE 8
 #define LOG_SECTOR_SIZE 9
-static atomic_t nr_writes, nr_failed_writes;
 
+struct stl_revmap_entry_mem {
+	struct stl_revmap_entry revmap_mem_entry;
+	char writable; 
+}
 
-struct zone_summary_info {
-	sector_t table_lba;	/* start block address of SIT area */
-	unsigned int nr_table_blocks;
-	unsigned int nr_valid_blocks;
-	char *seg_bitmap;
-	char *invalid_seg_map;
-	unsigned int bitmap_size;
-	unsigned int seg_entries_per_blk;
-	struct rw_semaphore seg_entry_lock;
-	struct stl_seg_entry *seg_entry_cache;
-	unsigned long elapsed_time;
-	unsigned long mounted_time;
-	unsigned long min_mtime;
-	unsigned long max_mtime;
-	unsigned int last_victim[2];
-};
+struct stl_revmap_entry_sec_mem {
+	struct stl_revmap_entry_sector revmap_sector;
+	char writable;
+}
+
+struct nstl_bioctx {
+	struct bio * clone;
+	recount_t ref;
+	struct bio * orig;
+	u8 magic;
+	struct ctx *ctx;
+}	
 
 struct free_zone_info {
 	unsigned int nr_free_zones;
@@ -158,6 +157,12 @@ struct ctx {
 	time64_t mounted_time;
 	time64_t elapsed_time;
 	unsigned int flag_ckpt;
+	struct page *rev_ent_page;
+	atomic_t nr_writes;
+       	atomic_t nr_failed_writes;
+       	atomic_t revmap_sector_count;
+       	atomic_t revmap_blk_count;
+	struct kmem_cache * bioctx_cache;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 
