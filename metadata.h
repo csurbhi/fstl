@@ -19,6 +19,24 @@
 #define BITS_IN_BYTE 8
 #define LOG_SECTOR_SIZE 9
 
+
+#define REVMAP_PRIV_MAGIC 0x5
+#define MAX_ZONE_REVMAP 2
+
+struct trans_page_write_ctx {
+	struct ctx *ctx;
+	struct closure *cl;
+};
+
+struct revmap_meta_inmem {
+	u64 revmap_pba;			/* PBA where the revmap entries should be written. Reset when the refcount is 0
+					 */
+	struct ctx * ctx;
+	struct page *page;
+	struct closure *cl;
+	u8 magic;
+};
+
 struct stl_revmap_entry_mem {
 	struct stl_revmap_entry revmap_mem_entry;
 	char writable; 
@@ -27,15 +45,21 @@ struct stl_revmap_entry_mem {
 struct stl_revmap_entry_sec_mem {
 	struct stl_revmap_entry_sector revmap_sector;
 	char writable;
-}
+};
 
 struct nstl_bioctx {
 	struct bio * clone;
 	recount_t ref;
 	struct bio * orig;
-	u8 magic;
 	struct ctx *ctx;
-}	
+};
+
+struct nstl_sub_bioctx {
+	struct extent_map * extent;
+	struct nstl_bioctx * bioctx;
+	u8 magic;
+};
+
 
 struct free_zone_info {
 	unsigned int nr_free_zones;
@@ -157,12 +181,18 @@ struct ctx {
 	time64_t mounted_time;
 	time64_t elapsed_time;
 	unsigned int flag_ckpt;
-	struct page *rev_ent_page;
 	atomic_t nr_writes;
        	atomic_t nr_failed_writes;
        	atomic_t revmap_sector_count;
        	atomic_t revmap_blk_count;
 	struct kmem_cache * bioctx_cache;
+	struct kmem_cache * revmap_bioctx_cache;
+	waitqueue_t flushq_head;
+	atomic_t zone_revmap_count;	/* This should always be less than 3, incremented on get_new_zone and decremented
+					 * when one zone worth of entries are written to the disk
+					 */
+	sector_t revmap_pba;
+	spinlock_t flush_lock;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 

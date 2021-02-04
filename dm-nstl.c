@@ -5,6 +5,11 @@
  * This file is released under the GPL.
  */
 
+/*TODO:
+ * Convert length to be that of blocks.
+ * Currently it is that of sectors
+ */
+
 #include <linux/slab.h>
 #include <linux/blkdev.h>
 #include <linux/mempool.h>
@@ -306,6 +311,12 @@ static int gc_zonenr(int zonenr)
 	return 0;
 }
 
+/*
+ * TODO: When we want to mark a zone free create a bio with opf:
+ * REQ_OP_ZONE_RESET
+ *
+ *
+ */
 static int gc_thread_fn(void * data)
 {
 
@@ -591,10 +602,12 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
  */
 static void nstl_clone_endio(struct bio * clone)
 {
-	struct nstl_bioctx *bioctx = clone->private;
+	struct nstl_sub_bioctx *subbioctx = clone->private;
+	struct nstl_bioctx *bioctx;
 	struct bio *bio = bioctx->orig;
 	struct ctx * ctx = bioctx->ctx;
-	if (private->magic != BIOCTX_MAGIC) {
+
+	if (private->magic != SUBBIOCTX_MAGIC) {
 		/* private has been overwritten */
 		return;
 	}
@@ -608,7 +621,6 @@ static void nstl_clone_endio(struct bio * clone)
 		 * The write either succeeds atomically or does not at
 		 * all
 		 */
-		remove_revmap_entry(ctx, bio);
 		reduce_nr_valid_blocks(ctx, bio);
 		/* If this is a SMR zone, then a sector write failure
 		 * causes all further I/O in that zone to fail.
@@ -621,11 +633,20 @@ static void nstl_clone_endio(struct bio * clone)
 		 * segment. But thats about it.
 		 */
 	}
+
+	/* We add the translation entry only when we know
+	 * that the write has made it to the disk
+	 */
+	if(clone->bi_status == BLK_STATS_OK) {
+		e = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		add_revmap_entries(ctx, subbioctx->extent.pba, subbioctx->extent.lba, subbioctx->extent.len);
+	}
 	/* When the refcount becomes 0, we need to call the bio_endio
 	 * of the original bio
 	 */
-	if (refcount_dec_and_test(&bioctx->ref))
+	if (refcount_dec_and_test(&bioctx->ref)) {
 		bio_endio(bio);
+	}
 
 	bio_put(clone);
 }
@@ -807,6 +828,11 @@ static int get_new_zone(struct ctx *ctx)
 {
 	unsigned long zone_nr;
 	sector_t old_free = ctx->free_sectors_in_wf;
+
+
+	atomic_inc(&ctx->zone_revmap_count);
+	wait_on_zone_barrier(ctx);
+
 	if (ctx->write_frontier > ctx->wf_end)
 		printk(KERN_INFO "kernel wf before BUG: %ld - %ld\n", ctx->write_frontier, ctx->wf_end);
 	BUG_ON(ctx->write_frontier > ctx->wf_end);
@@ -923,62 +949,550 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	}
 }
 
-void wait_on_barrier(struct ctx * ctx, waitqueue_t flushq_head, all_sectors_on_disk == 1, )
+/* 
+ * We should be ideally be using to make sure that
+ * one block worth of translation entries have made it to the 
+ * disk. Not using this, will work in most case.
+ * But no guarantees can be given
+ */
+void wait_on_block_barrier(struct ctx * ctx);
 {
 	spin_lock_irq(&ctx->flush_lock);
-	wait_event_lock_irq(flushq_head, !atomic_read(ctx->pending_writes), &ctx->flush_lock);
+	wait_event_lock_irq(&ctx->blk_of_ent_flushq, !atomic_read(ctx->pending_writes), &ctx->flush_lock);
 	spin_unlock_irq(&ctx->flush_lock);
 }
 
-/*
- * a) before flushing the translation entries to the disk, we need to
- * make sure that the corresponding data blocks are on the disk. 
- * b) create a bio from the page, associate a endio with it.
- * c) flush the page
- * d) make sure the entries are on the disk, before we overwrite.
- */
-void flush_revmap_sector_disk()
+void wait_on_zone_barrier(struct ctx * ctx)
 {
-	
+	spin_lock_irq(&ctx->flush_lock);
+	/* wait until atleast one zone's revmap entries are flushed */
+	wait_event_lock_irq(&ctx->zone_entry_flushq, (MAX_ZONE_REVMAP >= atomic_read(ctx->zone_revmap_count), &ctx->flush_lock);
+	spin_unlock_irq(&ctx->flush_lock);
+	checkpoint();
+}
+
+
+/*
+ * If this length cannot be accomodated in this page
+ * search and add another page for this next
+ * lba. Remember this translation table will
+ * go on the disk and is block based and not 
+ * extent based
+ *
+ * Depending on the location within a page, add the lba.
+ */
+int add_translation_entry(struct page *page, unsigned long lba, unsigned long pba, unsigned long len)
+{
+	struct translation_map_entry * ptr;
+	int i;
+
+	ptr = (translation_map_entry *) page_address(page);
+	entry_nr = get_entry_nr(lba);
+	ptr = ptr + entry_nr;
+
+	/* Assuming len is in terms of sectors 
+	 * We convert sectors to blocks
+	 */
+	for (i=0; i<len/8; i++) {
+		ptr->lba = lba;
+		ptr->pba = pba;
+		lba = lba + BLK_SIZE;
+		pba = pba + BLK_SIZE;
+		ptr = ptr + 1;
+		entry_nr = entry_nr + 1;
+		if (entry_nr == ENTRIES_IN_BLK) {
+			trans_page = search_kv_store(lba);
+			if (!trans_page) {
+				trans_page = add_entry_kv_store(lba);
+			}
+			ptr = (translation_map_entry *) page_address(page);
+			entry_nr = 0;
+		}
+	}	
 
 }
+
+void read_transbl_complete(struct bio * bio)
+{
+	struct closure *cl = bio->private;
+
+	closure_put(&cl);
+}
+
+struct page * read_translation_block(u64 pba)
+{
+	struct bio * bio;
+	struct closure *cl;
+	struct page *page;
+
+
+	page = get_zeroed_page(GFP_KERNEL);
+	if (!page)
+		return NULL;
+
+	closure_init_stack(&cl);
+	bio = bio_alloc(GFP_KERNEL, 1);
+	if (!bio) {
+		return NULL;
+	}
+	
+	/* bio_add_page sets the bi_size for the bio */
+	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
+		bio_put(bio);
+		return NULL;
+	}
+	bio->bi_end_io = read_transbl_complete();
+	bio->bi_private = &cl;
+	bio_set_op_attrs(&bio, REQ_OP_READ, 0);
+	bio->bi_sector = pba;
+	bio_submit(bio);
+	closure_sync(&cl);
+	if (bio->bi_status != BLK_STS_OK) {
+		printk(KERN_DEBUG "\n Could not read the translation entry block");
+		bio_free_pages();
+		return NULL;
+	}
+	/* bio_alloc() hence bio_put() */
+	bio_put();
+	return page;
+}
+
+/*
+ * If a match is found, then returns the matching
+ * entry 
+ */
+struct trans_entry_mem * search_kv_store(struct ctx *ctx, u64 blknr, struct trans_entry_mem **parent)
+{
+	struct rb_root *rb_root = ctx->trans_rb_root;
+	struct rb_node *node = NULL;
+
+	struct trans_entry_mem *node_ent;
+
+	node = root->rb_node;
+	while(node) {
+		*parent = node;
+		node_ent = container_of(*parent, struct trans_ent_mem, rb);
+		if (blknr == node_ent->blknr) {
+			return node_ent;
+		}
+		if (blknr < node_ent->blknr) {
+			node = node->left;
+		} else {
+			node = node->right;
+		}
+	}
+	return NULL;
+}
+
+
+struct page *remove_entry_kv_store(struct ctx *ctx, u64 lba)
+{
+	u64 start_lba = lba - lba % TRANS_ENT_PER_BLK;
+	u64 blknr = start_lba / TRANS_ENT_PER_BLK;
+	struct rb_node *parent = NULL;
+	struct rb_root *rb_root = ctx->trans_rb_root;
+
+	struct trans_entry_mem *new;
+
+	new = search_kv_store(blknr, &parent);
+	if (new)
+		return new;
+
+	rb_erase(&new->rb, rb_root);
+	atomic_dec(ctx->trans_pages);
+}
+
+void write_transbl_complete(struct bio *bio)
+{
+	struct ctx *ctx;
+	struct trans_page_write_ctx *trans_page_write_ctx;
+
+	trans_page_write_ctx = (struct trans_page_write_ctx *) bio->private;
+	ctx = trans_page_write_ctx->ctx;
+	cl = trans_page_write_ctx->cl;
+
+	if (bio->bi_status != BLK_STS_OK) {
+		/*TODO: Perhaps retry!! or do something more
+		 * or else you will loose the translation entries.
+		 * write them some place else!
+		 */
+		printk(KERN_DEBUG "\n Could not read the translation entry block");
+		return NULL;
+	}
+	closure_put(cl);	
+	bio_free_page(bio);
+	/* bio_alloc(), hence bio_put() */
+	bio_put(bio);
+	atomic_dec(ctx->trans_pages);
+}
+
+/* We don't wait for the bios to complete 
+ * flushing. We only initiate the flushing
+ */
+void flush_node_page(struct rb_node *node, struct ctx *ctx)
+{
+	struct page *page; 
+	struct trans_entry_mem *node_ent;
+	u64 pba;
+	struct bio * bio;
+	struct trans_page_write_ctx *trans_page_write_ctx;
+
+	bio = bio_alloc(GFP_KERNEL, 1);
+	if (!bio) {
+		return NULL;
+	}
+	
+
+
+	trans_page_write_ctx = kmem_cache_alloc(ctx->trans_page_write_cache, GFP_KERNEL);
+	if (!trans_page_write_ctx) {
+		bio_put(bio);
+		return NULL;
+	}
+
+	node_ent = container_of(*parent, struct trans_ent_mem, rb);
+	page = node_ent->page;
+	pba = node_ent->blkrnr + ctx->sb->tm_map;
+	page = node_ent->page;
+	/* bio_add_page sets the bi_size for the bio */
+	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
+		bio_put(bio);
+		return NULL;
+	}
+	bio->bi_end_io = write_transbl_complete();
+	bio_set_op_attrs(&bio, REQ_OP_WRITE, 0);
+	bio->bi_sector = pba;
+	trans_page_write_ctx->cl = node_ent->cl;
+       	trans_page_write_ctx->ctx = ctx;	
+	bio->private = trans_page_write_ctx;
+	bio_submit(bio);
+	return page;
+
+
+}
+
+
+void flush_nodes(struct rb_node *node, struct ctx *ctx)
+{	
+	flush_node_page(node, ctx);
+	if (node->left)
+		flush_nodes(node->left, ctx);
+	if (node->right)
+		flush_node(node->right, ctx);
+}
+
+void flush_translation_blocks(ctx *ctx)
+{
+	struct rb_root *rb_root = ctx->trans_rb_root;
+	struct rb_node *node = NULL;
+	struct blk_plug plug;
+
+	struct trans_entry_mem *node_ent;
+	blknr = blknr + ctx->sb->tm_pba;
+
+
+	node = root->rb_node;
+	if (!node)
+		return;
+
+	/* We flush these sequential pages
+	 * together so that they can be 
+	 * written together
+	 */
+	blk_start_plug(&plug);
+	flush_nodes(node, ctx);
+	blk_finish_plug(&plug);	
+}
+/*
+ * TODO: Use locks while adding entries to the KV store to protect
+ * against concurrent access
+ */
+struct page *add_entry_kv_store(struct ctx *ctx, u64 lba, struct closure *cl)
+{
+	u64 start_lba = lba - lba % TRANS_ENT_PER_BLK;
+	u64 blknr = start_lba / TRANS_ENT_PER_BLK;
+	struct rb_node *parent = NULL;
+
+	struct trans_entry_mem *new;
+
+	new = search_kv_store(ctx, blknr, &parent);
+	if (new)
+		return new->page;
+
+	new = kmem_cache_alloc(ctx->trans_mem_ent_cache, GFP_KERNEL);
+	if (!new)
+		return NULL;
+
+	RB_CLEAR_NODE(&new->rb);
+
+	page = read_translation_block(blknr);
+	if (!page) {
+		kmem_cache_free(ctx->trans_mem_ent_cache, new);
+		return NULL;
+	}
+
+	/* Add this page to a RB tree based KV store.
+	 * Key is: blknr for this corresponding block
+	 */
+	if (blknr < parent->blknr) {
+		/* Attach new node to the left of parent */
+		rb_link_node(&new->rb, parent, &parent->left);
+	}
+	else { 
+		/* Attach new node to the right of parent */
+		rb_link_node(&new->rb, parent, &parent->right);
+	}
+	new->blknr = blknr;
+	new->page = page;
+	new->cl = cl;
+	closure_get(&cl);
+	rb_insert_color(&new->rb, root);
+	atomic_inc(ctx->trans_pages);
+	if (atomic_read(ctx->trans_pages) >= MAX_TRANS_PAGES) {
+		if (spin_trylock(&ctx->flush_lock)) {
+			/* Only one flush operation at a time 
+			 * but we dont want to wait.
+			 */
+			flush_translation_blocks(ctx);
+			spin_unlock(&ctx->flush_lock);
+		}
+	}
+
+	return page;
+}
+
+/* Make the length in terms of sectors or blocks?
+ */
+int add_block_based_translation(struct ctx, struct page *page, u64 pba, struct closure *cl)
+{
+	
+	struct stl_revmap_entry_sector * ptr;
+	struct page * trans_page = NULL;
+
+	ptr = (struct stl_revmap_entry_sector *)page_address(page);
+	
+	nr_entries = PAGE_SIZE/sizeof(struct stl_revmap_entry_sector);
+	i = 0;
+	while (i < nr_entries;
+		trans_page = add_entry_kv_store(ctx, ptr->lba, cl);
+		if (!trans_page)
+			return -ENOMEM;
+		add_translation_entry(trans_page, ptr->lba, ptr->pba, ptr->len);
+		ptr = ptr + 1;
+		i++;
+	}
+	return 0;
+}
+
+/*
+ * Revmap bitmap: 0 indicates that a block is available for reuse.
+ * 1 indicates that the entries on that revblock are not yet flushed
+ * at its correct location in the translation map.
+ * The map is stored at sector pba=sb->revmap. 
+ * Revmap store 2 * 655536 entries that is equal to the number
+ * of blocks in 2 zones. Each entry is 80 bytes and each sector
+ * of 512 bytes stores 6 such entries. To store 131072 entries we need
+ * 21845 sectors, that is 2731 blocks. Thus our bitmap should have
+ * 2731 bits i.e 342 bytes. Thus the bitmap spans one sector on disk
+ */
+
+void read_revmap_bitmap(struct ctx *ctx)
+{
+}
+
+void flush_revmap_bitmap(struct ctx *ctx)
+{
+}
+
+void mark_revmap_bit(struct ctx *ctx, u64 pba)
+{
+
+}
+
+
+void clear_revmap_bit(struct ctx *ctx, u64 pba)
+{
+	char *ptr = ctx->revmap_bitmap;
+
+}
+
+
+/*
+ * TODO: Error handling metadata flushing
+ *
+ */
+void revmap_entries_flushed(struct bio *bio)
+{
+	struct ctx * ctx = bio->private;
+	struct revmap_meta_inmem *revmap_bio_ctx;
+	sector_t pba;
+	struct page *page;
+
+	switch(bio->bi_status) {
+		case BLK_STS_OK:
+			atomic_dec(&ctx->pending_writes);
+			//wake_up(&ctx->flushq_head);
+			revmap_bio_ctx = bio->bi_private;
+			if (revmap_bio_ctx->priv_magic != REVMAP_PRIV_MAGIC) {
+				printk(KERN_ERR "\n bio->bi_private modified!!");
+				panic();
+				return;
+			}
+			pba = revmap_bio_ctx->pba;
+			if (pba == zone_end(ctx, pba)) {
+				atomic_dec(&ctx->zone_revmap_count);
+			}
+			wake_up(&ctx->zone_entry_flushq);
+			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx->revmap_pba, revmap_bio_ctx->cl);
+			/* closure will be synced when all the
+			 * translation entries are flushed
+			 * to the disk. We free the page before
+			 * since the entries in that page are already
+			 * copied.
+			 */
+			bio_free_pages(bio);
+			closure_sync(&revmap_bio_ctx->cl);
+			/* now we calculate the pba where the revmap
+			 * is flushed. We can reuse that pba as all
+			 * entries related to it are on disk in the
+			 * right place.
+			 */
+			pba = bio->bi_sector.
+			mark_revmap_bitmap(ctx, pba);
+			break;
+		case BLK_STS_AGAIN:
+			/* retry a limited number of times.
+			 * Maintain a retrial count in
+			 * bio->bi_private
+			 */
+			break;
+		default:
+			break;
+	}
+}
+
+
+/*
+ * a) create a bio from the page, associate a endio with it.
+ * b) flush the page
+ * c) make sure the entries are on the disk, before we overwrite.
+ *
+ * TODO: better error handling!
+ */
+int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
+{
+	struct bio * bio;
+	struct revmap_meta_inmem *revmap_bio_ctx;
+	struct closure *cl;
+
+	cl = (struct closure *) kmalloc(sizeof(struct closure), GFP_KERNEL);
+	if (!cl) {
+		return -ENOMEM;
+	}
+
+	closure_init_stack(&cl);
+	revmap_bio_ctx = kmem_cache_alloc(ctx->revmap_bioctx_cache, GFP_KERNEL);
+	if (!revmap_bio_ctx) {
+		kfree(cl);
+		return -ENOMEM;
+	}
+
+	bio = bio_alloc(GFP_KERNEL, 1);
+	if (!bio) {
+		kmem_cache_free(revmap_bio_ctx);
+		kfree(cl);
+		return -ENOMEM;
+	}
+	
+	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
+		kmem_cache_free(revmap_bio_ctx);
+		kfree(cl);
+		bio_put(bio);
+		return -EFAULT;
+	}
+	
+	revmap_bio_ctx->pba = pba;
+	revmap_bio_ctx->ctx = ctx;
+	revmap_bio_ctx->magic = REVMAP_PRIV_MAGIC;
+	revmap_bio_ctx->page = page;
+	revmap_bio_ctx->cl = cl;
+	bio->bi_sector = ctx->revmap_pba;
+	/* Adjust the revmap_pba for the next block 
+	 * Addressing is based on 512bytes sector.
+	 * TODO: Verify. 
+	 * We need a 64 bit pba? sector_t is 32 bit
+	 * But one address is for 512 bytes. Does this
+	 * work?
+	 */
+	ctx->revmap_pba += NR_SECTORS_IN_BLK; 
+	/* if we have the pba of the translation table,
+	 * then reset the revmap pba to the original value
+	 */
+	if (ctx->revmap_pba == ctx->sb->extent_map) {
+		ctx->revmap_pba = ctx->sb->revmap_pba;
+	}
+	bio->bi_end_io = revmap_entries_flushed();
+	bio->bi_private = revmap_bio_ctx;
+	atomic_inc(&ctx->pending_writes);
+	generic_make_request(bio);
+}
+
 /* We store only the LBA. We can calculate the PBA from the wf
  */
 static void add_revmap_entries(struct ctx * ctx, sector_t lba, unsigned int nrsectors)
 {
-	struct stl_revmap_entry_sector * revmap_ptr;
-	int i;
+	struct stl_revmap_entry_sector * ptr;
+	int i, j;
+	struct page * page;
+/* We start the count from 0. So we increment first
+ * and then check
+ */
+	atomic_inc(&ctx->revmap_sector_count);
+	atomic_inc(&ctx->revmap_blk_count);
 
-	i = atomic_read(&ctx->revmap_blk_count);
-	if (0 == i) {
+	j = atomic_read(&ctx->revmap_blk_count);
+	if (0 == j) {
 		/* we need to make sure the previous block is on the
 		 * disk. We cannot overwrite without that.
 		 */
-		ptr = ctx->rev_ent_page;
+		page = get_zeroed_page(GFP_KERNEL);
+		ptr = (struct stl_revmap_entry_sector *)page_address(page);
 	}
 	i = atomic_read(&ctx->revmap_sector_count);
-	if (NR_EXT_ENTRIES_PER_SEC == i) {
+	if (i % NR_EXT_ENTRIES_PER_SEC == 0) {
 		ptr->crc = calculate_crc();
-		/* Flush the entries to the disk */
-		flush_revmap_sector_disk();
 		atomic_set(&ctx->revmap_sector_count, 0);
-		ptr = ptr + SECTOR_SIZE;
 		if (NR_ENTRIES_PER_BLK == j) {
 #ifdef BARRIER_NSTL
-			wait_on_barrier();
-#endif                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+			/* We only need to wait here to minimize
+			 * the loss of data, in case we end up
+			 * sending translation entries for write
+			 * sooner than they can be drained.
+			 */
+			wait_on_block_barrier();
+#endif
+			/* Flush the entries to the disk */
+			pba = ptr->extents[NR_EXT_ENTRIES_PER_SEC - 1];
+			/* TODO: Alternatively, we could flag, that
+			 * this is the last pba of the zone
+			 * from the caller of this function
+			 */
+			flush_revmap_block_disk(ctx, page, index, pba);
 			atomic_set(&ctx->revmap_blk_count, 0);
+			page = get_zeroed_page(GFP_KERNEL);
+			ptr = page_address(page);
+		} else {
+			ptr = ptr + SECTOR_SIZE;
 		}
 	}
 	ptr->extents[i].lba = lba;
+    	ptr->extents[i].pba = pba; /* TODO: for now we keep this, dump this and later we can remove */
 	/* we store the len in terms of sectors. If we stored in
 	 * terms of number of blocks, then we would have to
 	 * store 0s on the disk when the writes are not
 	 * complete blocks
 	 */
 	ptr->extents[i].len = nrsectors;
-	atomic_inc(&ctx->revmap_sector_count);
-	atomic_inc(&ctx->revmap_blk_count);
 	return;
 }
 
@@ -1003,7 +1517,7 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 	/* wait until there's room
 	*/
 
-	bioctx = kmem_cache_alloc(ctx->bioctx_cache, GFP_KERNEL)l;
+	bioctx = kmem_cache_alloc(ctx->bioctx_cache, GFP_KERNEL);
 	if (!bioctx) {
 		printf(KERN_ERR "\n Insufficient memory!");
 		bio->bi_status = BLK_STS_RESOURCE;
@@ -1013,7 +1527,7 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 		 */
 		return;
 	}
-	
+
 	bioctx->clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
 		printf(KERN_ERR "\n Insufficient memory!");
@@ -1072,7 +1586,8 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 			bios[nbios++] = clone;
 			split = clone;
 		}
-again:
+		/* Next we fetch the LBA that our DM got */
+		sector = bio->bi_iter.bi_sector;
 		/* pad length is in sectors (like arg to alloc_bio)
 		*/
 		if (nr_sectors < s8) {
@@ -1086,18 +1601,23 @@ again:
 				printk(KERN_ERR "\n failed at stl_alloc_bio, padlen: %d!", padlen);
 				goto fail;
 			}
-			setup_bio(pad, nstl_clone_endio, ctx->dev->bdev, wf + nr_sectors, ctx, WRITE);
+			setup_bio(pad, nstl_clone_endio, ctx->dev->bdev, sector + nr_sectors, ctx, WRITE);
 			bios[nbios++] = pad;
 		}
 
-		/* Next we fetch the LBA that our DM got */
-		sector = bio->bi_iter.bi_sector;
-		/*Update the translation table with the LBA:sector and
-		 * our new PBA: wf
-		 */
-		e = stl_update_range(ctx, sector, wf, nr_sectors);
+    		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, gfp_kernel);
+		if (!subbio_ctx) {
+			printf(kern_err "\n insufficient memory!");
+			bio->bi_status = BLK_STS_RESOURCE;
+			return;
+		}
+		refcount_inc(&bioctx->ref);
+		subbio_ctx->extent.lba = sector;
+		subbio_ctx->extent.pba = wf;
+		subbio_ctx->extent.nr_sectors = nr_sectors;
+		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
+		clone->private = subbio_ctx;
 		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
-		add_revmap_entries(ctx, wf, sector, s8);
 		//printk(KERN_ERR "\n nr_sectors: %d, s8 = %d, free_sectors_in_wf: %d, PBA: %ull", nr_sectors, s8, ctx->free_sectors_in_wf, ctx->write_frontier);
 		/* Add this mapping the ckpt region */
 	} while (split != clone);
@@ -1107,9 +1627,7 @@ again:
 	for (i = 0; i < nbios; i++) {
 		bio_set_dev(bios[i], ctx->dev->bdev);
 		bios[i]->bi_end_io = nstl_clone_endio;
-		bios[i]->private = bioctx;
 		generic_make_request(bios[i]); /* preserves ordering, unlike submit_bio */
-		refcount_inc(&bioctx->ref);
 	}
 	atomic_inc(&nr_writes);
 	return;
@@ -1648,6 +2166,7 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	atomic_set(&ctx->nr_failed_writes, 0);
 	atomic_set(&ctx->revmap_sector_count, 0);
 	atomic_set(&ctx->revmap_blk_count, 0);
+	atomic_set(&ctx->zone_revmap_count, 0);
 	ctx->target = 0;
 
 	r = -ENOMEM;
@@ -1676,21 +2195,28 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	r = stl_gc_thread_start(ctx);
 	if (r) {
-		goto stop_gc_thread;
-	}
-
-	ctx->rev_ent_page = get_zeroed_page(GFP_KERNEL);
-	if (!ctx->page) {
-		goto fail8;
+		goto fail7;;
 	}
 
 	ctx->bioctx_cache = kmem_cache_create("nstl_bioctx_cache", sizeof(struct nstl_bioctx), 0, NULL);
 	if (!ctx->bioctx_cache) {
-		goto free_zeroed_page;
+		goto stop_gc_thread;
 	}
+	ctx->revmap_bioctx_cache = kmem_cache_create("nstl_revmapbioctx_cache", sizeof(struct nstl_bioctx), 0, NULL);
+	if (!ctx->revmap_bioctx_cache) {
+		goto destroy_cache_bioctx;
+	}
+	ctx->trans_page_write_cache = kmem_cache_create("nstl_transwrite_cache", sizeof(struct trans_page_write_ctx), 0, NULL);
+	if (!ctx->trans_page_write_cache) {
+		goto destroy_cache;
+	}
+	ctx->revmap_pba = ctx->sb->revmap_pba;
+	DEFINE(ctx->flush_lock);
 /* failed case */
-free_zeroed_page:
-	free_page(ctx->rev_ent_page);
+destroy_cache:
+		kmem_cache_destroy(ctx->revmap_bioctx_cache);
+destroy_cache_bioctx:
+		kmem_cache_destroy(ctx->bioctx_cache);
 stop_gc_thread:
 	stl_gc_thread_stop(ctx);
 fail7:
@@ -1728,7 +2254,8 @@ static void stl_dtr(struct dm_target *ti)
 	ti->private = NULL;
 
 	kmem_cache_destroy(ctx->bioctx_cache);
-	free_page(ctx->rev_ent_page);
+	kmem_cache_destroy(ctx->revmap_bioctx_cache);
+	kmem_cache_destroy(ctx->trans_page_write_cache);
 	stl_gc_thread_stop(ctx);
 	bioset_exit(ctx->bs);
 	kfree(ctx->bs);

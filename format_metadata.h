@@ -131,11 +131,16 @@ struct stl_sb {
  * We can calculate the LBA, depending on the location of the
  * sequential entry on the disk. However, we do need to store
  * this in memory. For now, not optimizing on disk structure.
+ *
+ * TODO: We can also store how hot this block is, on the disk and
+ * also need to store in memory
+ *
+ * Note: we do not store an extent based TM on the disk, only a 
+ * block based TM
  */
-struct extent_map {
+struct translation_map_entry {
 	__le64 lba;
 	__le64 pba;
-	__le32 len;
 } __attribute__((packed));
 
 
