@@ -686,7 +686,8 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 
 	printk(KERN_ERR "\n bio_alloc_bioset is successful. ");
 	for (i = 0; i < npages; i++) {
-		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
+		page = __get_free_pages(__GFP_ZERO|GFP_KERNEL, 0);
+		if (!page )
 			goto fail;
 		atomic_inc(&sc->pages_alloced);
 		val = bio_add_page(bio, page, PAGE_SIZE, 0);
@@ -695,7 +696,8 @@ static struct bio *stl_alloc_bio(struct ctx *sc, unsigned sectors, struct page *
 	}
 	printk(KERN_ERR "\n mempool alloc. to npages successful. will try one more page allocation");
 	if (remainder > 0) {
-		if (!(page = mempool_alloc(sc->page_pool, GFP_NOIO)))
+		page = __get_free_pages(__GFP_ZERO|GFP_KERNEL, 0);
+		if (!page )
 			goto fail;
 		atomic_inc(&sc->pages_alloced);
 		if (ppage != NULL)
@@ -1702,6 +1704,7 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 	struct extent *e;
 	sector_t next_header;
 	struct stl_rev_map_entry_sector revmap_sector;
+	struct blk_plug plug;
 
 	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
 	nr_sectors = bio_sectors(clone);
@@ -1726,6 +1729,7 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 
 	bioctx->clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
+		kmem_cache_free(bioctx);
 		printf(KERN_ERR "\n Insufficient memory!");
 		bio->bi_status = BLK_STS_RESOURCE;
 		bio_endio(bio);
@@ -1741,8 +1745,17 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 	refcount_set(&bioctx->ref, 1);
 
 	printk(KERN_ERR "\n write frontier: %lu free_sectors_in_wf: %lu", ctx->write_frontier, ctx->free_sectors_in_wf);
+
+	blk_start_plug(&plug);
 	
 	do {
+
+		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, gfp_kernel);
+		if (!subbio_ctx) {
+			printf(kern_err "\n insufficient memory!");
+			goto fail;
+		}
+
 		spin_lock_irqsave(&ctx->lock, flags);
 		/*-------------------------------*/
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
@@ -1755,81 +1768,80 @@ static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
 			if (s8 <= 0) {
 				panic("Should always have atleast a block left ");
 			}
-			nr_sectors = s8;
-		} /* else we need to add a pad to rounded up value (nr_sectors < s8) */
+			if (!(split = bio_split(clone, s8, GFP_NOIO, ctx->bs))){
+				printk(KERN_ERR "\n failed at bio_split! ");
+				goto fail;
+			}
+			/* Add a translation map entry for shortened
+			 * length
+			 */
+			subbio_ctx->extent.nr_sectors = s8;
+		} 
+		else {
+			split = clone;
+			/* s8 might be bigger than nr_sectors. We want
+			 * to maintain the exact length in the
+			 * translation map, not padded entry
+			 */
+			subbio_ctx->extent.nr_sectors = nr_sectors;
+		}
 		move_write_frontier(ctx, s8);
-
 		/*-------------------------------*/
 		spin_unlock_irqrestore(&ctx->lock, flags);
-		printk(KERN_ERR "\n nbios: %d", nbios);
-		if (s8 < bio_sectors(clone)) {
-			if (!(split = bio_split(clone, nr_sectors, GFP_NOIO, ctx->bs))){
-				printk(KERN_ERR "\n failed at bio_split! nbios: %d", nbios);
-				goto fail;
-			}
-			bio_chain(split, clone);
-			bios[nbios++] = split;
-		} else {
-			bios[nbios++] = clone;
-			split = clone;
-		}
+    		
+
 		/* Next we fetch the LBA that our DM got */
 		sector = bio->bi_iter.bi_sector;
-		/* pad length is in sectors (like arg to alloc_bio)
-		*/
-		if (nr_sectors < s8) {
-			/* we are here when we did not split and when
-			 * the request is not block size aligned,
-			 * and can be satisfied from the number of
-			 * free blocks in the current write frontier.
-			 */
-			int padlen = s8 - nr_sectors;
-			if (!(pad = stl_alloc_bio(ctx, padlen, NULL))){
-				printk(KERN_ERR "\n failed at stl_alloc_bio, padlen: %d!", padlen);
-				goto fail;
-			}
-			setup_bio(pad, nstl_clone_endio, ctx->dev->bdev, sector + nr_sectors, ctx, WRITE);
-			bios[nbios++] = pad;
-		}
-
-    		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, gfp_kernel);
-		if (!subbio_ctx) {
-			printf(kern_err "\n insufficient memory!");
-			bio->bi_status = BLK_STS_RESOURCE;
-			return;
-		}
 		refcount_inc(&bioctx->ref);
 		subbio_ctx->extent.lba = sector;
 		subbio_ctx->extent.pba = wf;
-		subbio_ctx->extent.nr_sectors = nr_sectors;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
-		clone->private = subbio_ctx;
+		split->private = subbio_ctx;
 		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
-		//printk(KERN_ERR "\n nr_sectors: %d, s8 = %d, free_sectors_in_wf: %d, PBA: %ull", nr_sectors, s8, ctx->free_sectors_in_wf, ctx->write_frontier);
-		/* Add this mapping the ckpt region */
+		split->bio_endio = nstl_clone_endio;
+		bio_set_dev(split, ctx->dev->bdev);
+		generic_make_request(split);
 		nr_sectors = bio_sectors(clone);
-		if (unlikely(nr_sectors <= 0)) {
-			printk(KERN_ERR "\n Less than 0 sectors (%d) requested!, nbios: %u", nr_sectors, nbios);
-			return;
-		}
 	} while (split != clone);
 
-
-	//printk(KERN_ERR "\n %s %s %d nbios: %d ", __FILE__, __func__, __LINE__, nbios);
-	for (i = 0; i < nbios; i++) {
-		bio_set_dev(bios[i], ctx->dev->bdev);
-		bios[i]->bi_end_io = nstl_clone_endio;
-		generic_make_request(bios[i]); /* preserves ordering, unlike submit_bio */
+	/* When we did not split, we might need padding when the 
+	 * original request is not block aligned.
+	 * Note: we always split at block aligned. The remaining
+	 * portion may not be block aligned.
+	 *
+	 * We want to zero fill the padded portion of the last page.
+	 * We know that we always have a page corresponding to a bio.
+	 * The page is always block aligned.
+	 */
+	if (nr_sectors < s8) {
+		int padlen = s8 - nr_sectors;
+		/* We need to zero out the remaining bytes
+		 * from the last page in the bio
+		 */
+		pad = bio_clone_fast(bio, GFP_KERNEL, NULL);
+		pad->bi_iter.bi_size = s8 << 9;
+		/* We use the saved write frontier */
+		pad->bi_iter.bi_sector = wf;
+		/* bio advance will advance the bi_sector and bi_size
+		 */
+		bio_advance(pad, nr_sectors << 9);
+		zero_fill_bio_iter(pad, pad->bi_iter);
+		/* we dont need to take any action when pad completes
+		 * and thus we dont need any endio for pad. Chain it 
+		 * with parent, so that we are notified its completion
+		 * when parent completes.
+		 */
+		bio_chain(pad, clone);
+		generic_make_request(pad);
 	}
+	blk_finish_plug(&plug);
 	atomic_inc(&nr_writes);
 	return;
 
 fail:
 	printk(KERN_INFO "FAIL!!!!\n");
-	bio->bi_status = BLK_STS_IOERR; 	
-	for (i = 0; i < nbios; i++)
-		if (bios[i] && bios[i]->bi_private == ctx)
-			nstl_clone_endio(bio);
+	bio->bi_status = BLK_STS_RESOURCE;
+	bio_endio(bio);
 	atomic_inc(&nr_failed_writes);
 }
 
