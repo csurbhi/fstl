@@ -22,10 +22,34 @@
 
 #define REVMAP_PRIV_MAGIC 0x5
 #define MAX_ZONE_REVMAP 2
+#define BLOCKS_IN_ZONE 65536
+
 
 struct trans_page_write_ctx {
 	struct ctx *ctx;
 	struct closure *cl;
+};
+
+struct cl_list
+{
+	struct closure *cl;
+	struct list_head list;
+};
+
+struct trans_entry_mem {
+	struct rb_node *rb;
+	sector_t blknr;
+	struct page *page;
+	struct list_head list;
+};
+
+struct sit_page_write_ctx {
+	struct ctx *ctx;
+	struct page *page;
+};
+
+struct sit_entry_mem {
+
 };
 
 struct revmap_meta_inmem {
@@ -147,8 +171,9 @@ struct ctx {
 	sector_t          free_sectors_in_wf;  /* Indicates the free sectors in the current write frontier */
 	int		  n_gc_candidates;
 
-	struct rb_root    rb;	          /* map RB tree */
-	struct rb_root	  sit_rb;	  /* SIT RB tree */
+	struct rb_root	  extent_tbl_root;
+	struct rb_root    tm_rb_root;	          /* map RB tree */
+	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
 	rwlock_t          rb_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
@@ -192,6 +217,7 @@ struct ctx {
 					 * when one zone worth of entries are written to the disk
 					 */
 	sector_t revmap_pba;
+	sector_t revmap_page;
 	spinlock_t flush_lock;
 };
 

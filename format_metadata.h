@@ -4,7 +4,7 @@
  *
  *
  *
- * SB1 , SB2, CKPT1, CKPT2, Map, Seg Info Table, Data
+ * SB1 , SB2, Revmap, T0, T1, Checkpoint, Revmap BitMap, SIT, Data
  *
  *
  *
@@ -91,11 +91,22 @@ struct stl_ckpt {
 	uint32_t magic;
 	__le64 user_block_count;
 	__le64 valid_block_count;
-	__le32 free_segment_count;
+	__le32 nr_invalid_zones;	/* zones that have errors in them */
 	__le64 cur_frontier_pba;
+	__le64 nr_free_zones;
 	__le64 elapsed_time;		/* records the time elapsed since all the mounts */
+	__le64 crc;
 	__le8 padding[0]; /* write all this in the padding */
 } __attribute__((packed));
+
+struct stl_revmap_bitmaps {
+	unsigned char bitmap0[16384];
+	unsigned char bitmap1[16384];
+} __attribute__((packed));
+
+struct stl_sit_cache {
+
+}__attribute__((packed));
 
 
 #define STL_SB_SIZE 4096
@@ -117,12 +128,12 @@ struct stl_sb {
 	__le32 map_pba;			/* start block address of NAT */
 	__le32 sit_pba;			/* start block address of SIT */
 	__le32 zone0_pba;		/* start block address of segment 0 */
-	__le32 nr_invalid_zones;	/* zones that have errors in them */
 	__le64 max_pba;                 /* The last lba in the disk */
 	//__u8 uuid[16];			/* 128-bit uuid for volume */
 	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
 	__le32 crc;			/* checksum of superblock */
 	__u8 reserved[0];		/* valid reserved region. Rest of the block space */
+	__u8 clean;			/* becomes 0 in ctr and 1 in dtr. Used to identify crash */
 } __attribute__((packed));
 
 /*
