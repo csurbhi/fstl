@@ -2046,6 +2046,16 @@ struct page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct closure *cl)
 
 	new = search_kv_store(ctx, blknr, &parent);
 	if (new) {
+		list_for_each(temp, node->cl_list) {
+			cls = list_entry(temp, struct cl_list, list);
+			if (cls->cl == cl) {
+				kmem_cache_free(ctx->trans_mem_ent_cache, new);
+				return new->page;
+			}
+		}
+		/* Add a closure, only when this rev map page is used
+		 * for the first time
+		 */
 		cls->cl = cl;
 		closure_get(&cl);
 		list_add(&cls->list, &new->list);
