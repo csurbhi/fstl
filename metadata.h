@@ -212,7 +212,12 @@ struct ctx {
        	atomic_t revmap_blk_count;
 	struct kmem_cache * bioctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
-	waitqueue_t flushq_head;
+	waitqueue_t tm_blk_flushq;
+	spinlock_t tm_flush_lock;
+	waitqueue_t zone_entry_flushq;
+	spinlock_t flush_zone_lock;
+	waitqueue_t revmap_blks_flushq;
+	spinlock_t revmap_blk_lock;
 	atomic_t zone_revmap_count;	/* This should always be less than 3, incremented on get_new_zone and decremented
 					 * when one zone worth of entries are written to the disk
 					 */

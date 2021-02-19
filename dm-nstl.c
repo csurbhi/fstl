@@ -222,9 +222,9 @@ static struct extent *stl_rb_geq(struct ctx *sc, off_t lba)
 
 
 int _stl_verbose;
-static void stl_rb_insert(struct ctx *sc, struct extent *new)
+static void stl_rb_insert(struct ctx *ctx, struct extent *new)
 {
-	struct rb_root *root = &sc->rb;
+	struct rb_root *root = &ctx->rb;
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct extent *e = NULL;
 
@@ -420,136 +420,117 @@ int stl_gc_thread_stop(struct ctx *ctx)
  * overlaps, adds new extent to map.
  * if blocked by cleaning, returns the extent which we're blocked on.
  */
-static struct extent *stl_update_range(struct ctx *sc, sector_t lba, sector_t pba, size_t len)
+static void stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
 {
-	struct extent *e = NULL, *_new = NULL, *_new2 = NULL;
+	struct extent *e = NULL, *new = NULL, *split = NULL;
 	unsigned long flags;
+	off_t new_lba, new_pba;
+	size_t new_len;
+	struct extent *tmp = NULL;
 
 	BUG_ON(len == 0);
 
-	if (unlikely(!(_new = mempool_alloc(sc->extent_pool, GFP_NOIO))))
+	if (unlikely(!(split = mempool_alloc(ctx->extent_pool, GFP_NOIO))))
 		return NULL;
-	_new2 = mempool_alloc(sc->extent_pool, GFP_NOIO);
 
-	write_lock_irqsave(&sc->rb_lock, flags);
-	e = _stl_rb_geq(&sc->rb, lba);
+	if (unlikely(!(new = mempool_alloc(ctx->extent_pool, GFP_NOIO)))) {
+		mempool_free(ctx->extent_pool, split);
+		return NULL;
+	}
+
+	write_lock_irqsave(&ctx->rb_lock, flags);
+	e = _stl_rb_geq(&ctx->rb, lba);
 
 	if (e != NULL) {
-		/* [----------------------]        e     new     new2
+		/* [----------------------]        e     new     split
 		 *        [++++++]           -> [-----][+++++][--------]
 		 */
-		if (e->lba < lba && e->lba+e->len > lba+len) {
-			off_t new_lba = lba+len;
-			size_t new_len = e->lba + e->len - new_lba;
-			off_t new_pba = e->pba + (e->len - new_len);
+		if (e->lba < lba && ((e->lba + e->len) > (lba + len))) {
+			/* do this *before* inserting below */
+			e->len = lba - e->lba;
+			/* new is added at the end, first we split */
+			new_lba = lba + len;
+			new_len = e->lba + e->len - new_lba;
+			new_pba = e->pba + (new_lba - e->lba);
 
-			if (extent_busy(e))
-				goto blocked;
-			if (_new2 == NULL)
-				goto fail;
-			extent_init(_new2, lba+len, new_pba, new_len);
-			extent_get(_new2, 1, IN_MAP);
-			e->len = lba - e->lba; /* do this *before* inserting below */
-			stl_rb_insert(sc, _new2);
-			e = _new2;
-			_new2 = NULL;
+			extent_init(split, new_lba, new_pba, new_len);
+			extent_get(split, 1, IN_MAP);
+			stl_rb_insert(ctx, split);
+
+			e = new;
+			split = NULL;
 		}
 		/* [------------]
 		 *        [+++++++++]        -> [------][+++++++++]
 		 */
 		else if (e->lba < lba) {
-			if (extent_busy(e))
-				goto blocked;
 			e->len = lba - e->lba;
 			if (e->len == 0) {
 				DMERR("zero-length extent");
-				goto fail;
+				panic();
 			}
 			e = stl_rb_next(e);
+			/* no split needed */
 		}
 		/*          [------]
 		 *   [+++++++++++++++]        -> [+++++++++++++++]
 		 */
-		while (e != NULL && e->lba+e->len <= lba+len) {
-			struct extent *tmp = stl_rb_next(e);
-			if (extent_busy(e))
-				goto blocked;
-			stl_rb_remove(sc, e);
-			extent_put(sc, e, 1, IN_MAP);
+		while (e != NULL && ((e->lba + e->len) <= (lba + len))) {
+			tmp = stl_rb_next(e);
+			stl_rb_remove(ctx, e);
+			extent_put(ctx, e, 1, IN_MAP);
 			e = tmp;
+			/* no split needed */
 		}
 		/*          [------]
 		 *   [+++++++++]        -> [++++++++++][---]
 		 */
-		if (e != NULL && lba+len > e->lba) {
-			int n = (lba+len) - e->lba;
-			if (extent_busy(e))
-				goto blocked;
-			e->lba += n;
-			e->pba += n;
-			e->len -= n;
+		if (e != NULL && ((lba + len) > e->lba)) {
+			diff = (lba + len) - e->lba;
+			e->lba += diff;
+			e->pba += diff;
+			e->len -= diff;
+			/* no split needed */
 		}
 	}
 
-	/* TRIM indicated by pba = -1 */
-	if (pba != -1) {
-		extent_init(_new, lba, pba, len);
-		extent_get(_new, 1, IN_MAP);
-		stl_rb_insert(sc, _new);
+	extent_init(new, lba, pba, len);
+	extent_get(new, 1, IN_MAP);
+	stl_rb_insert(ctx, new);
+	write_unlock_irqrestore(&ctx->rb_lock, flags);
+	if (split) {
+		mempool_free(ctx->extent_pool, split);
+		return NULL;
 	}
-	write_unlock_irqrestore(&sc->rb_lock, flags);
-	if (_new2 != NULL)
-		mempool_free(_new2, sc->extent_pool);
-
 	return NULL;
-
-fail:
-	write_unlock_irqrestore(&sc->rb_lock, flags);
-	DMERR("could not allocate extent");
-	if (_new)
-		mempool_free(_new, sc->extent_pool);
-	if (_new2)
-		mempool_free(_new2, sc->extent_pool);
-
-	return NULL;
-
-blocked:
-	write_unlock_irqrestore(&sc->rb_lock, flags);
-	if (_new)
-		mempool_free(_new, sc->extent_pool);
-	if (_new2)
-		mempool_free(_new2, sc->extent_pool);
-	return e;
 }
 
-/************** Received I/O handling *****************/
 
-static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
+/*
+ * This is an asynchronous read, i.e we submit the request
+ * here but do not wait for the request to complete.
+ * bio_endio() will complete the request.
+ * The callers will be notified upon this.
+ */
+static void nstl_read_io(struct ctx *ctx, struct bio *bio)
 {
 	struct bio *split = NULL;
-
-	if (!bio) {
-		dump_stack();
-		return;
-	}
-
 	bio_end_io_t *fn_end_io = bio->bi_end_io;
+	sector_t sector;
+	struct extent *e;
+	unsigned nr_sectors, overlap;
 
-	printk(KERN_ERR "Read begins! ");
+	printk(KERN_INFO "Read begins! ");
 
-	atomic_inc(&sc->n_reads);
+	atomic_inc(&ctx->n_reads);
 	while(split != bio) {
-		if(unlikely(&bio->bi_end_io < 0x1000) || (bio->bi_end_io != fn_end_io)) {
-			dump_stack();
-		}
-
-		sector_t sector = bio->bi_iter.bi_sector;
-		struct extent *e = stl_rb_geq(sc, sector);
-		unsigned sectors = bio_sectors(bio);
+		sector = bio->bi_iter.bi_sector;
+		extent *e = stl_rb_geq(sc, sector);
+		nr_sectors = bio_sectors(bio);
 
 		/* note that beginning of extent is >= start of bio */
 		/* [----bio-----] [eeeeeee]  */
-		if (e == NULL || e->lba >= sector + sectors)  {
+		if (e == NULL || e->lba >= sector + nr_sectors)  {
 			printk(KERN_ERR "\n Case of no overlap");
 			zero_fill_bio(bio);
 			bio_endio(bio);
@@ -559,24 +540,24 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 		   [---------bio------] */
 		else if (e->lba <= sector) {
 			printk(KERN_ERR "\n e->lba <= sector");
-			unsigned overlap = e->lba + e->len - sector;
-			if (overlap < sectors)
-				sectors = overlap;
+			overlap = e->lba + e->len - sector;
+			if (overlap < nr_sectors)
+				nr_sectors = overlap;
 			sector = e->pba + sector - e->lba;
 		}
 		/*             [eeeeeeeeeeee]
 			       [---------bio------] */
 		else {
 			printk(KERN_ERR "\n e->lba >  sector");
-			sectors = e->lba - sector;
-			split = bio_split(bio, sectors, GFP_NOIO, &fs_bio_set);
+			nr_sectors = e->lba - sector;
+			split = bio_split(bio, nr_sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, bio);
 			zero_fill_bio(split);
 			bio_endio(split);
 			continue;
 		}
 
-		if (sectors < bio_sectors(bio)) {
+		if (nr_sectors < bio_sectors(bio)) {
 			split = bio_split(bio, sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, bio);
 		} else {
@@ -584,11 +565,12 @@ static void split_read_io(struct ctx *sc, struct bio *bio, int not_used)
 		}
 
 		split->bi_iter.bi_sector = sector;
-		bio_set_dev(bio, sc->dev->bdev);
+		bio_set_dev(bio, ctx->dev->bdev);
 		//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
 		generic_make_request(split);
 	}
-	printk(KERN_ERR "\n Read end");
+	printk(KERN_INFO "\n Read end");
+	return;
 }
 
 
@@ -1234,26 +1216,28 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
  */
 void wait_on_block_barrier(struct ctx * ctx);
 {
-	spin_lock_irq(&ctx->flush_lock);
-	wait_event_lock_irq(&ctx->blk_of_ent_flushq, !atomic_read(ctx->pending_writes), &ctx->flush_lock);
-	spin_unlock_irq(&ctx->flush_lock);
+	spin_lock_irq(&ctx->tm_flush_lock);
+	wait_event_lock_irq(&ctx->tm_blk_flushq, !atomic_read(ctx->pending_writes), &ctx->tm_flush_lock);
+	spin_unlock_irq(&ctx->tm_flush_lock);
 }
 
 void wait_on_zone_barrier(struct ctx * ctx)
 {
-	spin_lock_irq(&ctx->flush_lock);
+	spin_lock_irq(&ctx->flush_zone_lock);
 	/* wait until atleast one zone's revmap entries are flushed */
-	wait_event_lock_irq(&ctx->zone_entry_flushq, (MAX_ZONE_REVMAP >= atomic_read(ctx->zone_revmap_count), &ctx->flush_lock);
-	spin_unlock_irq(&ctx->flush_lock);
-	checkpoint();
+	wait_event_lock_irq(&ctx->zone_entry_flushq, (MAX_ZONE_REVMAP >= atomic_read(ctx->zone_revmap_count), &ctx->flush_zone_lock);
+	spin_unlock_irq(&ctx->flush_zone_lock);
+	/* TODO: do we need to call checkpoint here?
+	 * checkpoint();
+	 */
 }
 
 void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 {
-	spin_lock_irq(&ctx->flush_lock);
+	spin_lock_irq(&ctx->revmap_blk_lock);
 	/* wait until atleast one zone's revmap entries are flushed */
-	wait_event_lock_irq(&ctx->revmap_blocks_flushed, (1 == is_revmap_block_available(ctx, pba)), &ctx->flush_lock);
-	spin_unlock_irq(&ctx->flush_lock);
+	wait_event_lock_irq(&ctx->revmap_blks_flushq, (1 == is_revmap_block_available(ctx, pba)), &ctx->revmap_blk_lock);
+	spin_unlock_irq(&ctx->revmap_blk_lock);
 }
 
 struct sit_entry_mem * search_sit_kv_store(struct ctx *ctx, sector_t pba)
@@ -1433,6 +1417,12 @@ struct sit_entry_mem * add_sit_entry_kv_store(sector_t pba)
 	return new;
 }
 
+/*TODO */
+void mark_segment_free(struct ctx *ctx, sector_t zonenr)
+{
+	return;
+}
+
 void sit_ent_vblocks_decr(ctx, pba)
 {
 	struct sit_entry_in_mem *sit_entry;
@@ -1453,6 +1443,11 @@ void sit_ent_vblocks_decr(ctx, pba)
 	index = zonenr % SIT_ENTRIES_IN_ONE_BLOCK; 
 	ptr = ptr + index;
 	ptr->vblocks = ptr->vblocks - 1;
+	if (!ptr->vblocks) {
+		spin_lock_irqsave(&ctx->lock, flags);
+		mark_zone_free(ctx , zonenr);
+		spin_unlock_irqrestore(&ctx->lock, flags);
+	}
 	SetPageDirty(sit_entry->page);
 	put_page(sit_entry->page);
 	spin_unlock(&ctx->kv_store_lock);
@@ -1478,7 +1473,12 @@ void sit_ent_vblocks_incr(ctx, pba)
 	zonenr = get_zone_nr(pba);
 	index = zonenr % SIT_ENTRIES_IN_ONE_BLOCK; 
 	ptr = ptr + index;
-	ptr->vblocks = ptr->vblocks + 1;	
+	if (!ptr->vblocks) {
+		spin_lock_irqsave(&ctx->lock, flags);
+		mark_zone_occupied(struct ctx *ctx , int zonenr)
+		spin_unlock_irqrestore(&ctx->lock, flags);
+	}
+	ptr->vblocks = ptr->vblocks + 1;
 	SetPageDirty(sit_entry->page);
 	put_page(sit_entry->page);
 	spin_unlock(&ctx->kv_store_lock);
@@ -1910,7 +1910,7 @@ void flush_sit_node_page(struct rb_node *node, struct ctx *ctx)
 	}
 	spin_unlock(&ctx->sit_lock);
 
-	sit_ctx = kmem_cache_alloc(sit_ctx_cache, GFP_KERNEL);
+	sit_ctx = kmem_cache_alloc(ctx->sit_ctx_cache, GFP_KERNEL);
 	if (!sit_ctx) {
 		printf(" Low Memory ! ");
 		return;
@@ -2528,7 +2528,7 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, unsigned int nrse
  * to read anyway.
  *
 */
-static void map_write_io(struct ctx *ctx, struct bio *bio, int priority)
+static void nstl_write_io(struct ctx *ctx, struct bio *bio)
 {
 	struct bio *split = NULL, *pad = NULL;
 	struct bio *bios[100];
@@ -2705,9 +2705,6 @@ void put_free_zone(struct ctx *ctx, u64 pba)
 	unsigned long flags;
 	unsigned long zonenr = get_zone_nr(ctx, pba);
 
-	spin_lock_irqsave(&ctx->lock, flags);
-	mark_zone_free(ctx , zonenr);
-	spin_unlock_irqrestore(&ctx->lock, flags);
 }
 
 #define BLK_SZ 4096
@@ -2946,7 +2943,9 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 	while (i < nr_seg_entries) {
 		if (entry->vblocks == 0) {
 			printk(KERN_ERR "\n *segnr: %u", *segnr);
-			mark_zone_free(ctx, *segnr);
+			spin_lock_irqsave(&ctx->lock, flags);
+			mark_zone_free(ctx , zonenr);
+			spin_unlock_irqrestore(&ctx->lock, flags);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
 			mark_zone_gc_candidate(ctx, *segnr);
@@ -3146,32 +3145,102 @@ static struct nstl_shrinker {
 	.seeks = DEFAULT_SEEKS;
 };
 
-static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+static void destroy_caches(struct ctx)
+{	
+	kmem_cache_destroy(ctx->subbio_ctx_cache);
+	kmem_cache_destroy(ctx->trans_mem_ent_cache);
+	kmem_cache_destroy(ctx->closure_list_cache);
+	kmem_cache_destroy(sit_ctx_cache);
+	kmem_cache_destroy(ctx->sit_mem_ent_cache);
+	kmem_cache_destroy(ctx->trans_page_write_cache);
+	kmem_cache_destroy(ctx->revmap_bioctx_cache);
+	kmem_cache_destroy(ctx->bioctx_cache);
+}
+
+
+static int create_caches(struct ctx *ctx)
 {
-	int r = -ENOMEM;
+	ctx->bioctx_cache = kmem_cache_create("bioctx_cache", sizeof(struct nstl_bioctx), 0, NULL);
+	if (!ctx->bioctx_cache) {
+		return -1;
+	}
+	ctx->revmap_bioctx_cache = kmem_cache_create("revmap_bioctx_cache", sizeof(struct revmap_meta_inmem), 0, NULL);
+	if (!ctx->revmap_bioctx_cache) {
+		goto destroy_cache_bioctx;
+	}
+	ctx->trans_page_write_cache = kmem_cache_create("trans_page_write_cache", sizeof(struct trans_page_write_ctx), 0, NULL);
+	if (!ctx->trans_page_write_cache) {
+		goto destroy_revmap_bioctx_cache;
+	}
+	ctx->sit_mem_ent_cache = kmem_cache_create("sit_mem_ent_cache", sizeof(struct sit_mem_entry), 0, NULL);
+	if (!ctx->sit_mem_ent_cache) {
+		goto destroy_trans_page_write_cache;
+	}
+	ctx->sit_ctx_cache  = kmem_cache_create("sit_ctx_cache", sizeof(struct sit_page_write_ctx), 0, NULL);
+	if (!ctx->sit_ctx_cache) {
+		goto destroy sit_mem_ent_cache;
+	}
+	ctx->closure_list_cache = kmem_cache_create("closure_list_cache", sizeof(struct cl_list), 0, NULL);
+	if (!ctx->closure_list_cache) {
+		goto destroy_sit_ctx_cache;
+	}
+	ctx->trans_mem_ent_cache = kmem_cache_create("trans_mem_ent_cache", sizeof(struct trans_entry_mem), 0, NULL);
+	if (!ctx->trans_mem_ent_cache) {
+		goto destroy_closure_list_cache;
+	}
+	ctx->subbio_ctx_cache = kmem_cache_create("subbio_ctx_cache", sizeof(struct nstl_sub_bioctx), 0, NULL);
+	if (!ctx->subbio_ctx_cache) {
+		goto destroy_trans_mem_ent_cache;
+	}
+	return 0;
+
+/* failed case */
+destroy_subbio_ctx_cache:
+	kmem_cache_destroy(ctx->subbio_ctx_cache);
+destroy_trans_mem_ent_cache:
+	kmem_cache_destroy(ctx->trans_mem_ent_cache);
+destroy_closure_list_cache:
+	kmem_cache_destroy(ctx->closure_list_cache);
+destroy_sit_ctx_cache:
+	kmem_cache_destroy(sit_ctx_cache);
+destroy_sit_mem_ent_cache:
+	kmem_cache_destroy(ctx->sit_mem_ent_cache);
+destroy_trans_page_write_cacne:
+	kmem_cache_destroy(ctx->trans_page_write_cache);
+destroy_revmap_bioctx_cache:
+	kmem_cache_destroy(ctx->revmap_bioctx_cache);
+destroy_cache_bioctx:
+	kmem_cache_destroy(ctx->bioctx_cache);
+	return -1;
+}
+
+static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
+{
+	int ret = -ENOMEM;
 	struct ctx *ctx;
 	unsigned long long tmp, max_pba;
 	char d;
 
-	//dump_stack();
-
-	// DMINFO("ctr %s %s %s %s", argv[0], argv[1], argv[2], argv[3]);
 
 	printk(KERN_INFO "\n argc: %d", argc);
 	if (argc < 2) {
-		ti->error = "dm-stl: Invalid argument count";
+		dm_target->error = "dm-stl: Invalid argument count";
 		return -EINVAL;
 	}
 
 	printk(KERN_INFO "\n argv[0]: %s, argv[1]: %s", argv[0], argv[1]);
 
-	if (!(ctx = kzalloc(sizeof(struct ctx), GFP_KERNEL)))
-		goto fail;
-	ti->private = ctx;
+	ctx = kzalloc(sizeof(struct ctx), GFP_KERNEL);
+	if (!ctx) {
+		return ret;
+	}
 
-	if ((r = dm_get_device(ti, argv[0], dm_table_get_mode(ti->table), &ctx->dev))) {
-		ti->error = "dm-nstl: Device lookup failed.";
-		goto fail0;
+	dm_target->private = ctx;
+
+	ret = dm_get_device(dm_target, argv[0], dm_table_get_mode(dm_target->table), &ctx->dev);
+    	if (ret) {
+		dm_target->error = "dm-nstl: Device lookup failed.";
+		goto free_ctx;
 	}
 
 	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", ctx->dev->bdev->bd_part->start_sect);
@@ -3179,26 +3248,22 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	ctx->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, extents_slab);
 	if (!ctx->extent_pool)
-		goto fail1;
+		goto put_dev;
 
-	r = read_metadata(ctx);
-	if (r < 0)
-		goto fail2;
+	ret = read_metadata(ctx);
+	if (ret < 0)
+		goto clean_ctx;
 
 	max_pba = ctx->dev->bdev->bd_inode->i_size / 512;
-
-
 	sprintf(ctx->nodename, "stl/%s", argv[1]);
-
-	r = -EINVAL;
-
+	ret = -EINVAL;
 	ctx->nr_lbas_in_zone = (1 << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	printk(KERN_INFO "\n device records max_pba: %llu", max_pba);
 	ctx->max_pba = ctx->sb->max_pba;
 	printk(KERN_INFO "\n formatted max_pba: %llu", ctx->max_pba);
 	if (ctx->max_pba > max_pba) {
-		ti->error = "dm-stl: Invalid max pba found on sb";
-		goto fail3;
+		dm_target->error = "dm-stl: Invalid max pba found on sb";
+		goto clean_ctx;
 	}
 	ctx->write_frontier = ctx->ckpt->cur_frontier_pba;
 
@@ -3226,19 +3291,20 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	ctx->target = 0;
 
 	r = -ENOMEM;
-	ti->error = "dm-stl: No memory";
+	dm_target->error = "dm-stl: No memory";
 
 	ctx->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
 	if (!ctx->page_pool)
-		goto fail5;
+		goto clean_ctx;
 
 	//printk(KERN_INFO "about to call bioset_init()");
 	ctx->bs = kzalloc(sizeof(*(ctx->bs)), GFP_KERNEL);
 	if (!ctx->bs)
-		goto fail6;
+		goto destroy_page_pool;
+
 	if(bioset_init(ctx->bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS|BIOSET_NEED_RESCUER) == -ENOMEM) {
 		printk(KERN_ERR "\n bioset_init failed!");
-		goto fail7;
+		goto free_bioset;
 	}
 
 	ctx->extent_tbl_root = RB_ROOT;
@@ -3254,22 +3320,13 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	r = stl_gc_thread_start(ctx);
 	if (r) {
-		goto fail7;;
+		goto uninit_bioset;
 	}
 
-	ctx->bioctx_cache = kmem_cache_create("nstl_bioctx_cache", sizeof(struct nstl_bioctx), 0, NULL);
-	if (!ctx->bioctx_cache) {
+	ret = create_caches(ctx);
+	if (0 > ret) {
 		goto stop_gc_thread;
 	}
-	ctx->revmap_bioctx_cache = kmem_cache_create("nstl_revmapbioctx_cache", sizeof(struct nstl_bioctx), 0, NULL);
-	if (!ctx->revmap_bioctx_cache) {
-		goto destroy_cache_bioctx;
-	}
-	ctx->trans_page_write_cache = kmem_cache_create("nstl_transwrite_cache", sizeof(struct trans_page_write_ctx), 0, NULL);
-	if (!ctx->trans_page_write_cache) {
-		goto destroy_cache_revmap;
-	}
-	ctx->revmap_pba = ctx->sb->revmap_pba;
 	ctx->revmap_bm = alloc_pages(__GFP_ZERO|GFP_KERNEL, ctx->sb->order_revmap_bm);
 	if (!ctx->revmap_bm)
 		goto destroy_cache;
@@ -3278,30 +3335,30 @@ static int stl_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	if (register_shrinker(nstl_shrinker))
 		goto free_revmap_bm;
 	
+	ctx->revmap_pba = ctx->sb->revmap_pba;
 	ctx->sb->clean = 0;
+	init_waitqueue_head(ctx->tm_blk_flushq);
+	spin_lock_init(&ctx->tm_flush_lock);
+	init_waitqueue_head(ctx->zone_entry_flushq);
+	spin_lock_init(&ctx->flush_zone_lock);
+	init_waitqueue_head(ctx->revmap_blks_flushq);
+	spin_lock_init(&ctx->revmap_blk_lock);
 	return 0;
 /* failed case */
 free_revmap_bm:
 	free_pages(ctx->revmap_bm, ctx->sb->order_revmap_bm);
 destroy_cache:
-	kmem_cache_destroy(ctx->trans_page_write_cache);
-destroy_cache_revmap:
-	kmem_cache_destroy(ctx->revmap_bioctx_cache);
-destroy_cache_bioctx:
-	kmem_cache_destroy(ctx->bioctx_cache);
+	destroy_caches(ctx);
 stop_gc_thread:
 	stl_gc_thread_stop(ctx);
-fail7:
+uninit_bioset:
 	bioset_exit(ctx->bs);
-fail6:
+free_bioset:
 	kfree(ctx->bs);
-fail5:
+destroy_page_pool:
 	if (ctx->page_pool)
 		mempool_destroy(ctx->page_pool);
-fail3:
-	put_page(ctx->sb_page);
-	put_page(ctx->ckpt_page);
-fail2:
+clean_ctx:
 	if (ctx->sb_page)
 		put_page(ctx->sb_page);
 	if (ctx->ckpt_page)
@@ -3311,18 +3368,18 @@ fail2:
 		
 	if (ctx->extent_pool)
 		mempool_destroy(ctx->extent_pool);
-fail1:
-	dm_put_device(ti, ctx->dev);
-fail0:
+put_dev:
+	dm_put_device(dm_target, ctx->dev);
+free_ctx:
 	kfree(ctx);
 
 fail:
-	return r;
+	return ret;
 }
 
-static void stl_dtr(struct dm_target *ti)
+static void stl_dtr(struct dm_target *dm_target)
 {
-	struct ctx *ctx = ti->private;
+	struct ctx *ctx = dm_target->private;
 	ti->private = NULL;
 
 	flush_revmap_entries(ctx);
@@ -3336,55 +3393,90 @@ static void stl_dtr(struct dm_target *ti)
 	/* If we are here, then there was no crash while writing out
 	 * the disk metadata
 	 */
-	kmem_cache_destroy(ctx->bioctx_cache);
-	kmem_cache_destroy(ctx->revmap_bioctx_cache);
-	kmem_cache_destroy(ctx->trans_page_write_cache);
+
+	/* TODO : free extent page
+	 * and segentries page */
+		
+	free_pages(ctx->revmap_bm, ctx->sb->order_revmap_bm);
+	destroy_caches(ctx);
 	stl_gc_thread_stop(ctx);
 	bioset_exit(ctx->bs);
 	kfree(ctx->bs);
 	mempool_destroy(ctx->page_pool);
+	put_page(ctx->sb_page);
+	put_page(ctx->ckpt_page);
 	mempool_destroy(ctx->extent_pool);
-	dm_put_device(ti, ctx->dev);
+	dm_put_device(dm_target, ctx->dev);
 	kfree(ctx);
 }
 
-static int stl_map(struct dm_target *ti, struct bio *bio)
+return nstl_zone_reset(struct ctx *ctx, struct bio *bio)
 {
-	volatile struct ctx *sc;
+	struct block_device *bdev;
+	sector_t sector;
+	sector_t nr_sectors;
+	int ret;
+
+	bdev = ctx->dev->bdev;
+	sector = bio->bi_sector;
+	nr_sectors = bio->bi_sectors;
+
+	/* TODO: Adjust the segentries, number of free blocks,
+	 * number of free zones, etc
+	 * If that zone has 0 blocks then nothing much needs to be
+	 * done. After that call:
+	 * do_checkpoint();
+	 */
+
+	ret  = blkdev_reset_zone(bdev, sector, nr_sectors, gfp_mask);
+	if (ret)
+		return ret;
+	
+
+}
+
+void nstl_zone_reset_all(struct ctx *ctx, struct bio *bio)
+{
+
+}
+
+static int stl_map(struct dm_target *dm_target, struct bio *bio)
+{
+	volatile struct ctx *ctx;
+	int ret = 0;
        
-	if (!ti)
+	if (!dm_target)
 		return 0;
 
-	sc = ti->private;
+	if (!bio) {
+		dump_stack();
+		return;
+	}
+
+	ctx = dm_target->private;
 
 	if(unlikely(bio == NULL)) {
 		return 0;
 	}
 
 	switch (bio_op(bio)) {
-		case REQ_OP_DISCARD:
-		case REQ_OP_FLUSH:	
-			//		case REQ_OP_SECURE_ERASE:
-			//		case REQ_OP_WRITE_ZEROES:
-			//printk(KERN_INFO "Discard or Flush: %d \n", bio_op(bio));
-			/* warn on panic is on. so removing this warn on
-			 WARN_ON(bio_sectors(bio));
-			*/
-			if(bio_sectors(bio)) {
-				printk(KERN_ERR "\n sectors in bio when FLUSH requested");
-			}
-			bio_set_dev(bio, sc->dev->bdev);
-			return DM_MAPIO_REMAPPED;
+		case REQ_OP_READ:
+			ret = nstl_read_io(ctx, bio);
+			break;
+		case REQ_OP_WRITE:
+			ret = nstl_write_io(ctx, bio);
+			break;
+		case REQ_OP_ZONE_RESET:
+			ret = nstl_zone_reset(ctx, bio);
+			break;
+		case REQ_OP_ZONE_RESET_ALL:
+			ret = nstl_zone_reset_all(ctx, bio);
+			break;
 		default:
 			break;
 	}
-
-	if (bio_data_dir(bio) == READ) 
-		split_read_io(sc, bio, 0);
-	else{
-		map_write_io(sc, bio, 0);
-	}
-	return DM_MAPIO_SUBMITTED;
+	
+	return (ret? ret: DM_MAPIO_SUBMITTED);
 }
 
 static struct target_type stl_target = {
