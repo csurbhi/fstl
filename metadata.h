@@ -1,4 +1,6 @@
 #include <linux/types.h>
+#include <linux/refcount.h>
+#include <linux/wait.h>
 #include "nstl-u.h"
 #include "format_metadata.h"
 
@@ -23,24 +25,33 @@
 #define REVMAP_PRIV_MAGIC 0x5
 #define MAX_ZONE_REVMAP 2
 #define BLOCKS_IN_ZONE 65536
+#define SUBBIOCTX_MAGIC 0x2
+#define MAX_TM_PAGES 100
+#define MAX_SIT_PAGES 100
 
-
-struct trans_page_write_ctx {
+struct read_ctx {
 	struct ctx *ctx;
-	struct closure *cl;
+	refcount_t *ref;
 };
 
-struct cl_list
+
+struct tm_page_write_ctx {
+	struct ctx *ctx;
+	refcount_t ref;
+	struct tm_page *tm_page;
+};
+
+struct ref_list
 {
-	struct closure *cl;
+	refcount_t ref;
 	struct list_head list;
 };
 
-struct trans_entry_mem {
+struct tm_page {
 	struct rb_node *rb;
 	sector_t blknr;
 	struct page *page;
-	struct list_head list;
+	struct list_head reflist;
 };
 
 struct sit_page_write_ctx {
@@ -48,8 +59,10 @@ struct sit_page_write_ctx {
 	struct page *page;
 };
 
-struct sit_entry_mem {
-
+struct sit_page {
+	struct rb_node *rb;
+	sector_t blknr;
+	struct page *page;
 };
 
 struct revmap_meta_inmem {
@@ -57,31 +70,30 @@ struct revmap_meta_inmem {
 					 */
 	struct ctx * ctx;
 	struct page *page;
-	struct closure *cl;
+	refcount_t ref;
 	u8 magic;
-};
-
-struct stl_revmap_entry_mem {
-	struct stl_revmap_entry revmap_mem_entry;
-	char writable; 
-}
-
-struct stl_revmap_entry_sec_mem {
-	struct stl_revmap_entry_sector revmap_sector;
-	char writable;
 };
 
 struct nstl_bioctx {
 	struct bio * clone;
-	recount_t ref;
+	refcount_t ref;
 	struct bio * orig;
 	struct ctx *ctx;
 };
 
+struct extent_entry {
+	sector_t lba;
+	sector_t pba;
+	size_t   len;
+}__packed;
+
+
+
 struct nstl_sub_bioctx {
-	struct extent_map * extent;
+	struct extent_entry extent;
 	struct nstl_bioctx * bioctx;
 	u8 magic;
+	u8 retry;
 };
 
 
@@ -151,11 +163,6 @@ struct stl_dev_info {
  */
 #define MAX_TIME 5
 
-struct extent_entry {
-	sector_t lba;
-	sector_t pba;
-	size_t   len;
-}__packed;
 
 struct stl_gc_thread;
 
@@ -171,10 +178,10 @@ struct ctx {
 	sector_t          free_sectors_in_wf;  /* Indicates the free sectors in the current write frontier */
 	int		  n_gc_candidates;
 
-	struct rb_root	  extent_tbl_root;
+	struct rb_root	  extent_tbl_root; /* in memory extent map */
 	struct rb_root    tm_rb_root;	          /* map RB tree */
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
-	rwlock_t          rb_lock;
+	rwlock_t          extent_tbl_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
 
@@ -212,18 +219,32 @@ struct ctx {
        	atomic_t revmap_blk_count;
 	struct kmem_cache * bioctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
-	waitqueue_t tm_blk_flushq;
+	struct kmem_cache * sit_page_cache;
+	struct kmem_cache *read_ctx_cache;
+	struct kmem_cache *reflist_cache;
+	struct kmem_cache *tm_page_write_cache;
+	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_flush_lock;
-	waitqueue_t zone_entry_flushq;
+	spinlock_t sit_flush_lock;
+	wait_queue_head_t zone_entry_flushq;
 	spinlock_t flush_zone_lock;
-	waitqueue_t revmap_blks_flushq;
+	wait_queue_head_t revmap_blks_flushq;
 	spinlock_t revmap_blk_lock;
 	atomic_t zone_revmap_count;	/* This should always be less than 3, incremented on get_new_zone and decremented
 					 * when one zone worth of entries are written to the disk
 					 */
 	sector_t revmap_pba;
-	sector_t revmap_page;
+	struct page * revmap_page;
 	spinlock_t flush_lock;
+	spinlock_t sit_kv_store_lock;
+	struct page *revmap_bm;		/* Stores the bitmap for the reverse map blocks flush status (65536 * 2) */
+	u8	revmap_bm_order;
+	atomic_t tm_flush_count;
+	atomic_t sit_flush_count;
+	sector_t ckpt_pba;
+	atomic_t nr_pending_writes;
+	atomic_t nr_sit_pages;
+	atomic_t nr_tm_pages;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 
@@ -237,4 +258,8 @@ struct extent {
 	atomic_t total_refs;
 	unsigned seq;
 }; /* xx bytes including padding after 'rb', xx on 32-bit */
+
+struct sit_page * search_sit_kv_store(struct ctx *ctx, sector_t pba, struct rb_node **);
+struct sit_page * add_sit_entry_kv_store(struct ctx *ctx, sector_t pba);
+
 

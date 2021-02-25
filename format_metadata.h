@@ -42,6 +42,9 @@ typedef u64 sector_t;
 __u8 valid_map[VBLK_MAP_SIZE];
  */
 
+#define SIT_ENTRIES_BLK 	BLK_SIZE/sizeof(struct stl_seg_entry)
+#define TM_ENTRIES_BLK 		BLK_SIZE/sizeof(struct tm_entry)
+
 struct stl_seg_entry {
 	__le32 vblocks;
 	__le64 mtime;
@@ -73,7 +76,7 @@ struct stl_revmap_extent {
 #define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct stl_revmap_extent)
 #define MAX_EXTENTS_PER_ZONE		65536
 struct stl_revmap_entry_sector{
-	struct stl_revmap_extent extents[MAX_EXT_ENTRIES_PER_SEC];
+	struct stl_revmap_extent extents[NR_EXT_ENTRIES_PER_SEC];
 	__le32 crc;	/* We use 31 bits to indicate the crc and LSB bit maintains 0/1 for
 			   identifying if the sector belongs to this iteration or next
 			  */
@@ -83,8 +86,8 @@ struct stl_revmap_entry_sector{
 struct stl_revmap_metadata {
 	__le32 zone_nr_0;
 	__le32 zone_nr_1;
-	__le8 version:1;  /* flips between 1 and 0 and is maintained in the crc */
-	__le8 padding[0]; /* padding for the sector */
+	u8 version:1;  /* flips between 1 and 0 and is maintained in the crc */
+	u8 padding[0]; /* padding for the sector */
 }__attribute__((packed));
 
 struct stl_ckpt {
@@ -96,7 +99,7 @@ struct stl_ckpt {
 	__le64 nr_free_zones;
 	__le64 elapsed_time;		/* records the time elapsed since all the mounts */
 	__le64 crc;
-	__le8 padding[0]; /* write all this in the padding */
+	u8 padding[0]; /* write all this in the padding */
 } __attribute__((packed));
 
 struct stl_revmap_bitmaps {
@@ -127,8 +130,12 @@ struct stl_sb {
 	__le32 rev_pba;			/* start block address of checkpoint */
 	__le32 map_pba;			/* start block address of NAT */
 	__le32 sit_pba;			/* start block address of SIT */
+	__le32 revmap_pba;
+	__le32 tm_pba;
 	__le32 zone0_pba;		/* start block address of segment 0 */
-	__le64 max_pba;                 /* The last lba in the disk */
+	__le32 max_pba;                 /* The last lba in the disk */
+	__le32 ckpt0_pba;
+        __le32 ckpt1_pba;	
 	//__u8 uuid[16];			/* 128-bit uuid for volume */
 	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
 	__le32 crc;			/* checksum of superblock */
@@ -149,7 +156,7 @@ struct stl_sb {
  * Note: we do not store an extent based TM on the disk, only a 
  * block based TM
  */
-struct translation_map_entry {
+struct tm_entry {
 	__le64 lba;
 	__le64 pba;
 } __attribute__((packed));
