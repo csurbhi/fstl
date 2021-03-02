@@ -28,8 +28,8 @@
 #include <linux/freezer.h>
 #include <linux/kthread.h>
 #include <linux/buffer_head.h>
-
 #include <linux/vmstat.h>
+#include <crypto/hash.h>
 
 #include "nstl-u.h"
 #include "stl-wait.h"
@@ -40,7 +40,7 @@
 
 /* TODO:
  * 1) Convert the STL in a block mapped STL rather
- * than a sector mapped STL
+ k than a sector mapped STL
  * If needed you can migrate to a track mapped
  * STL
  * 2) write checkpointing - flush the translation table
@@ -739,6 +739,7 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	spin_unlock(&ctx->sit_kv_store_lock);
 
 	spin_lock_irqsave(&ctx->lock, flags);
+	ctx->nr_invalid_zones++;
 	pba = get_new_zone(ctx);
 	destn_zonenr = get_zone_nr(ctx, pba);
 	spin_unlock_irqrestore(&ctx->lock, flags);
@@ -927,7 +928,6 @@ static void mark_zone_gc_candidate(struct ctx *ctx , int zonenr)
 	 * one more 1 to unset it
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
-	ctx->nr_gc_zones = ctx->nr_gc_zones + 1;
 }
 
 static u64 get_next_freezone_nr(struct ctx *ctx)
@@ -965,17 +965,6 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 	}
 	return ((bytenr * BITS_IN_BYTE) + bitnr);
 }
-
-
-
-void update_elapsed_time(struct ctx *ctx, struct stl_seg_entry * cur_entry)
-{
-	time64_t elapsed_time, now = ktime_get_real_seconds();
-
-	elapsed_time = now - ctx->mounted_time;
-	cur_entry->mtime = elapsed_time;
-}
-
 
 void wait_on_zone_barrier(struct ctx *);
 static void add_ckpt_new_wf(struct ctx *, sector_t);
@@ -1065,6 +1054,13 @@ static void add_ckpt_new_wf(struct ctx * ctx, sector_t wf)
 
 void ckpt_flushed(struct bio *bio)
 {
+	struct ctx *ctx = bio->bi_private;
+
+	spin_lock_irq(&ctx->ckpt_lock);
+	if(ctx->flag_ckpt)
+		atomic_dec(&ctx->ckpt_ref);
+	spin_unlock_irq(&ctx->ckpt_lock);
+	wake_up(&ctx->ckptq);
 	if (BLK_STS_OK == bio->bi_status) {
 		/* TODO: do something more! */
 		bio_put(bio);
@@ -1101,7 +1097,7 @@ struct page * flush_revmap_bitmap(struct ctx *ctx)
 
 	nr_pages = 1 << ctx->revmap_bm_order;
 
-	page_addr = page_address(page);
+	page_addr = (uint64_t) page_address(page);
 	for(i=0; i<nr_pages; i++) {
 		/* bio_add_page sets the bi_size for the bio */
 		if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
@@ -1115,6 +1111,11 @@ struct page * flush_revmap_bitmap(struct ctx *ctx)
 	bio->bi_end_io = revmap_bitmap_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	spin_lock_irq(&ctx->ckpt_lock);
+	if(ctx->flag_ckpt)
+		atomic_inc(&ctx->ckpt_ref);
+	spin_unlock_irq(&ctx->ckpt_lock);
+	bio->bi_private = ctx;
 	submit_bio(bio);
 	return page;
 }
@@ -1148,6 +1149,11 @@ struct page * flush_checkpoint(struct ctx *ctx)
 	bio->bi_end_io = ckpt_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	spin_lock_irq(&ctx->ckpt_lock);
+	if(ctx->flag_ckpt)
+		atomic_inc(&ctx->ckpt_ref);
+	spin_unlock_irq(&ctx->ckpt_lock);
+	bio->bi_private = ctx;
 	submit_bio(bio);
 	return page;
 }
@@ -1189,28 +1195,59 @@ void flush_sit(struct ctx *ctx)
 	blk_finish_plug(&plug);	
 }
 
-
-/*
- * a) Checkpoint is called on a timer. Say every 10 seconds. This
- * timer cannot be modififed.
- * b) When GC completes, it calls checkpoint as well.
- *
- */
-
-static void do_checkpoint(struct ctx *ctx)
+void wait_for_ckpt_completion(struct ctx *ctx)
 {
-	struct blk_plug plug;
-	
-	ctx->flag_ckpt = 0;
-	blk_start_plug(&plug);
-	flush_revmap_bitmap(ctx);
-	flush_checkpoint(ctx);
-	blk_finish_plug(&plug);
-	flush_sit(ctx);
-	/* We need to wait for all of this to be over before 
-	 * we proceed
-	 */
-	wait_for_ckpt_completion();
+	spin_lock_irq(&ctx->ckpt_lock);
+	atomic_dec(&ctx->ckpt_ref);
+	wait_event_lock_irq(ctx->ckptq, (!atomic_read(&ctx->ckpt_ref)), ctx->ckpt_lock);
+	spin_unlock_irq(&ctx->ckpt_lock);
+}
+
+inline u64 get_elapsed_time(struct ctx *ctx)
+{
+	time64_t now = ktime_get_real_seconds();
+
+	if (now > ctx->mounted_time)
+		return ctx->elapsed_time + now - ctx->mounted_time;
+
+	return ctx->elapsed_time;
+}
+
+u32 calculate_crc(struct ctx *ctx, struct page *page)
+{
+	int err;
+	struct {
+		struct shash_desc shash;
+		char ctx[4];
+	} desc;
+	const void *address = page_address(page);
+	unsigned int length = PAGE_SIZE;
+
+	BUG_ON(crypto_shash_descsize(ctx->s_chksum_driver) != sizeof(desc.ctx));
+
+	desc.shash.tfm = ctx->s_chksum_driver;
+	*(u32 *)desc.ctx = NSTL_MAGIC;
+	err = crypto_shash_update(&desc.shash, address, length);
+	BUG_ON(err);
+	return *(u32 *)desc.ctx;
+}
+
+
+void update_checkpoint(struct ctx *ctx)
+{
+	struct page * page;
+	struct stl_ckpt * ckpt;
+
+	page = ctx->ckpt_page;
+	ckpt = (struct stl_ckpt *) page_address(page);
+	ckpt->version += 1;
+	ckpt->user_block_count = ctx->user_block_count;
+	ckpt->nr_invalid_zones = ctx->nr_invalid_zones;
+	ckpt->cur_frontier_pba = ctx->write_frontier;
+	ckpt->nr_free_zones = ctx->nr_freezones;
+	ckpt->elapsed_time = get_elapsed_time(ctx);
+	ckpt->clean = 1;
+	ckpt->crc = calculate_crc(ctx, page);
 }
 
 /* TODO: We need to do this under a lock for concurrent writes
@@ -1227,13 +1264,13 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	
 	ctx->write_frontier = ctx->write_frontier + sectors_s8;
 	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
+	ctx->user_block_count -= sectors_s8 / NR_SECTORS_IN_BLK;
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
 		get_new_zone(ctx);
 		if (ctx->write_frontier < 0) {
 			panic("No more disk space available for writing!");
 		}
 	}
-
 }
 
 /* 
@@ -1284,6 +1321,7 @@ void wait_on_zone_barrier(struct ctx * ctx)
 	 * checkpoint();
 	 */
 }
+
 
 void remove_sit_blk_kv_store(struct ctx *ctx, u64 pba)
 {
@@ -1414,14 +1452,6 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	spin_unlock(&ctx->sit_kv_store_lock);
 }
 
-
-/* TODO: IMPLEMENT */
-unsigned long get_mtime()
-{
-	return 0;
-}
-
-
 static void mark_zone_occupied(struct ctx *ctx , int zonenr);
 /*
  * pba: from the LBA-PBA pair. Of a data block
@@ -1487,7 +1517,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
-	ptr->mtime = get_mtime();
+	ptr->mtime = get_elapsed_time(ctx);
 	put_page(sit_page->page);
 	spin_unlock(&ctx->sit_kv_store_lock);
 }
@@ -1909,6 +1939,7 @@ void flush_count_tm_blocks(struct ctx *ctx, bool flush, int nrscan)
 	return;
 }
 
+
 void write_sitbl_complete(struct bio *bio)
 {
 	struct ctx *ctx;
@@ -1919,6 +1950,11 @@ void write_sitbl_complete(struct bio *bio)
 	sit_ctx = (struct sit_page_write_ctx *) bio->bi_private;
 	ctx = sit_ctx->ctx;
 	page = sit_ctx->page;
+	spin_lock_irq(&ctx->ckpt_lock);
+	if(ctx->flag_ckpt)
+		atomic_dec(&ctx->ckpt_ref);
+	spin_unlock_irq(&ctx->ckpt_lock);
+	wake_up(&ctx->ckptq);
 
 	if (bio->bi_status != BLK_STS_OK) {
 		/*TODO: Perhaps retry!! or do something more
@@ -1996,6 +2032,10 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
 	sit_ctx->ctx = ctx;
+	spin_lock_irq(&ctx->ckpt_lock);
+	if(ctx->flag_ckpt)
+		atomic_inc(&ctx->ckpt_ref);
+	spin_unlock_irq(&ctx->ckpt_lock);
 	sit_ctx->page = page;
 	bio->bi_private = sit_ctx;
 	spin_lock(&ctx->sit_flush_lock);
@@ -2178,6 +2218,12 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, u64 pba, ref
 
 void revmap_bitmap_flushed(struct bio *bio)
 {
+	struct ctx *ctx = bio->bi_private;
+	spin_lock_irq(&ctx->ckpt_lock);
+	if(ctx->flag_ckpt)
+		atomic_dec(&ctx->ckpt_ref);
+	spin_unlock_irq(&ctx->ckpt_lock);
+	wake_up(&ctx->ckptq);
 	switch(bio->bi_status) {
 		case BLK_STS_OK:
 			/* bio_alloc, hence bio_put */
@@ -2493,7 +2539,7 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	atomic_inc(&ctx->revmap_sector_count);
 
 	if (j  % NR_EXT_ENTRIES_PER_SEC == 0) {
-		ptr->crc = calculate_crc();
+		ptr->crc = calculate_crc(ctx, page);
 		atomic_set(&ctx->revmap_sector_count, 0);
 		if (NR_EXT_ENTRIES_PER_BLK == j) {
 #ifdef BARRIER_NSTL
@@ -2730,7 +2776,40 @@ struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
        	ckpt = (struct stl_ckpt *)bh->b_data;
 	printk(KERN_INFO "\n ** pba: %lu, ckpt->cur_frontier_pba: %lld", pba, ckpt->cur_frontier_pba);
 	ctx->ckpt_page = bh->b_page;
+	/* Do not set ctx->nr_freezones; its calculated while reading segment info table
+	 * and then verified against what is recorded in ckpt
+	 */
 	return ckpt;
+}
+
+
+/*
+ * a) Checkpoint is called on a timer. Say every 10 seconds. This
+ * timer cannot be modififed.
+ * b) When GC completes, it calls checkpoint as well.
+ *
+ */
+static void do_checkpoint(struct ctx *ctx)
+{
+	struct blk_plug plug;
+	
+	spin_lock_irq(&ctx->ckpt_lock);
+	ctx->flag_ckpt = 1;
+	/* We expect the ckpt_ref to go to atleast 4 and then back to 0
+	 * when all the blocks are flushed!
+	 */
+	atomic_set(&ctx->ckpt_ref, 1);
+	spin_unlock_irq(&ctx->ckpt_lock);
+	blk_start_plug(&plug);
+	flush_revmap_bitmap(ctx);
+	update_checkpoint(ctx);
+	flush_checkpoint(ctx);
+	blk_finish_plug(&plug);
+	flush_sit(ctx);
+	/* We need to wait for all of this to be over before 
+	 * we proceed
+	 */
+	wait_for_ckpt_completion(ctx);
 }
 
 /*
@@ -2752,6 +2831,13 @@ static void reset_ckpt(struct stl_ckpt * ckpt)
  * and check if the records mentioned in the 
  * ckpt match with that in the extent map
  * So read the extent map before this step
+ *
+ * recovery is necessary is ckpt->clean is 0
+ *
+ * if recovery is necessary  do the following:
+ *
+ * ctx->elapsed_time = highest mtime of all segentries.
+ *
  */
 static void do_recovery(struct stl_ckpt * ckpt)
 {
@@ -2795,6 +2881,10 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 		//page2 is rightly set by read_ckpt();
 		put_page(page1);
 	}
+	ctx->user_block_count = ckpt->user_block_count;
+	ctx->nr_invalid_zones = ckpt->nr_invalid_zones;
+	ctx->write_frontier = ckpt->cur_frontier_pba;
+	ctx->elapsed_time = ckpt->elapsed_time;
 	/* TODO: Do recovery if necessary */
 	//do_recovery(ckpt);
 	return ckpt;
@@ -3391,7 +3481,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	*/
 	
 	ctx->revmap_pba = ctx->sb->revmap_pba;
-	ctx->sb->clean = 0;
+	ctx->ckpt->clean = 0;
 	spin_lock_init(&ctx->flush_lock);
 	init_waitqueue_head(&ctx->tm_blk_flushq);
 	spin_lock_init(&ctx->tm_flush_lock);
@@ -3402,6 +3492,14 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	atomic_set(&ctx->nr_tm_pages, 0);
 	init_waitqueue_head(&ctx->refq);
 	init_waitqueue_head(&ctx->rev_blk_flushq);
+	ctx->mounted_time = ktime_get_real_seconds();
+	ctx->s_chksum_driver = crypto_alloc_shash("crc32c", 0, 0);
+	if (IS_ERR(ctx->s_chksum_driver)) {
+		printk(KERN_ERR "Cannot load crc32c driver.");
+		ret = PTR_ERR(ctx->s_chksum_driver);
+		ctx->s_chksum_driver = NULL;
+		goto destroy_cache;
+	}
 	return 0;
 /* failed case */
 destroy_cache:
@@ -3432,14 +3530,6 @@ free_ctx:
 	return ret;
 }
 
-/* TODO: IMPLEMENT
- *
- */
-static void flush_sb(struct ctx *ctx)
-{
-	return;
-}
-
 static void stl_dtr(struct dm_target *dm_target)
 {
 	struct ctx *ctx = dm_target->private;
@@ -3451,8 +3541,6 @@ static void stl_dtr(struct dm_target *dm_target)
 	 */
 	flush_translation_blocks(ctx);
 	do_checkpoint(ctx);
-	ctx->sb->clean = 1;
-	flush_sb(ctx);
 	/* If we are here, then there was no crash while writing out
 	 * the disk metadata
 	 */

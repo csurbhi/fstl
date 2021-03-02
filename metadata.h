@@ -28,6 +28,7 @@
 #define SUBBIOCTX_MAGIC 0x2
 #define MAX_TM_PAGES 100
 #define MAX_SIT_PAGES 100
+#define NSTL_MAGIC 0xF2F52010
 
 struct read_ctx {
 	struct ctx *ctx;
@@ -231,6 +232,7 @@ struct ctx {
 	spinlock_t tm_ref_lock;
 	spinlock_t sit_flush_lock;
 	spinlock_t rev_flush_lock;
+	spinlock_t ckpt_lock;
 	wait_queue_head_t zone_entry_flushq;
 	spinlock_t flush_zone_lock;
 	atomic_t zone_revmap_count;	/* This should always be less than 3, incremented on get_new_zone and decremented
@@ -238,6 +240,7 @@ struct ctx {
 					 */
 	wait_queue_head_t refq;
 	wait_queue_head_t rev_blk_flushq;
+	wait_queue_head_t ckptq;
 	sector_t revmap_pba;
 	struct page * revmap_page;
 	spinlock_t flush_lock;
@@ -250,6 +253,10 @@ struct ctx {
 	atomic_t nr_pending_writes;
 	atomic_t nr_sit_pages;
 	atomic_t nr_tm_pages;
+	atomic_t ckpt_ref;
+	unsigned int 	nr_invalid_zones;
+	unsigned int 	user_block_count;
+	struct crypto_shash *s_chksum_driver;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 

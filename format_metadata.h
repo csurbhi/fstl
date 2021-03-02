@@ -95,11 +95,11 @@ struct stl_ckpt {
 	uint32_t magic;
 	__le64 version;
 	__le64 user_block_count;
-	__le64 valid_block_count;
 	__le32 nr_invalid_zones;	/* zones that have errors in them */
 	__le64 cur_frontier_pba;
 	__le64 nr_free_zones;
 	__le64 elapsed_time;		/* records the time elapsed since all the mounts */
+	__u8 clean;			/* becomes 0 in ctr and 1 in dtr. Used to identify crash */
 	__le64 crc;
 	u8 padding[0]; /* write all this in the padding */
 } __attribute__((packed));
@@ -143,7 +143,6 @@ struct stl_sb {
 	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
 	__le32 crc;			/* checksum of superblock */
 	__u8 reserved[0];		/* valid reserved region. Rest of the block space */
-	__u8 clean;			/* becomes 0 in ctr and 1 in dtr. Used to identify crash */
 } __attribute__((packed));
 
 /*
