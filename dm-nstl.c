@@ -646,6 +646,8 @@ int is_disk_full(struct ctx *ctx)
  * pba: PBA from the LBA-PBA pair. This is the PBA of a data block
  * that belongs to a zone. We search for a page that holds the sit
  * entry for this zone.
+ *
+ * https://lwn.net/Articles/184495/
  */
 
 struct sit_page * search_sit_kv_store(struct ctx *ctx, sector_t pba, struct rb_node **parent)
@@ -660,7 +662,7 @@ struct sit_page * search_sit_kv_store(struct ctx *ctx, sector_t pba, struct rb_n
 	node = rb_root->rb_node;
 	while(node) {
 		*parent = node;
-		node_ent = container_of(*parent, struct sit_page, rb);
+		node_ent = rb_entry(*parent, struct sit_page, rb);
 		if (blknr == node_ent->blknr) {
 			return node_ent;
 		}
@@ -688,7 +690,7 @@ struct sit_page * search_sit_blk(struct ctx *ctx, sector_t blknr)
 	node = rb_root->rb_node;
 	while(node) {
 		parent = node;
-		node_ent = container_of(parent, struct sit_page, rb);
+		node_ent = rb_entry(parent, struct sit_page, rb);
 		if (blknr == node_ent->blknr) {
 			return node_ent;
 		}
@@ -1344,6 +1346,9 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks);
  * We are about to update the SIT entry that belongs to that zone
  * Before that we read that corresponding page in memory and then
  * add it to our RB tree that we use for searching.
+ *
+ * This function should be called only after taking the
+ * ctx->sit_kv_store_lock
  */
 struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 {
@@ -1355,7 +1360,6 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 	struct sit_page *new;
 	struct page *page;
 
-	sit_blknr = zonenr / SIT_ENTRIES_BLK;
 	new = search_sit_kv_store(ctx, pba, &parent);
 	if (new)
 		return new;
@@ -1366,6 +1370,7 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 
 	RB_CLEAR_NODE(&new->rb);
 
+	sit_blknr = zonenr / SIT_ENTRIES_BLK;
 	page = read_block(ctx, sit_blknr, ctx->sb->sit_pba, 1);
 	if (!page) {
 		kmem_cache_free(ctx->sit_page_cache, new);
@@ -1376,11 +1381,13 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 
 	/* We put the page when the page gets written to the disk */
 	get_page(page);
+	new->blknr = sit_blknr;
+	new->page = page;
 
 	/* Add this page to a RB tree based KV store.
 	 * Key is: blknr for this corresponding block
 	 */
-	parent_ent = container_of(parent, struct sit_page, rb);
+	parent_ent = rb_entry(parent, struct sit_page, rb);
 	if (sit_blknr < parent_ent->blknr) {
 		/* Attach new node to the left of parent */
 		rb_link_node(&new->rb, parent, &parent->rb_left);
@@ -1389,8 +1396,7 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 		/* Attach new node to the right of parent */
 		rb_link_node(&new->rb, parent, &parent->rb_right);
 	}
-	new->blknr = sit_blknr;
-	new->page = page;
+	/* Balance the tree after the blknr is addded to it */
 	rb_insert_color(&new->rb, root);
 	atomic_inc(&ctx->nr_tm_pages);
 	atomic_inc(&ctx->sit_flush_count);
@@ -1689,7 +1695,7 @@ struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node *
 	node = root->rb_node;
 	while(node) {
 		*parent = node;
-		node_ent = container_of(*parent, struct tm_page, rb);
+		node_ent = rb_entry(*parent, struct tm_page, rb);
 		if (blknr == node_ent->blknr) {
 			return node_ent;
 		}
@@ -1816,7 +1822,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	struct bio * bio;
 	struct tm_page_write_ctx *tm_page_write_ctx;
 
-	node_ent = container_of(node, struct tm_page, rb);
+	node_ent = rb_entry(node, struct tm_page, rb);
 	page = node_ent->page;
 
 	/* Only flush if the page needs flushing */
@@ -2000,7 +2006,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 
 	/* Do not flush if the page is not dirty */
 
-	node_ent = container_of(node, struct sit_page, rb);
+	node_ent = rb_entry(node, struct sit_page, rb);
 	page = node_ent->page;
 	spin_lock(&ctx->sit_flush_lock);
 	if (unlikely(!PageDirty(page))) {
@@ -2142,7 +2148,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 	/* Add this page to a RB tree based KV store.
 	 * Key is: blknr for this corresponding block
 	 */
-	parent_ent = container_of(parent, struct tm_page, rb);
+	parent_ent = rb_entry(parent, struct tm_page, rb);
 	if (blknr < parent_ent->blknr) {
 		/* Attach new node to the left of parent */
 		rb_link_node(&new->rb, parent, &parent->rb_left);

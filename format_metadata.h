@@ -1,15 +1,68 @@
 #include<linux/types.h>
 
 /*
+ * Design:
+ * SB1, SB2, Revmap, Translation Map, Revmap Bitmap, CKPT, SIT, Dataa
+ *
+ * We dont want to keep two revmap entries:
+ * 1. We can at max loose 1 sector of entries + 1 page of in memory entries. 
+ * We are okay with that? This will happen, in spite of keeping two entries. 
+ * It will happen inspite of keeping a journal.
+ *
+ * The translation entries:
+ * 1. We don’t have to keep two copies. Because we have the entries in revmap. 
+ *    So we already do have two copies.
+ * 2. If we crash, then we can copy the contents of the revmap back to the 
+ *    translation table.
  *
  *
+ * Revmap bitmap: Only 1 copy
+ * 1. We keep only one copy. On a crash, when we reboot, we just ignore this 
+ *    revmap bit map.
+ * 2. We read the revmap entries and write them out to the translation map.
+ * 3. Then we start with a new bitmap.
  *
- * SB1 , SB2, Revmap, T0, T1, Checkpoint, Revmap BitMap, SIT, Data
+ *  SIT:
+ * 1. We keep only one copy.
+ * 2. If one sector gets destroyed while writing, then we do the following:
+ *       i) We create the RB tree by reading the translation map.
+ *       ii) While doing so, we keep a count of the valid blocks in every 
+ *	    sector and then rebuild the SIT.
+ *       iii) This way, we can ignore what is on disk.
+ *       iv) We use the mtime that is stored in the last ckpt for entries where
+ *	    the valid blocks dont match with our calculation.
  *
  *
+ * Checkpoint:
+ *        We keep two copies of this. We need the mtime for further SIT
+ *        calculation. Also this is just one sector of information. We keep one
+ *        checkpoint in one block. We write alternately to the checkpoints. The
+ *        checkpoint with the higher elapsed time is the right checkpoint.
+ * 
  *
+ * So our order of writing is as follows:
+ * 1. Write the data
+ * 2. Write revmap entries.
+ * 3. Data is now secured on the disk
+ * 4. Write trans map entries
+ * 5. Write revmap bitmap
+ * 6. Write checkpoint
+ * 7. Write SIT
+ * 
+ * do_ckpt() Performs 5, 6, 7 in order. We wait for 5, 6, and 7 to complete before proceeding by putting a barrier after 7.
+ *
+ * Revmap bitmap can be updated only after the translation blocks have been
+ * written on disk.
+ * SIT can only be updated after revmap entries are on disk.
+ * Checkpoint variables can be updated only after revmap entries are on disk.
+ *
+ * So, we need some mechanism to identify that there was a crash.
+ * We can keep this information in the checkpoint.
+ * ckpt->clean can be 0 in ctr() and 1 in dtr().
+ * On the next mount if ckpt->clean is 0, then we know we had a crash!
  *
  */
+
 typedef __le64 u64;
 typedef __le32 u32;
 typedef __le16 u16;
