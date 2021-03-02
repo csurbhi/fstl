@@ -60,6 +60,7 @@ struct stl_seg_entry {
  * such blocks. So we need 65536 such entries */
 struct stl_revmap_extent {
 	__le64 lba;
+	__le64 pba;
 	__le16 len; /* At a maximum there are 65536 blocks in a zone */
 }__attribute__((packed));
 
@@ -92,6 +93,7 @@ struct stl_revmap_metadata {
 
 struct stl_ckpt {
 	uint32_t magic;
+	__le64 version;
 	__le64 user_block_count;
 	__le64 valid_block_count;
 	__le32 nr_invalid_zones;	/* zones that have errors in them */
@@ -131,11 +133,12 @@ struct stl_sb {
 	__le32 map_pba;			/* start block address of NAT */
 	__le32 sit_pba;			/* start block address of SIT */
 	__le32 revmap_pba;
+	__le32 order_revmap_bm;
 	__le32 tm_pba;
 	__le32 zone0_pba;		/* start block address of segment 0 */
 	__le32 max_pba;                 /* The last lba in the disk */
-	__le32 ckpt0_pba;
-        __le32 ckpt1_pba;	
+	__le32 ckpt_pba1;
+        __le32 ckpt_pba2;	
 	//__u8 uuid[16];			/* 128-bit uuid for volume */
 	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
 	__le32 crc;			/* checksum of superblock */

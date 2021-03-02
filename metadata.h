@@ -43,12 +43,12 @@ struct tm_page_write_ctx {
 
 struct ref_list
 {
-	refcount_t ref;
+	refcount_t *ref;
 	struct list_head list;
 };
 
 struct tm_page {
-	struct rb_node *rb;
+	struct rb_node rb;
 	sector_t blknr;
 	struct page *page;
 	struct list_head reflist;
@@ -60,7 +60,7 @@ struct sit_page_write_ctx {
 };
 
 struct sit_page {
-	struct rb_node *rb;
+	struct rb_node rb;
 	sector_t blknr;
 	struct page *page;
 };
@@ -70,7 +70,7 @@ struct revmap_meta_inmem {
 					 */
 	struct ctx * ctx;
 	struct page *page;
-	refcount_t ref;
+	refcount_t *ref;
 	u8 magic;
 };
 
@@ -218,21 +218,26 @@ struct ctx {
        	atomic_t revmap_sector_count;
        	atomic_t revmap_blk_count;
 	struct kmem_cache * bioctx_cache;
+	struct kmem_cache * subbio_ctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
 	struct kmem_cache *read_ctx_cache;
 	struct kmem_cache *reflist_cache;
 	struct kmem_cache *tm_page_write_cache;
+	struct kmem_cache *sit_ctx_cache;
+	struct kmem_cache *tm_page_cache;
 	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_flush_lock;
+	spinlock_t tm_ref_lock;
 	spinlock_t sit_flush_lock;
+	spinlock_t rev_flush_lock;
 	wait_queue_head_t zone_entry_flushq;
 	spinlock_t flush_zone_lock;
-	wait_queue_head_t revmap_blks_flushq;
-	spinlock_t revmap_blk_lock;
 	atomic_t zone_revmap_count;	/* This should always be less than 3, incremented on get_new_zone and decremented
 					 * when one zone worth of entries are written to the disk
 					 */
+	wait_queue_head_t refq;
+	wait_queue_head_t rev_blk_flushq;
 	sector_t revmap_pba;
 	struct page * revmap_page;
 	spinlock_t flush_lock;
@@ -256,7 +261,6 @@ struct extent {
 	u32      len;
 	atomic_t refs[3];
 	atomic_t total_refs;
-	unsigned seq;
 }; /* xx bytes including padding after 'rb', xx on 32-bit */
 
 struct sit_page * search_sit_kv_store(struct ctx *ctx, sector_t pba, struct rb_node **);
