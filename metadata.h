@@ -7,10 +7,7 @@
 /*
  *
  *
- *
- * SB1 , SB2, CKPT1, CKPT2, Map, Seg Info Table, Data
- *
- *
+ * SB1, SB2, Revmap, Translation Map, Revmap Bitmap, CKPT, SIT, Dataa
  *
  *
  */
@@ -245,7 +242,10 @@ struct ctx {
 	struct page * revmap_page;
 	spinlock_t flush_lock;
 	spinlock_t sit_kv_store_lock;
-	struct page *revmap_bm;		/* Stores the bitmap for the reverse map blocks flush status (65536 * 2) */
+	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
+	 * non contiguous pages in memory
+	 */
+	struct page **revmap_bm;		/* Stores the bitmap for the reverse map blocks flush status (65536 * 2) */
 	u8	revmap_bm_order;
 	atomic_t tm_flush_count;
 	atomic_t sit_flush_count;

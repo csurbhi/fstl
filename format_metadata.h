@@ -1,4 +1,4 @@
-#include<linux/types.h>
+#include <linux/types.h>
 
 /*
  * Design:
@@ -71,7 +71,12 @@ typedef u32 uint32_t;
 typedef u16 uint16_t;
 typedef u64 sector_t;
 
-
+#ifndef SECTOR_SIZE
+	#define SECTOR_SIZE 512
+#endif
+#ifndef BLOCK_SIZE
+	#define BLOCK_SIZE 4096
+#endif
 #define STL_SB_MAGIC 0x7853544c
 #define STL_CKPT_MAGIC 0x1A2B3C4D
 
@@ -140,8 +145,8 @@ struct stl_revmap_entry_sector{
 struct stl_revmap_metadata {
 	__le32 zone_nr_0;
 	__le32 zone_nr_1;
-	u8 version:1;  /* flips between 1 and 0 and is maintained in the crc */
-	u8 padding[0]; /* padding for the sector */
+	unsigned char version:1;  /* flips between 1 and 0 and is maintained in the crc */
+	unsigned char padding[0]; /* padding for the sector */
 }__attribute__((packed));
 
 struct stl_ckpt {
@@ -154,7 +159,7 @@ struct stl_ckpt {
 	__le64 elapsed_time;		/* records the time elapsed since all the mounts */
 	__u8 clean;			/* becomes 0 in ctr and 1 in dtr. Used to identify crash */
 	__le64 crc;
-	u8 padding[0]; /* write all this in the padding */
+	unsigned char padding[0]; /* write all this in the padding */
 } __attribute__((packed));
 
 struct stl_revmap_bitmaps {
@@ -177,21 +182,22 @@ struct stl_sb {
 	__le32 log_zone_size;		/* log2 zone size in bytes */
 	__le32 checksum_offset;		/* checksum offset inside super block */
 	__le32 zone_count;		/* total # of segments */
+	__le32 blk_count_revmap;	/* # of blocks for storing reverse mapping */
 	__le32 blk_count_ckpt;		/* # of blocks for checkpoint */
-	__le32 blk_count_map;		/* # of segments for extent map*/
+	__le32 blk_count_revmap_bm;	/* # of blocks for storing the bitmap of revmap blks availabilty */
+	__le32 blk_count_tm;		/* # of segments for Translation map */
 	__le32 blk_count_sit;		/* # of segments for SIT */
 	__le32 zone_count_reserved;	/* # CMR zones that are reserved */
 	__le32 zone_count_main;		/* # of segments for main area */
-	__le32 rev_pba;			/* start block address of checkpoint */
-	__le32 map_pba;			/* start block address of NAT */
+	__le32 revmap_pba;		/* start block address of revmap*/
+	__le32 tm_pba;			/* start block address of translation map */
+	__le32 revmap_bm_pba;		/* start block address of reverse map bitmap */
+	__le32 ckpt1_pba;		/* start address of checkpoint 1 */
+        __le32 ckpt2_pba;		/* start address of checkpoint 2 */
 	__le32 sit_pba;			/* start block address of SIT */
-	__le32 revmap_pba;
-	__le32 order_revmap_bm;
-	__le32 tm_pba;
+	__le32 order_revmap_bm;		/* log of number of blocks used for revmap bitmap */
 	__le32 zone0_pba;		/* start block address of segment 0 */
 	__le32 max_pba;                 /* The last lba in the disk */
-	__le32 ckpt_pba1;
-        __le32 ckpt_pba2;	
 	//__u8 uuid[16];			/* 128-bit uuid for volume */
 	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
 	__le32 crc;			/* checksum of superblock */

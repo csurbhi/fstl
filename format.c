@@ -80,23 +80,52 @@ __le32 get_zone_count()
  */
 __le64 get_nr_blks(struct stl_sb *sb)
 {
-	unsigned long nr_blks_per_zone = (1 << (sb->log_zone_size - sb->log_block_size));
-	unsigned long nr_blks =  (sb->zone_count * nr_blks_per_zone);
+	unsigned long nr_blks = (sb->zone_count << (sb->log_zone_size - sb->log_block_size));
+	return nr_blks;
+}
+
+/* Stores as many entries as there are 4096 blks in 2 zones */
+
+__le32 get_revmap_blk_count(struct stl_sb *sb)
+{
+	unsigned nr_rm_entries = 2 << (sb->log_zone_size - sb->log_block_size);
+	unsigned nr_rm_entries_per_blk = NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK;
+	unsigned nr_rm_blks = nr_rm_entries / nr_rm_entries_per_blk;
+	if (nr_rm_entries % nr_rm_entries_per_blk)
+		nr_rm_blks++;
+	return nr_rm_blks;
+}
+
+/* We store a tm entry for every 4096 block
+ *
+ * This accounts for the blks in the main area and excludes the blocks
+ * for the metadata. Hence we do NOT call get_nr_blks()
+ */
+__le32 get_tm_blk_count(struct stl_sb *sb)
+{
+	u64 nr_tm_entries = (sb->zone_count_main << (sb->log_zone_size - sb->log_block_size));
+	u32 nr_tm_entries_per_blk = BLOCK_SIZE / sizeof(struct tm_entry);
+	u64 nr_tm_blks = nr_tm_entries / nr_tm_entries_per_blk;
+	if (nr_tm_entries % nr_tm_entries_per_blk)
+		nr_tm_blks++;
+	return nr_tm_blks;
+}
+
+
+__le32 get_revmap_bm_blk_count(struct stl_sb *sb)
+{
+	unsigned nr_revmap_blks = sb->blk_count_revmap;
+	unsigned nr_bytes = nr_revmap_blks / BITS_IN_BYTE;
+	if (nr_revmap_blks % BITS_IN_BYTE)
+		nr_bytes++;
+	unsigned nr_blks = nr_bytes / BLOCK_SIZE;
+	if (nr_bytes % BLOCK_SIZE)
+		nr_blks++;
+
 	return nr_blks;
 
 }
 
-__le32 get_map_blk_count(struct stl_sb *sb)
-{
-	unsigned int one_extent_sz = 16; /* in bytes */
-	unsigned int nr_extents_in_blk = BLK_SZ / one_extent_sz;
-	__le64 nr_extents = get_nr_blks(sb);
-	unsigned int blks_for_extents = nr_extents / nr_extents_in_blk;
-	if (nr_extents % nr_extents_in_blk > 0)
-		blks_for_extents = blks_for_extents + 1;
-
-	return blks_for_extents;
-}
 
 __le32 get_nr_zones(struct stl_sb *sb)
 {
@@ -121,7 +150,7 @@ __le32 get_sit_blk_count(struct stl_sb *sb)
 __le32 get_metadata_zone_count(struct stl_sb *sb)
 {
 	/* we add the 2 for the superblock */
-	unsigned int metadata_blk_count = NR_BLKS_SB + sb->blk_count_ckpt + sb->blk_count_map + sb->blk_count_sit;
+	unsigned int metadata_blk_count = NR_BLKS_SB + sb->blk_count_revmap + sb->blk_count_ckpt + sb->blk_count_revmap_bm + sb->blk_count_tm + sb->blk_count_sit;
 	unsigned int nr_blks_in_zone = (1 << sb->log_zone_size)/(1 << sb->log_block_size);
 	unsigned int metadata_zone_count = metadata_blk_count / nr_blks_in_zone;
 	if (metadata_blk_count % nr_blks_in_zone > 0)
@@ -161,22 +190,33 @@ __le32 get_reserved_zone_count()
  * LBA as ZONE_SZ/BLK_SZ
  * The blk adderss is 256MB;
  */
-__le64 get_cp_pba()
+__le64 get_revmap_pba()
 {
 	return (NR_BLKS_SB * NR_SECTORS_IN_BLK);
 }
 
-__le64 get_map_pba(struct stl_sb *sb)
+__le64 get_tm_pba(struct stl_sb *sb)
 {
+	u64 tm_pba = sb->revmap_pba + ( sb->blk_count_revmap * NR_SECTORS_IN_BLK);
+	return tm_pba;
+}
 
-	return sb->cp_pba + (sb->blk_count_ckpt * NR_SECTORS_IN_BLK);
+__le64 get_revmap_bm_pba(struct stl_sb *sb)
+{
+	u64 revmap_bm_pba = sb->tm_pba + (sb->blk_count_tm * NR_SECTORS_IN_BLK);
+	return revmap_bm_pba;
+}
+
+__le64 get_ckpt1_pba(struct stl_sb *sb)
+{
+	u64 cp1_pba  = sb->revmap_bm_pba + (sb->blk_count_revmap_bm * NR_SECTORS_IN_BLK);
+	return cp1_pba;
 }
 
 
 __le64 get_sit_pba(struct stl_sb *sb)
 {
-	printf("\n sb->map_pba: %d, sb->blk_count_map: %d", sb->map_pba, sb->blk_count_map);
-	return sb->map_pba + (sb->blk_count_map * NR_SECTORS_IN_BLK);
+	return sb->ckpt2_pba + NR_SECTORS_IN_BLK;
 }
 
 __le64 get_zone0_pba(struct stl_sb *sb)
@@ -219,7 +259,6 @@ void read_sb(int fd, unsigned long sectornr)
 	printf("\n sb->blk_count_ckpt %d", sb->blk_count_ckpt);
 	//printf("\n sb-> %d", sb->);
 	printf("\n sb->zone_count: %d", sb->zone_count);
-	printf("\n sb->map_pba: %d", sb->map_pba);
 	printf("\n Read verified!!!");
 	printf("\n ==================== \n");
 	free(sb);
@@ -231,25 +270,45 @@ __le64 get_max_pba(struct stl_sb *sb)
 
 }
 
-int get_translation_blks_for_zone(struct stl_sb *sb)
+void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 {
-	int nr_blks_in_zone = 1 << (sb->log_zone_size - sb->log_block_size);
-	int sizeof_each_entry = sizeof(struct stl_ckpt_entry);
-	int nr_entries_in_blk = BLK_SIZE / sizeof_each_entry;
-	int i = 0;
-	int rem_size_of_ckpt_blk = BLK_SIZE - sizeof(struct stl_ckpt);
-	int entries_in_ckpt_blk = rem_size_of_ckpt_blk / sizeof_each_entry;
-	int rem_entries = nr_blks_in_zone - entries_in_ckpt_blk;
-	int nr_blks = rem_entries / nr_entries_in_blk;
+	char buffer[4096];
+	int i, ret;
 
-	return nr_blks + 1; /* we add the 1 for the CKPT block itself */
+	memset(buffer, 0, 4096);
+	for (i=0; i<nr_blks; i++) {
+	    	ret = write_to_disk(fd, buffer, BLK_SZ, pba);
+		if (0 > ret) {
+			exit(ret);
+		}
+	}
+}
+
+/*
+ * Initially the reverse map should be all zero.
+ */
+void write_revmap(int fd, sector_t revmap_pba, unsigned nr_blks)
+{
+	write_zeroed_blks(fd, revmap_pba, nr_blks);
+}
+
+void write_tm(int fd, sector_t tm_pba, unsigned nr_blks)
+{
+	write_zeroed_blks(fd, tm_pba, nr_blks);
+}
+
+
+/* Revmap bitmap: 0 indicates blk is available for writing
+ */
+void write_revmap_bitmap(int fd, sector_t revmap_bm_pba, unsigned nr_blks)
+{
+	write_zeroed_blks(fd, revmap_bm_pba, nr_blks);
 }
 
 struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 {
 	struct stl_sb *sb;
 	int ret = 0;
-	int translation_blks = 0;
 
 	sb = (struct stl_sb *)malloc(BLK_SZ);
 	if (!sb)
@@ -264,18 +323,22 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	sb->checksum_offset = offsetof(struct stl_sb, crc);
 	sb->zone_count = get_zone_count(sb);
 	printf("\n sb->zone_count: %d", sb->zone_count);
-	translation_blks = get_translation_blks_for_zone(sb);
-	sb->blk_count_ckpt = NR_CKPT_COPIES * translation_blks;
-	sb->blk_count_map = get_map_blk_count(sb);
-	sb->blk_count_sit = get_sit_blk_count(sb);
     	sb->zone_count_reserved = get_reserved_zone_count(sb);
 	sb->zone_count_main = get_main_zone_count(sb);
-	sb->cp_pba = get_cp_pba();
-	sb->map_pba = get_map_pba(sb);
+	sb->blk_count_revmap = get_revmap_blk_count(sb);
+	sb->blk_count_tm = get_tm_blk_count(sb);
+	sb->blk_count_revmap_bm = get_revmap_bm_blk_count(sb);
+	sb->blk_count_ckpt = NR_CKPT_COPIES;
+	sb->blk_count_sit = get_sit_blk_count(sb);
+	sb->revmap_pba = get_revmap_pba(sb);
+	sb->tm_pba = get_tm_pba(sb);
+	sb->revmap_bm_pba = get_revmap_bm_pba(sb);
+	sb->ckpt1_pba = get_ckpt1_pba(sb);
+	sb->ckpt2_pba = sb->ckpt1_pba + NR_SECTORS_IN_BLK;
 	sb->sit_pba = get_sit_pba(sb);
 	sb->zone0_pba = get_zone0_pba(sb);
 	sb->max_pba = get_max_pba(sb);
-	printf("\n sb->max_pba: %lld", sb->max_pba);
+	printf("\n sb->max_pba: %d", sb->max_pba);
 	sb->crc = 0;
 	sb->crc = crc32(-1, (unsigned char *)sb, STL_SB_SIZE);
 
@@ -340,14 +403,6 @@ void prepare_prev_seg_entry(struct stl_seg_entry *entry)
 	entry->mtime = 0;
 }
 
-void prepare_ckpt_translation_table(struct stl_ckpt_entry * table)
-{
-	table->prev_zone_pba = 0;
-	table->cur_zone_pba = 0;
-	table->prev_count = 0;
-	table->cur_count = 0;
-}
-
 void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 {
 	struct stl_ckpt *ckpt;
@@ -359,16 +414,18 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 
 	memset(ckpt, 0, BLK_SZ);
 	ckpt->magic = STL_CKPT_MAGIC;
-	ckpt->checkpoint_ver = 0;
+	ckpt->version = 0;
 	ckpt->user_block_count = sb->zone_count_main << (sb->log_zone_size - sb->log_block_size);
-	ckpt->valid_block_count = ckpt->user_block_count;
-	ckpt->free_segment_count = sb->zone_count_main - 1; //1 for the current frontier
+	ckpt->nr_invalid_zones = 0;
 	ckpt->cur_frontier_pba = get_current_frontier(sb);
+	ckpt->nr_free_zones = sb->zone_count_main - 1; //1 for the current frontier
+	ckpt->elapsed_time = 0;
+	ckpt->clean = 1;  /* 1 indicates clean datastructures */
+	ckpt->crc = 0;
 	printf("\n checkpoint: cur_frontier_pba: %lld", ckpt->cur_frontier_pba);
+	/*
 	prepare_cur_seg_entry(&ckpt->cur_seg_entry);
 	prepare_prev_seg_entry(&ckpt->cur_seg_entry);
-	/* the next is not needed as it is writing 0s anyway.
-	prepare_ckpt_translation_table(&ckp->ckpt_translation_table);
 	*/
 	write_to_disk(fd, (char *)ckpt, BLK_SZ, ckpt_pba);
 	free(ckpt);
@@ -396,49 +453,6 @@ void read_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 	ret = read(fd, ckpt, BLK_SZ);
 	printf("\n Read checkpoint, ckpt->cur_frontier_pba: %lld", ckpt->cur_frontier_pba);
 	free(ckpt);
-}
-
-/*
- *
- * If we were to write extents to signify the blks
- * in the disk, at the beginning all the LBA and PBA
- * are LBA, PBA + some offset, len 
- * But we write the extents only when there is some
- * write.
- * Extents are written on the first writes.
- * On first overwrites, the LBA changes and the
- * extents change.
- * Initially there is nothing in the extent space
- * as nothing is mapped. So we write all zeroes.
-*/
-
-void write_map(int fd, u64 nr_extents, u64 map_pba)
-{
-	unsigned int extents_in_blk = BLK_SZ / sizeof(struct extent_map);
-	unsigned int nr_extent_blks = nr_extents / extents_in_blk;
-	int i = 0, ret=0;
-	if (nr_extents % extents_in_blk > 0)
-		nr_extent_blks = nr_extent_blks + 1;
-
-	char * buf = (char *) malloc(BLK_SZ);
-	if (!buf)
-		exit(-1);
-
-	memset(buf, 0, BLK_SZ);
-	printf("\n nr_data_blks: %llu ", nr_extents);
-	printf("\n nr_extent_blks: %d", nr_extent_blks);
-	while (i < nr_extent_blks) {
-		ret = write_to_disk(fd, (char *) buf, BLK_SZ, map_pba);
-		if (ret < 0) {
-			exit(ret);
-		}
-		map_pba += NR_SECTORS_IN_BLK;
-		i++;
-		//printf("\n Written blk: %d", i);
-	}
-	free(buf);
-	printf("\n returning from write_map...");
-	return;
 }
 
 void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_pba)
@@ -488,6 +502,12 @@ void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_
 	free(buf);
 }
 
+/*
+ *
+ * SB1, SB2, Revmap, Translation Map, Revmap Bitmap, CKPT1, CKPT2, SIT, Dataa
+ *
+ */
+
 int main()
 {
 	unsigned int pba = 0;
@@ -507,19 +527,20 @@ int main()
 	read_sb(fd, 8);
 	printf("\n Superblock written at pba: %d", pba + NR_SECTORS_IN_BLK);
 	free(sb2);
-	write_revmap();
-	write_ckpt(fd, sb1, sb1->cp_pba);
-	printf("\n Checkpoint written at offset: %d", sb1->cp_pba);
+	write_revmap(fd, sb1->revmap_pba, sb1->blk_count_revmap);
 	nrblks = get_nr_blks(sb1);
 	printf("\n nrblks: %lu", nrblks);
-	write_map(fd, nrblks, sb1->map_pba);
-	write_translation_table();
+	write_tm(fd, sb1->tm_pba, sb1->blk_count_tm);
+	write_revmap_bitmap(fd, sb1->revmap_bm_pba, sb1->blk_count_revmap_bm);
+	write_ckpt(fd, sb1, sb1->ckpt1_pba);
+	printf("\n Checkpoint written at offset: %d", sb1->ckpt1_pba);
+	write_ckpt(fd, sb1, sb1->ckpt2_pba);
 	printf("\n Extent map written");
 	printf("\n sb1->zone_count: %d", sb1->zone_count);
 	write_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
 	printf("\n Segment Information Table written");
 	pba = 0;
-	read_ckpt(fd, sb1, sb1->cp_pba);
+	read_ckpt(fd, sb1, sb1->ckpt1_pba);
 	free(sb1);
 	close(fd);
 	/* 0 volume_size: 39321600  nstl  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */

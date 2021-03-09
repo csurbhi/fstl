@@ -1086,28 +1086,25 @@ void revmap_bitmap_flushed(struct bio *);
 struct page * flush_revmap_bitmap(struct ctx *ctx)
 {
 	struct bio * bio;
-	struct page *page = ctx->revmap_page;
+	struct page *page;
 	int i, nr_pages;
-	uint64_t page_addr;
 	sector_t pba;
+	struct page ** revmap_bm_pages;
 
-	page = ctx->revmap_bm;
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		return NULL;
 	}
-
-	nr_pages = 1 << ctx->revmap_bm_order;
-
-	page_addr = (uint64_t) page_address(page);
+	nr_pages = ctx->sb->blk_count_revmap_bm;
+	revmap_bm_pages = ctx->revmap_bm;
 	for(i=0; i<nr_pages; i++) {
+		page = *revmap_bm_pages;
 		/* bio_add_page sets the bi_size for the bio */
 		if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 			bio_put(bio);
 			return NULL;
 		}
-		page_addr = page_addr + PAGE_SIZE;
-		page = virt_to_page(page_addr);
+		revmap_bm_pages = revmap_bm_pages + 1;
 	}
 	pba = ctx->sb->revmap_pba;
 	bio->bi_end_io = revmap_bitmap_flushed;
@@ -1144,10 +1141,10 @@ struct page * flush_checkpoint(struct ctx *ctx)
 	}
 	pba = ctx->ckpt_pba;
 	/* Record the pba for the next ckpt */
-	if (pba == ctx->sb->ckpt_pba1)
-		ctx->ckpt_pba = ctx->sb->ckpt_pba2;
+	if (pba == ctx->sb->ckpt1_pba)
+		ctx->ckpt_pba = ctx->sb->ckpt2_pba;
 	else
-		ctx->ckpt_pba = ctx->sb->ckpt_pba1;
+		ctx->ckpt_pba = ctx->sb->ckpt1_pba;
 	bio->bi_end_io = ckpt_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
@@ -1845,8 +1842,6 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 		return;
 	}
 
-
-
 	/* Sector addressing, LBA is the address of the sector */
 	pba = (node_ent->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
 	page = node_ent->page;
@@ -2186,7 +2181,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
  * This function is called with ctx->tm_flush_lock held!
  *
  */
-int add_block_based_translation(struct ctx *ctx, struct page *page, u64 pba, refcount_t *ref)
+int add_block_based_translation(struct ctx *ctx, struct page *page, refcount_t *ref)
 {
 	
 	struct stl_revmap_entry_sector * ptr;
@@ -2195,7 +2190,7 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, u64 pba, ref
 
 	ptr = (struct stl_revmap_entry_sector *)page_address(page);
 	
-	nr_entries = PAGE_SIZE/sizeof(struct stl_revmap_entry_sector);
+	nr_entries = NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK;
 	i = 0;
 	while (i < nr_entries) {
 		for(j=0; j < NR_EXT_ENTRIES_PER_SEC; j++) {
@@ -2244,19 +2239,28 @@ void revmap_bitmap_flushed(struct bio *bio)
 }
 
 /*
- * Mark a block in use
+ * Mark a block in use: set appropriate bit to 1
  */
 void mark_revmap_bit(struct ctx *ctx, u64 pba)
 {
-	char *ptr = page_address(ctx->revmap_bm);
+	char *ptr;
 	int bytenr;
 	int bitnr;
 	unsigned char mask;
+	struct page ** revmap_bm_pages;
+	struct page *page;
+	unsigned int blknr = 0;
+
+	revmap_bm_pages = ctx->revmap_bm;
 
 	pba = pba - ctx->sb->revmap_pba;
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
 	mask = (1 << bitnr);
+	blknr = bytenr / BLOCK_SIZE;
+	revmap_bm_pages += blknr;
+	page = *revmap_bm_pages;
+	ptr = page_address(page);
 
 	ptr = ptr + bytenr;
 	*ptr = *ptr | mask;
@@ -2269,31 +2273,52 @@ void mark_revmap_bit(struct ctx *ctx, u64 pba)
  */
 void clear_revmap_bit(struct ctx *ctx, u64 pba)
 {
-	char *ptr = page_address(ctx->revmap_bm);
+	char *ptr;
 	int bytenr;
 	int bitnr;
 	unsigned char mask;
+	struct page ** revmap_bm_pages;
+	struct page *page;
+	unsigned int blknr = 0;
+
+	revmap_bm_pages = ctx->revmap_bm;
 
 	pba = pba - ctx->sb->revmap_pba;
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
 	mask = ~(1 << bitnr);
+	blknr = bytenr / BLOCK_SIZE;
+	revmap_bm_pages += blknr;
+	page = *revmap_bm_pages;
+	ptr = page_address(page);
 
 	ptr = ptr + bytenr;
 	*ptr = *ptr & mask;
 }
 
+/* 
+ * Returns 1 when block is available
+ */
 int is_revmap_block_available(struct ctx *ctx, u64 pba)
 {
-	char *ptr = page_address(ctx->revmap_bm);
+	char *ptr;
 	int bytenr;
 	int bitnr;
 	int i = 0;
 	char temp;
+	struct page ** revmap_bm_pages;
+	struct page *page;
+	unsigned int blknr = 0;
+
+	revmap_bm_pages = ctx->revmap_bm;
 
 	pba = pba - ctx->sb->revmap_pba;
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
+	blknr = bytenr / BLOCK_SIZE;
+	revmap_bm_pages += blknr;
+	page = *revmap_bm_pages;
+	ptr = page_address(page);
 
 	ptr = ptr + bytenr;
 	temp = *ptr;
@@ -2323,8 +2348,6 @@ void wait_on_refcount(struct ctx *ctx, refcount_t *ref)
 	spin_lock_irq(&ctx->tm_ref_lock);
 	wait_event_lock_irq(ctx->refq, !refcount_read(ref), ctx->tm_ref_lock);
 	spin_unlock_irq(&ctx->tm_ref_lock);
-	kfree(ref);
-	/* free the ref */
 }
 
 
@@ -2348,7 +2371,7 @@ void revmap_entries_flushed(struct bio *bio)
 				wake_up(&ctx->zone_entry_flushq);
 			}
 			spin_lock(&ctx->tm_flush_lock);
-			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx->revmap_pba, revmap_bio_ctx->ref);
+			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx->ref);
 			spin_unlock(&ctx->tm_flush_lock);
 			/* Wakeup waiters waiting on the block barrier
 			 * */
@@ -2444,7 +2467,6 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 		return -EFAULT;
 	}
 	
-	revmap_bio_ctx->revmap_pba = pba;
 	revmap_bio_ctx->ctx = ctx;
 	revmap_bio_ctx->magic = REVMAP_PRIV_MAGIC;
 	revmap_bio_ctx->page = page;
@@ -2769,13 +2791,11 @@ void put_free_zone(struct ctx *ctx, u64 pba)
 	*/
 }
 
-#define BLK_SZ 4096
-
 struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 {
 	struct block_device *bdev = ctx->dev->bdev;
 	unsigned int blknr = pba / NR_SECTORS_IN_BLK;
-	struct buffer_head *bh = __bread(bdev, blknr, BLK_SZ);
+	struct buffer_head *bh = __bread(bdev, blknr, BLOCK_SIZE);
 	struct stl_ckpt *ckpt;
 	if (!bh)
 		return NULL;
@@ -2845,13 +2865,14 @@ static void reset_ckpt(struct stl_ckpt * ckpt)
  * ctx->elapsed_time = highest mtime of all segentries.
  *
  */
-static void do_recovery(struct stl_ckpt * ckpt)
+static int do_recovery(struct ctx *ctx)
 {
 	/* Once necessary steps are taken for recovery (if needed),
 	 * then we can reset the checkpoint and prepare it for the 
 	 * next round
-	 */
 	reset_ckpt(ckpt);
+	 */
+	return 0;
 }
 
 
@@ -2869,14 +2890,14 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	struct stl_ckpt *ckpt1, *ckpt2, *ckpt;
 	struct page *page1;
 
-	printk(KERN_INFO "\n !Reading checkpoint 1 from pba: %u", sb->ckpt_pba1);
-	ckpt1 = read_checkpoint(ctx, sb->ckpt_pba1);
+	printk(KERN_INFO "\n !Reading checkpoint 1 from pba: %u", sb->ckpt1_pba);
+	ckpt1 = read_checkpoint(ctx, sb->ckpt1_pba);
 	page1 = ctx->ckpt_page;
 	/* ctx->ckpt_page will be overwritten by the next
 	 * call to read_ckpt
 	 */
-	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %u", sb->ckpt_pba2);
-	ckpt2 = read_checkpoint(ctx, sb->ckpt_pba2);
+	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %u", sb->ckpt2_pba);
+	ckpt2 = read_checkpoint(ctx, sb->ckpt2_pba);
 	if (ckpt1->version >= ckpt2->version) {
 		ckpt = ckpt1;
 		put_page(ctx->ckpt_page);
@@ -2922,25 +2943,23 @@ static void mark_zone_occupied(struct ctx *ctx , int zonenr)
 	ctx->nr_freezones = ctx->nr_freezones + 1;
 }
 
-int read_extents_from_block(struct ctx * ctx, struct extent_entry *entry, unsigned int nr_extents)
+int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned int nr_extents)
 {
 	int i = 0;
-	unsigned long zonenr = 0;
 
 	while (i <= nr_extents) {
 		/* If there are no more recorded entries on disk, then
 		 * dont add an entries further
 		 */
-		if ((entry->lba == 0) && (entry->len == 0)) {
+		if ((entry->lba == 0) && (entry->pba == 0)) {
 			i++;
 			continue;
 			
 		}
 		/* TODO: right now everything should be zeroed out */
 		panic("Why are there any already mapped extents?");
-		stl_update_range(ctx, entry->lba, entry->pba, entry->len);
-		zonenr = get_zone_nr(ctx, entry->pba);
-		entry = entry + sizeof(struct extent_entry);
+		stl_update_range(ctx, entry->lba, entry->pba, NR_SECTORS_IN_BLK);
+		entry = entry + 1;
 		i++;
 	}
 	return 0;
@@ -2955,35 +2974,121 @@ int read_extents_from_block(struct ctx * ctx, struct extent_entry *entry, unsign
  *
  * Each extent covers one 4096 sized block
  * NOT a sector!!
+ * TODO
  */
-int read_extent_map(struct ctx *sc)
+int read_translation_map(struct ctx *ctx)
 {
 	struct buffer_head *bh = NULL;
-	int nr_extents_in_blk = BLK_SZ / sizeof(struct extent_entry);
-	struct extent_entry * entry0;
-	unsigned long long pba = sc->sb->map_pba;
-	unsigned long nrblks = sc->sb->blk_count_map;
-	struct block_device *bdev = sc->dev->bdev;
-	unsigned int blknr;
+	int nr_extents_in_blk = BLOCK_SIZE / sizeof(struct tm_entry);
+	unsigned long long pba = ctx->sb->tm_pba;
+	unsigned long nrblks = ctx->sb->blk_count_tm;
+	struct block_device *bdev = ctx->dev->bdev;
 	int i = 0;
-	blknr = pba/NR_SECTORS_PER_BLK;
 	
-	sc->n_extents = 0;
+	ctx->n_extents = 0;
 	while(i < nrblks) {
-		bh = __bread(bdev, blknr, BLK_SZ);
+		bh = __bread(bdev, pba, BLOCK_SIZE);
 		if (!bh)
 			return -1;
-		entry0 = (struct extent_entry *) bh->b_data;
 		/* We read the extents in the entire block. the
 		 * redundant extents should be unpopulated and so
 		 * we should find 0 and break out */
-		read_extents_from_block(sc, entry0, nr_extents_in_blk);
+		read_extents_from_block(ctx, (struct tm_entry *)bh->b_page, nr_extents_in_blk);
 		i = i + 1;
-		blknr = blknr + 1;
 		put_bh(bh);
+		pba = pba + NR_SECTORS_IN_BLK;
 	}
 	return 0;
 }
+
+int read_revmap_bitmap(struct ctx *ctx)
+{
+	struct buffer_head *bh = NULL;
+	unsigned long long pba = ctx->sb->revmap_bm_pba;
+	unsigned long nrblks = ctx->sb->blk_count_revmap_bm;
+	struct block_device *bdev = ctx->dev->bdev;
+	int i = 0;
+	struct page ** revmap_bm = ctx->revmap_bm;
+	
+	while(i < nrblks) {
+		bh = __bread(bdev, pba, BLOCK_SIZE);
+		if (!bh) {
+			/* free the successful bh till now */
+			return -1;
+		}
+		*revmap_bm  = bh->b_page;
+		revmap_bm = revmap_bm + 1;
+		i = i + 1;
+		pba = pba + NR_SECTORS_IN_BLK;
+	}
+	return 0;
+
+}
+
+
+void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, refcount_t *ref)
+{
+	struct stl_revmap_extent *extent;
+	struct stl_revmap_entry_sector *entry_sector;
+	int i = 0, j;
+
+	add_block_based_translation(ctx,  page, ref);
+	entry_sector = (struct stl_revmap_entry_sector *) page;
+	while (i < NR_SECTORS_IN_BLK) {
+		extent = entry_sector->extents;
+		for (j=0; j < NR_EXT_ENTRIES_PER_SEC; j++) {
+			stl_update_range(ctx, extent[j].lba, extent[j].pba, extent[j].len);
+		}
+	}
+}
+
+/*
+ * Read a blk only if the bitmap says its not available.
+ */
+int read_revmap(struct ctx *ctx)
+{
+	struct buffer_head *bh = NULL;
+	struct page ** revmap_bm_pages = ctx->revmap_bm;
+	unsigned int nrblks = ctx->sb->blk_count_revmap_bm;
+	int i = 0, j, byte = 0;
+	struct page *page;
+	char *ptr;
+	unsigned int blknr = 0;
+	unsigned long pba;
+	struct block_device *bdev = NULL;
+	refcount_t ref;
+	refcount_set(&ref, 2);
+
+	while (i < nrblks) {
+		page = *revmap_bm_pages;
+		ptr = (char *) page_address(page);
+		for (j = 0; j < BLOCK_SIZE; j++) {
+			byte = *ptr;
+			while(byte) {
+				if (byte & 1) {
+					pba = (blknr + j ) * NR_SECTORS_IN_BLK;
+					bh = __bread(bdev, pba, BLOCK_SIZE);
+					if (!bh) {
+						/* free the successful bh till now */
+						return -1;
+					}
+					process_revmap_entries_on_boot(ctx, bh->b_page, &ref);
+				}
+				byte = byte >> 1;
+			}
+			ptr = ptr + 1;
+		}
+		revmap_bm_pages += 1;
+		blknr = blknr + BLOCK_SIZE;
+	}
+	spin_lock(&ctx->flush_lock);
+	flush_translation_blocks(ctx);
+	spin_unlock(&ctx->flush_lock);
+	refcount_dec(&ref);
+	wait_on_refcount(ctx, &ref);
+	return 0;
+}
+
 
 sector_t get_zone_pba(struct stl_sb * sb, unsigned int segnr)
 {
@@ -3077,7 +3182,7 @@ int read_seg_info_table(struct ctx *ctx)
 	unsigned int nrblks = 0;
 	struct block_device *bdev;
 	struct buffer_head *bh = NULL;
-	int nr_seg_entries_blk = BLK_SZ / sizeof(struct stl_seg_entry);
+	int nr_seg_entries_blk = BLOCK_SIZE / sizeof(struct stl_seg_entry);
 	int ret=0;
 	struct stl_seg_entry *entry0;
 	unsigned long blknr;
@@ -3126,7 +3231,7 @@ int read_seg_info_table(struct ctx *ctx)
 			break;
 		}
 		printk(KERN_INFO "\n blknr: %lu", blknr);
-		bh = __bread(bdev, blknr, BLK_SZ);
+		bh = __bread(bdev, blknr, BLOCK_SIZE);
 		if (!bh) {
 			kfree(ctx->freezone_bitmap);
 			kfree(ctx->gc_zone_bitmap);
@@ -3156,12 +3261,12 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 	 * the block size the same as the sector size
 	 *
 	*/
-	if (set_blocksize(bdev, BLK_SZ))
+	if (set_blocksize(bdev, BLOCK_SIZE))
 		return NULL;
 
 	printk(KERN_INFO "\n sb found at pba: %lu", pba);
 
-	bh = __bread(bdev, blknr, BLK_SZ);
+	bh = __bread(bdev, blknr, BLOCK_SIZE);
 	if (!bh)
 		return NULL;
 	
@@ -3172,15 +3277,15 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 		return NULL;
 	}
 	printk(KERN_INFO "\n sb->magic: %u", sb->magic);
-	printk(KERN_INFO "\n sb->map_pba: %u, sb->blk_count_map: %u", sb->map_pba, sb->blk_count_map);
-	printk(KERN_INFO "\n sb->zone_count: %d", sb->zone_count);
 	printk(KERN_INFO "\n sb->max_pba: %d", sb->max_pba);
 	/* We put the page in case of error in the future (put_page)*/
 	ctx->sb_page = bh->b_page;
 	return sb;
 }
 
-
+/*
+ * SB1, SB2, Revmap, Translation Map, Revmap Bitmap, CKPT, SIT, Dataa
+ */
 int read_metadata(struct ctx * ctx)
 {
 	int ret;
@@ -3213,9 +3318,18 @@ int read_metadata(struct ctx * ctx)
 		return -1;
 	}	
 	ctx->ckpt = ckpt;
-
 	printk(KERN_INFO "\n checkpoint read!");
-	ret = read_extent_map(ctx);
+	if (!ckpt->clean) {
+		printk(KERN_ERR "\n Scrubbing metadata after an unclean shutdown...");
+		ret = do_recovery(ctx);
+		return ret;
+	}
+
+	read_revmap_bitmap(ctx);
+	read_revmap(ctx);
+	printk(KERN_INFO "Reverse map flushed!");
+
+	ret = read_translation_map(ctx);
 	if (0 > ret) {
 		put_page(ctx->sb_page);
 		put_page(ctx->ckpt_page);
@@ -3385,11 +3499,12 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 		goto free_ctx;
 	}
 
+	/*
 	if (bdev_zoned_model(ctx->dev->bdev) == BLK_ZONED_NONE) {
                 dm_target->error = "Not a zoned block device";
                 ret = -EINVAL;
                 goto free_ctx;
-        }
+        }*/
 
 
 	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", ctx->dev->bdev->bd_part->start_sect);
@@ -3477,7 +3592,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	if (0 > ret) {
 		goto stop_gc_thread;
 	}
-	ctx->revmap_bm = alloc_pages(__GFP_ZERO|GFP_KERNEL, ctx->sb->order_revmap_bm);
+	ctx->revmap_bm = kmalloc(sizeof(struct page *) * ctx->sb->blk_count_revmap_bm, GFP_KERNEL);
 	if (!ctx->revmap_bm)
 		goto destroy_cache;
 
@@ -3553,8 +3668,7 @@ static void stl_dtr(struct dm_target *dm_target)
 
 	/* TODO : free extent page
 	 * and segentries page */
-		
-	__free_pages(ctx->revmap_bm, ctx->sb->order_revmap_bm);
+	kfree(ctx->revmap_bm);		
 	destroy_caches(ctx);
 	stl_gc_thread_stop(ctx);
 	bioset_exit(ctx->bs);
