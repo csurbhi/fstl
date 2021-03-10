@@ -2798,12 +2798,20 @@ void put_free_zone(struct ctx *ctx, u64 pba)
 struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 {
 	struct block_device *bdev = ctx->dev->bdev;
-	struct buffer_head *bh = __bread(bdev, pba, BLK_SZ);
+	struct buffer_head *bh;
 	struct stl_ckpt *ckpt = NULL;
+	sector_t blknr = pba;
+
+	bh = __bread(bdev, blknr, BLK_SZ);
 	if (!bh)
 		return NULL;
+
        	ckpt = (struct stl_ckpt *)bh->b_data;
-	printk(KERN_INFO "\n ** pba: %lu, ckpt->magic: %u, ckpt->cur_frontier_pba: %lld", pba, ckpt->magic, ckpt->cur_frontier_pba);
+	printk(KERN_INFO "\n ** blknr: %lu, ckpt->magic: %u, ckpt->cur_frontier_pba: %lld", blknr, ckpt->magic, ckpt->cur_frontier_pba);
+	if (ckpt->magic == 0) {
+		put_page(bh->b_page);
+		return NULL;
+	}
 	ctx->ckpt_page = bh->b_page;
 	/* Do not set ctx->nr_freezones; its calculated while reading segment info table
 	 * and then verified against what is recorded in ckpt
