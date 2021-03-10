@@ -334,7 +334,9 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	sb->tm_pba = get_tm_pba(sb);
 	sb->revmap_bm_pba = get_revmap_bm_pba(sb);
 	sb->ckpt1_pba = get_ckpt1_pba(sb);
+	printf("\n sb->ckpt1_pba: %u", sb->ckpt1_pba);
 	sb->ckpt2_pba = sb->ckpt1_pba + NR_SECTORS_IN_BLK;
+	printf("\n sb->ckpt2_pba: %u", sb->ckpt2_pba);
 	sb->sit_pba = get_sit_pba(sb);
 	sb->zone0_pba = get_zone0_pba(sb);
 	sb->max_pba = get_max_pba(sb);

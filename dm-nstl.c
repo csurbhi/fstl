@@ -36,6 +36,8 @@
 #include "metadata.h"
 
 #define DM_MSG_PREFIX "stl"
+#undef BLOCK_SIZE
+#define BLOCK_SIZE 4096
 
 
 /* TODO:
@@ -2791,16 +2793,19 @@ void put_free_zone(struct ctx *ctx, u64 pba)
 	*/
 }
 
+/* This pba is got from the superblock; it is the address of the
+ * sector and not a 4096 block. So, we can directly read from this
+ * address.
+ */
 struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 {
 	struct block_device *bdev = ctx->dev->bdev;
-	unsigned int blknr = pba / NR_SECTORS_IN_BLK;
-	struct buffer_head *bh = __bread(bdev, blknr, BLOCK_SIZE);
-	struct stl_ckpt *ckpt;
+	struct buffer_head *bh = __bread(bdev, pba, BLOCK_SIZE);
+	struct stl_ckpt *ckpt = NULL;
 	if (!bh)
 		return NULL;
        	ckpt = (struct stl_ckpt *)bh->b_data;
-	printk(KERN_INFO "\n ** pba: %lu, ckpt->cur_frontier_pba: %lld", pba, ckpt->cur_frontier_pba);
+	printk(KERN_INFO "\n ** pba: %lu, ckpt->magic: %u, ckpt->cur_frontier_pba: %lld", pba, ckpt->magic, ckpt->cur_frontier_pba);
 	ctx->ckpt_page = bh->b_page;
 	/* Do not set ctx->nr_freezones; its calculated while reading segment info table
 	 * and then verified against what is recorded in ckpt
@@ -2892,12 +2897,18 @@ struct stl_ckpt * get_cur_checkpoint(struct ctx *ctx)
 
 	printk(KERN_INFO "\n !Reading checkpoint 1 from pba: %u", sb->ckpt1_pba);
 	ckpt1 = read_checkpoint(ctx, sb->ckpt1_pba);
+	if (!ckpt1)
+		return NULL;
 	page1 = ctx->ckpt_page;
 	/* ctx->ckpt_page will be overwritten by the next
 	 * call to read_ckpt
 	 */
 	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %u", sb->ckpt2_pba);
 	ckpt2 = read_checkpoint(ctx, sb->ckpt2_pba);
+	if (!ckpt2) {
+		put_page(page1);
+		return NULL;
+	}
 	if (ckpt1->version >= ckpt2->version) {
 		ckpt = ckpt1;
 		put_page(ctx->ckpt_page);
@@ -3059,6 +3070,14 @@ int read_revmap(struct ctx *ctx)
 	refcount_t ref;
 	refcount_set(&ref, 2);
 
+	pba = ctx->sb->revmap_pba;
+	printk(KERN_ERR "\n PBA for first revmap blk: %eu", pba);
+	printk(KERN_ERR "\n nr of revmap bitmap blks: %u", nrblks);
+	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
+
+	/* We read the revmap bitmap first. If a bit is set,
+	 * then the corresponding revmap blk is read
+	 */
 	while (i < nrblks) {
 		page = *revmap_bm_pages;
 		ptr = (char *) page_address(page);
@@ -3066,7 +3085,8 @@ int read_revmap(struct ctx *ctx)
 			byte = *ptr;
 			while(byte) {
 				if (byte & 1) {
-					pba = (blknr + j ) * NR_SECTORS_IN_BLK;
+					pba += (blknr + j ) * NR_SECTORS_IN_BLK;
+					printk(KERN_ERR "\n read revmap blk: %lu", pba);
 					bh = __bread(bdev, pba, BLOCK_SIZE);
 					if (!bh) {
 						/* free the successful bh till now */
@@ -3254,7 +3274,7 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 {
 
 	struct block_device *bdev = ctx->dev->bdev;
-	unsigned int blknr = pba / NR_SECTORS_PER_BLK;
+	unsigned int blknr = pba;
 	struct buffer_head *bh;
 	struct stl_sb * sb;
 	/* TODO: for the future. Right now we keep
