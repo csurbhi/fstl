@@ -2800,7 +2800,7 @@ struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 	struct block_device *bdev = ctx->dev->bdev;
 	struct buffer_head *bh;
 	struct stl_ckpt *ckpt = NULL;
-	sector_t blknr = pba;
+	sector_t blknr = pba / NR_SECTORS_IN_BLK;
 
 	bh = __bread(bdev, blknr, BLK_SZ);
 	if (!bh)
@@ -2983,7 +2983,7 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned i
 }
 
 
-#define NR_SECTORS_PER_BLK 8
+#define NR_SECTORS_IN_BLK 8
 
 /* 
  * Create a RB tree from the map on
@@ -3026,9 +3026,10 @@ int read_revmap_bitmap(struct ctx *ctx)
 	struct block_device *bdev = ctx->dev->bdev;
 	int i = 0;
 	struct page ** revmap_bm = ctx->revmap_bm;
+	sector_t blknr = pba /NR_SECTORS_IN_BLK;
 	
 	while(i < nrblks) {
-		bh = __bread(bdev, pba, BLK_SZ);
+		bh = __bread(bdev, blknr, BLK_SZ);
 		if (!bh) {
 			/* free the successful bh till now */
 			return -1;
@@ -3076,7 +3077,8 @@ int read_revmap(struct ctx *ctx)
 	refcount_t ref;
 	refcount_set(&ref, 2);
 
-	pba = ctx->sb->revmap_pba;
+	pba = ctx->sb->revmap_pba/NR_SECTORS_IN_BLK;
+
 	printk(KERN_ERR "\n PBA for first revmap blk: %eu", pba);
 	printk(KERN_ERR "\n nr of revmap bitmap blks: %u", nrblks);
 	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
@@ -3091,7 +3093,7 @@ int read_revmap(struct ctx *ctx)
 			byte = *ptr;
 			while(byte) {
 				if (byte & 1) {
-					pba += (blknr + j ) * NR_SECTORS_IN_BLK;
+					pba += (blknr + j );
 					printk(KERN_ERR "\n read revmap blk: %lu", pba);
 					bh = __bread(bdev, pba, BLK_SZ);
 					if (!bh) {
@@ -3245,7 +3247,8 @@ int read_seg_info_table(struct ctx *ctx)
 
 
 	pba = sb->sit_pba;
-	blknr = pba/NR_SECTORS_PER_BLK;
+	/* bread take blocks that are 4096 bytes */
+	blknr = pba/NR_SECTORS_IN_BLK;
 	nrblks = sb->blk_count_sit;
 	printk(KERN_INFO "\n blknr of first SIT is: %lu", blknr);
 	printk(KERN_ERR "\n zone_count_main: %u", sb->zone_count_main);
@@ -3290,7 +3293,7 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 	if (set_blocksize(bdev, BLK_SZ))
 		return NULL;
 
-	printk(KERN_INFO "\n sb found at pba: %lu", pba);
+	printk(KERN_INFO "\n reading sb at pba: %lu", pba);
 
 	bh = __bread(bdev, blknr, BLK_SZ);
 	if (!bh)
@@ -3315,12 +3318,11 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 int read_metadata(struct ctx * ctx)
 {
 	int ret;
-	struct stl_sb * sb1;
-	unsigned long pba = 0;
+	struct stl_sb * sb1, *sb2;
 	struct stl_ckpt *ckpt;
+	struct page *page;
 
-	pba = 0;
-	sb1 = read_superblock(ctx, pba);
+	sb1 = read_superblock(ctx, 0);
 	if (NULL == sb1) {
 		printk(KERN_ERR "\n read_superblock failed! cannot read the metadata ");
 		return -1;
@@ -3331,12 +3333,15 @@ int read_metadata(struct ctx * ctx)
 	 * we need to verify that sb1 is uptodate.
 	 * Right now we do nothing. we assume
 	 * sb1 is okay.
-	page = ctx->sb_page;
-	pba = pba + SECTORS_PER_BLK;
-	sb2 = read_superblock(bdev, pba);
-	put_page(page);
 	 */
-	ctx->sb = sb1;
+	page = ctx->sb_page;
+	sb2 = read_superblock(ctx, 1);
+	if (!sb2) {
+		printk(KERN_ERR "\n Could not read the second superblock!");
+		return -1;
+	}
+	put_page(page);
+	ctx->sb = sb2;
 
 	ckpt = get_cur_checkpoint(ctx);
 	if (NULL == ckpt) {
@@ -3540,9 +3545,13 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	if (!ctx->extent_pool)
 		goto put_dev;
 
-	ret = read_metadata(ctx);
+	ctx->revmap_bm = kmalloc(sizeof(struct page *) * ctx->sb->blk_count_revmap_bm, GFP_KERNEL);
+	if (!ctx->revmap_bm)
+		goto free_extent_pool;
+
+    	ret = read_metadata(ctx);
 	if (ret < 0)
-		goto clean_ctx;
+		goto free_revmap_bm;
 
 	max_pba = ctx->dev->bdev->bd_inode->i_size / 512;
 	sprintf(ctx->nodename, "stl/%s", argv[1]);
@@ -3553,7 +3562,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	printk(KERN_INFO "\n formatted max_pba: %d", ctx->max_pba);
 	if (ctx->max_pba > max_pba) {
 		dm_target->error = "dm-stl: Invalid max pba found on sb";
-		goto clean_ctx;
+		goto free_metadata_pages;
 	}
 	ctx->write_frontier = ctx->ckpt->cur_frontier_pba;
 
@@ -3587,7 +3596,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 
 	ctx->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
 	if (!ctx->page_pool)
-		goto clean_ctx;
+		goto free_metadata_pages;
 
 	//printk(KERN_INFO "about to call bioset_init()");
 	ctx->bs = kzalloc(sizeof(*(ctx->bs)), GFP_KERNEL);
@@ -3618,10 +3627,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	if (0 > ret) {
 		goto stop_gc_thread;
 	}
-	ctx->revmap_bm = kmalloc(sizeof(struct page *) * ctx->sb->blk_count_revmap_bm, GFP_KERNEL);
-	if (!ctx->revmap_bm)
-		goto destroy_cache;
-
+	
 	/*
 	if (register_shrinker(nstl_shrinker))
 		goto free_revmap_bm;
@@ -3660,16 +3666,17 @@ free_bioset:
 destroy_page_pool:
 	if (ctx->page_pool)
 		mempool_destroy(ctx->page_pool);
-clean_ctx:
+free_extent_pool:
+	mempool_destroy(ctx->extent_pool);
+free_revmap_bm:
+	kfree(ctx->revmap_bm);
+free_metadata_pages:
 	if (ctx->sb_page)
 		put_page(ctx->sb_page);
 	if (ctx->ckpt_page)
 		put_page(ctx->ckpt_page);
 	/* TODO : free extent page
 	 * and segentries page */
-		
-	if (ctx->extent_pool)
-		mempool_destroy(ctx->extent_pool);
 put_dev:
 	dm_put_device(dm_target, ctx->dev);
 free_ctx:
