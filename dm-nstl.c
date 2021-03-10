@@ -36,8 +36,6 @@
 #include "metadata.h"
 
 #define DM_MSG_PREFIX "stl"
-#undef BLOCK_SIZE
-#define BLOCK_SIZE 4096
 
 
 /* TODO:
@@ -2259,7 +2257,7 @@ void mark_revmap_bit(struct ctx *ctx, u64 pba)
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
 	mask = (1 << bitnr);
-	blknr = bytenr / BLOCK_SIZE;
+	blknr = bytenr / BLK_SZ;
 	revmap_bm_pages += blknr;
 	page = *revmap_bm_pages;
 	ptr = page_address(page);
@@ -2289,7 +2287,7 @@ void clear_revmap_bit(struct ctx *ctx, u64 pba)
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
 	mask = ~(1 << bitnr);
-	blknr = bytenr / BLOCK_SIZE;
+	blknr = bytenr / BLK_SZ;
 	revmap_bm_pages += blknr;
 	page = *revmap_bm_pages;
 	ptr = page_address(page);
@@ -2317,7 +2315,7 @@ int is_revmap_block_available(struct ctx *ctx, u64 pba)
 	pba = pba - ctx->sb->revmap_pba;
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
-	blknr = bytenr / BLOCK_SIZE;
+	blknr = bytenr / BLK_SZ;
 	revmap_bm_pages += blknr;
 	page = *revmap_bm_pages;
 	ptr = page_address(page);
@@ -2800,7 +2798,7 @@ void put_free_zone(struct ctx *ctx, u64 pba)
 struct stl_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 {
 	struct block_device *bdev = ctx->dev->bdev;
-	struct buffer_head *bh = __bread(bdev, pba, BLOCK_SIZE);
+	struct buffer_head *bh = __bread(bdev, pba, BLK_SZ);
 	struct stl_ckpt *ckpt = NULL;
 	if (!bh)
 		return NULL;
@@ -2990,7 +2988,7 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned i
 int read_translation_map(struct ctx *ctx)
 {
 	struct buffer_head *bh = NULL;
-	int nr_extents_in_blk = BLOCK_SIZE / sizeof(struct tm_entry);
+	int nr_extents_in_blk = BLK_SZ / sizeof(struct tm_entry);
 	unsigned long long pba = ctx->sb->tm_pba;
 	unsigned long nrblks = ctx->sb->blk_count_tm;
 	struct block_device *bdev = ctx->dev->bdev;
@@ -2998,7 +2996,7 @@ int read_translation_map(struct ctx *ctx)
 	
 	ctx->n_extents = 0;
 	while(i < nrblks) {
-		bh = __bread(bdev, pba, BLOCK_SIZE);
+		bh = __bread(bdev, pba, BLK_SZ);
 		if (!bh)
 			return -1;
 		/* We read the extents in the entire block. the
@@ -3022,7 +3020,7 @@ int read_revmap_bitmap(struct ctx *ctx)
 	struct page ** revmap_bm = ctx->revmap_bm;
 	
 	while(i < nrblks) {
-		bh = __bread(bdev, pba, BLOCK_SIZE);
+		bh = __bread(bdev, pba, BLK_SZ);
 		if (!bh) {
 			/* free the successful bh till now */
 			return -1;
@@ -3081,13 +3079,13 @@ int read_revmap(struct ctx *ctx)
 	while (i < nrblks) {
 		page = *revmap_bm_pages;
 		ptr = (char *) page_address(page);
-		for (j = 0; j < BLOCK_SIZE; j++) {
+		for (j = 0; j < BLK_SZ; j++) {
 			byte = *ptr;
 			while(byte) {
 				if (byte & 1) {
 					pba += (blknr + j ) * NR_SECTORS_IN_BLK;
 					printk(KERN_ERR "\n read revmap blk: %lu", pba);
-					bh = __bread(bdev, pba, BLOCK_SIZE);
+					bh = __bread(bdev, pba, BLK_SZ);
 					if (!bh) {
 						/* free the successful bh till now */
 						return -1;
@@ -3099,7 +3097,7 @@ int read_revmap(struct ctx *ctx)
 			ptr = ptr + 1;
 		}
 		revmap_bm_pages += 1;
-		blknr = blknr + BLOCK_SIZE;
+		blknr = blknr + BLK_SZ;
 	}
 	spin_lock(&ctx->flush_lock);
 	flush_translation_blocks(ctx);
@@ -3202,7 +3200,7 @@ int read_seg_info_table(struct ctx *ctx)
 	unsigned int nrblks = 0;
 	struct block_device *bdev;
 	struct buffer_head *bh = NULL;
-	int nr_seg_entries_blk = BLOCK_SIZE / sizeof(struct stl_seg_entry);
+	int nr_seg_entries_blk = BLK_SZ / sizeof(struct stl_seg_entry);
 	int ret=0;
 	struct stl_seg_entry *entry0;
 	unsigned long blknr;
@@ -3251,7 +3249,7 @@ int read_seg_info_table(struct ctx *ctx)
 			break;
 		}
 		printk(KERN_INFO "\n blknr: %lu", blknr);
-		bh = __bread(bdev, blknr, BLOCK_SIZE);
+		bh = __bread(bdev, blknr, BLK_SZ);
 		if (!bh) {
 			kfree(ctx->freezone_bitmap);
 			kfree(ctx->gc_zone_bitmap);
@@ -3281,12 +3279,12 @@ struct stl_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 	 * the block size the same as the sector size
 	 *
 	*/
-	if (set_blocksize(bdev, BLOCK_SIZE))
+	if (set_blocksize(bdev, BLK_SZ))
 		return NULL;
 
 	printk(KERN_INFO "\n sb found at pba: %lu", pba);
 
-	bh = __bread(bdev, blknr, BLOCK_SIZE);
+	bh = __bread(bdev, blknr, BLK_SZ);
 	if (!bh)
 		return NULL;
 	

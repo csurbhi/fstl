@@ -77,6 +77,7 @@ typedef u64 sector_t;
 #ifndef BLOCK_SIZE
 	#define BLOCK_SIZE 4096
 #endif
+#define BLK_SZ 4096
 #define STL_SB_MAGIC 0x7853544c
 #define STL_CKPT_MAGIC 0x1A2B3C4D
 
