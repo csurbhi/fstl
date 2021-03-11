@@ -880,7 +880,6 @@ static void nstl_clone_endio(struct bio * clone)
 static void mark_zone_free(struct ctx *ctx , int zonenr)
 {	
 	char *bitmap;
-	int nr_freezones;
 	int bytenr;
 	int bitnr;
 
@@ -890,7 +889,6 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	}
 		
 	bitmap = ctx->freezone_bitmap;
-	nr_freezones = ctx->nr_freezones;
 	bytenr = zonenr / BITS_IN_BYTE;
 	bitnr = zonenr % BITS_IN_BYTE;
 
@@ -3187,12 +3185,15 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 
 	while (i < nr_seg_entries) {
 		if (entry->vblocks == 0) {
-			printk(KERN_ERR "\n *segnr: %u", *zonenr);
+			if (*zonenr == get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba))
+				continue;
+			//printk(KERN_ERR "\n *segnr: %u", *zonenr);
 			spin_lock_irqsave(&ctx->lock, flags);
 			mark_zone_free(ctx , *zonenr);
 			spin_unlock_irqrestore(&ctx->lock, flags);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
+			printk(KERN_ERR "\n *segnr: %u", *zonenr);
 			mark_zone_gc_candidate(ctx, *zonenr);
 		}
 		entry = entry + sizeof(struct stl_seg_entry);
@@ -3226,16 +3227,10 @@ int read_seg_info_table(struct ctx *ctx)
 	unsigned long nr_data_zones;
 	unsigned long nr_seg_entries_read;
 	
-	/*
 	if (NULL == ctx)
 		return -1;
-	*/
-	bdev = ctx->dev->bdev;
-	/*
-	if (bdev) {
-		panic("bdev is not set, is NULL!");
-	}*/
 
+	bdev = ctx->dev->bdev;
 	sb = ctx->sb;
 
 	nr_data_zones = sb->zone_count_main; /* these are the number of segment entries to read */
@@ -3259,12 +3254,13 @@ int read_seg_info_table(struct ctx *ctx)
 	nrblks = sb->blk_count_sit;
 	printk(KERN_INFO "\n blknr of first SIT is: %lu", blknr);
 	printk(KERN_ERR "\n zone_count_main: %u", sb->zone_count_main);
+	printk(KERN_ERR "\n nr_freezones (1) : %u", ctx->nr_freezones);
 	while (zonenr < sb->zone_count_main) {
 		printk(KERN_ERR "\n zonenr: %u", zonenr);
 		if (blknr > ctx->sb->zone0_pba) {
 			//panic("seg entry blknr cannot be bigger than the data blknr");
 			printk(KERN_ERR "seg entry blknr cannot be bigger than the data blknr");
-			break;
+			return -1;
 		}
 		printk(KERN_INFO "\n blknr: %lu", blknr);
 		bh = __bread(bdev, blknr, BLK_SZ);
@@ -3283,6 +3279,7 @@ int read_seg_info_table(struct ctx *ctx)
 		blknr = blknr + 1;
 		put_bh(bh);
 	}
+	printk(KERN_ERR "\n nr_freezones (2) : %u", ctx->nr_freezones);
 	return 0;
 }
 
@@ -3384,7 +3381,6 @@ int read_metadata(struct ctx * ctx)
 		return ret;
 	}
 	printk(KERN_INFO "\n extent_map read!");
-	return(-1);
 
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb1->zone_count_main /BITS_IN_BYTE;
@@ -3393,6 +3389,8 @@ int read_metadata(struct ctx * ctx)
 	printk(KERN_INFO "\n Nr of zones in main are: %u, bitmap_bytes: %d", sb1->zone_count_main, ctx->bitmap_bytes);
 	if (sb1->zone_count_main % BITS_IN_BYTE > 0)
 		ctx->bitmap_bytes += 1;
+	ctx->nr_freezones = 0;
+	ctx->nr_lbas_in_zone = (1 << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	read_seg_info_table(ctx);
 	printk(KERN_INFO "\n read segment entries, free bitmap created!");
 	if (ctx->nr_freezones != ckpt->nr_free_zones) { 
@@ -3402,6 +3400,12 @@ int read_metadata(struct ctx * ctx)
 		 * Update checkpoint accordingly and record!
 		 */
 		//panic("free zones in SIT and checkpoint does not match!");
+		put_page(ctx->sb_page);
+		put_page(ctx->ckpt_page);
+		put_page(ctx->revmap_bm);
+		printk(KERN_ERR "\n ctx->nr_freezones: %llu, ckpt->nr_free_zones:%llu", ctx->nr_freezones, ckpt->nr_free_zones);
+		printk(KERN_ERR "\n SIT and checkpoint does not match!");
+		return -1;
 	}
 	return 0;
 }
@@ -3599,16 +3603,15 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	printk(KERN_ERR "\n About to read metadata! 5 ! \n");
 
     	ret = read_metadata(ctx);
-	if (ret < 0)
+	return(-1);
+	if (ret < 0) 
 		goto free_extent_pool;
 
 	ctx->ckpt->clean = 0;
 	ctx->revmap_pba = ctx->sb->revmap_pba;
-	return(-1);
 	max_pba = ctx->dev->bdev->bd_inode->i_size / 512;
 	sprintf(ctx->nodename, "stl/%s", argv[1]);
 	ret = -EINVAL;
-	ctx->nr_lbas_in_zone = (1 << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	printk(KERN_INFO "\n device records max_pba: %llu", max_pba);
 	ctx->max_pba = ctx->sb->max_pba;
 	printk(KERN_INFO "\n formatted max_pba: %d", ctx->max_pba);
@@ -3672,6 +3675,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	if (register_shrinker(nstl_shrinker))
 		goto stop_gc_thread;
 	*/
+	return(-1);
 
 	
 	return 0;

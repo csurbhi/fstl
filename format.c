@@ -288,6 +288,7 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 	for (i=0; i<nr_blks; i++) {
 	    	ret = write_to_disk(fd, buffer, BLK_SZ, pba);
 		if (0 > ret) {
+			printf("\n Could not write zeroed blk! \n");
 			exit(ret);
 		}
 	}
@@ -303,6 +304,7 @@ void write_revmap(int fd, sector_t revmap_pba, unsigned nr_blks)
 
 void write_tm(int fd, sector_t tm_pba, unsigned nr_blks)
 {
+	printf("\n Writing tm blocks at pba: %llu, nrblks: %u", tm_pba/NR_SECTORS_IN_BLK, nr_blks);
 	write_zeroed_blks(fd, tm_pba, nr_blks);
 }
 
