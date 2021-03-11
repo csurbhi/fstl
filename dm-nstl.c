@@ -3182,11 +3182,16 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
 	printk(KERN_ERR "\n Number of seg entries: %u", nr_seg_entries);
+	printk(KERN_ERR "\n cur_frontier_pba: %llu, frontier zone: %llu", ctx->ckpt->cur_frontier_pba, get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba));
 
 	while (i < nr_seg_entries) {
 		if (entry->vblocks == 0) {
-			if (*zonenr == get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba))
+			if (*zonenr == get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba)) {
+				entry = entry + 1;
+				*zonenr= *zonenr + 1;
+				i++;
 				continue;
+			}
 			//printk(KERN_ERR "\n *segnr: %u", *zonenr);
 			spin_lock_irqsave(&ctx->lock, flags);
 			mark_zone_free(ctx , *zonenr);
@@ -3196,7 +3201,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 			printk(KERN_ERR "\n *segnr: %u", *zonenr);
 			mark_zone_gc_candidate(ctx, *zonenr);
 		}
-		entry = entry + sizeof(struct stl_seg_entry);
+		entry = entry + 1;
 		*zonenr= *zonenr + 1;
 		i++;
 	}
@@ -3392,7 +3397,7 @@ int read_metadata(struct ctx * ctx)
 	ctx->nr_freezones = 0;
 	ctx->nr_lbas_in_zone = (1 << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	read_seg_info_table(ctx);
-	printk(KERN_INFO "\n read segment entries, free bitmap created!");
+	printk(KERN_INFO "\n read segment entries, free bitmap created! \n");
 	if (ctx->nr_freezones != ckpt->nr_free_zones) { 
 		/* TODO: Do some recovery here.
 		 * For now we panic!!
@@ -3603,7 +3608,6 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	printk(KERN_ERR "\n About to read metadata! 5 ! \n");
 
     	ret = read_metadata(ctx);
-	return(-1);
 	if (ret < 0) 
 		goto free_extent_pool;
 
@@ -3664,6 +3668,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	if (0 > ret) {
 		goto stop_gc_thread;
 	}
+	printk(KERN_ERR "\n caches created!");
 	ctx->s_chksum_driver = crypto_alloc_shash("crc32c", 0, 0);
 	if (IS_ERR(ctx->s_chksum_driver)) {
 		printk(KERN_ERR "Cannot load crc32c driver.");
@@ -3675,9 +3680,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	if (register_shrinker(nstl_shrinker))
 		goto stop_gc_thread;
 	*/
-	return(-1);
-
-	
+	printk(KERN_ERR "\n ctr() done!!");
 	return 0;
 /* failed case */
 destroy_cache:
@@ -3691,8 +3694,6 @@ free_bioset:
 destroy_page_pool:
 	if (ctx->page_pool)
 		mempool_destroy(ctx->page_pool);
-free_extent_pool:
-	mempool_destroy(ctx->extent_pool);
 free_metadata_pages:
 	if (ctx->revmap_bm)
 		put_page(ctx->revmap_bm);
@@ -3702,6 +3703,8 @@ free_metadata_pages:
 		put_page(ctx->ckpt_page);
 	/* TODO : free extent page
 	 * and segentries page */
+free_extent_pool:
+	mempool_destroy(ctx->extent_pool);
 put_dev:
 	dm_put_device(dm_target, ctx->dev);
 free_ctx:
