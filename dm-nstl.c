@@ -751,127 +751,6 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	}
 	copy_blocks(zonenr, destn_zonenr); 
 }
-
-/* can you create the translation entry here?
- * What happens if you put a translation entry
- * for some data that did not make it to
- * the disk? Partial writes to such block
- * entries can end up rewriting data that
- * is partially uptodate and correct, and partially
- * stale and wrong. Thus there should be no wrong
- * entry in the translation map.
- */
-static void nstl_clone_endio(struct bio * clone)
-{
-	struct nstl_sub_bioctx *subbioctx = NULL;
-	struct nstl_bioctx *bioctx = NULL;
-	struct bio *bio = NULL;
-	struct ctx * ctx = NULL;
-	int ret;
-	u64 wf;
-
-	subbioctx = clone->bi_private;
-	if (!subbioctx)
-		panic("subbioctx is NULL !");
-
-	bioctx = subbioctx->bioctx;
-	if(!bioctx)
-		panic("bioctx is NULL!");
-	bio = bioctx->orig;
-	ctx = bioctx->ctx;
-
-
-	if (subbioctx->magic != SUBBIOCTX_MAGIC) {
-		/* private has been overwritten */
-		return;
-	}
-
-	/* If a single segment of the bio fails, the bio should be
-	 * recorded with this status. No translation entry
-	 * for the entire original bio should be maintained
-	 *
-	 * TODO: should we keep trying till the write succeed?
-	 * Maybe to another zone, maybe invoke the shrinker if
-	 * memory is low etc.
-	 */
-
-	if (clone->bi_status != BLK_STS_OK) {
-		/* we don't keep partial bio translation map entries.
-		 * The write either succeeds atomically or does not at
-		 * all
-		 */
-		remove_partial_entries(ctx, bio);
-		/* Remove the partial STL entry as well */
-		/* If this is a SMR zone, then a sector write failure
-		 * causes all further I/O in that zone to fail.
-		 * Hence we can no longer write to this zone
-		 */
-
-		switch(clone->bi_status) {
-			case BLK_STS_IOERR:
-				if(!nstl_zone_seq(ctx, clone->bi_iter.bi_sector))
-					mark_zone_erroneous(ctx, clone->bi_iter.bi_sector);
-			/* If this zone is sequential, then we do not have
-			 * to do anything. There will be a gap in this
-			 * segment. But thats about it.
-			 */
-				/*TODO: try writing the data elsewhere and
-				 * complete the write
-				 */
-				wf = ctx->write_frontier;
-				subbioctx->extent.pba = wf;
-				clone->bi_iter.bi_sector = wf; /* we use the save write frontier */
-				generic_make_request(clone);
-				return;
-
-			case BLK_STS_NOSPC:
-			/* our meta information does not match that of
-			 * the disk's state. We dont know what to do.
-			 */
-				panic("No space on disk! Mismanaged meta data");
-
-			case BLK_STS_RESOURCE:
-			/* TODO: memory is low. Can you try rewriting? */
-				panic("Low memory, cannot function!");
-			case BLK_STS_AGAIN:
-			/* You need to try only a few number of times.
-			 * TODO: keep count, or else you will loop on
-			 * this.
-			 */
-				subbioctx->retry++;
-				if (subbioctx->retry < 5) {
-					generic_make_request(clone);
-					return;
-				}
-				break;
-			default:
-				panic("Unknown IO error! better handling needed!");
-
-		}
-		
-		if (bio->bi_status == BLK_STS_OK) {
-			bio->bi_status = clone->bi_status;
-		}
-	}
-
-
-	/* We add the translation entry only when we know
-	 * that the write has made it to the disk
-	 */
-	if(clone->bi_status == BLK_STS_OK) {
-		ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-	}
-	/* When the refcount becomes 0, we need to call the bio_endio
-	 * of the original bio
-	 */
-	if (refcount_dec_and_test(&bioctx->ref)) {
-		bio_endio(bio);
-	}
-
-	bio_put(clone);
-}
-
 /* 
  * 1 indicates that the zone is free 
  *
@@ -2589,6 +2468,133 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	return;
 }
 
+void clone_io_done(struct kref *kref)
+{
+	struct bio *bio;
+	struct bio *clone;
+	struct nstl_bioctx * nstl_bioctx;
+
+	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
+	bio = nstl_bioctx->orig;
+	clone = nstl_bioctx->clone;
+	bio_endio(bio);
+	bio_put(clone);
+}
+
+/* can you create the translation entry here?
+ * What happens if you put a translation entry
+ * for some data that did not make it to
+ * the disk? Partial writes to such block
+ * entries can end up rewriting data that
+ * is partially uptodate and correct, and partially
+ * stale and wrong. Thus there should be no wrong
+ * entry in the translation map.
+ */
+static void nstl_clone_endio(struct bio * clone)
+{
+	struct nstl_sub_bioctx *subbioctx = NULL;
+	struct nstl_bioctx *bioctx = NULL;
+	struct bio *bio = NULL;
+	struct ctx * ctx = NULL;
+	int ret;
+	u64 wf;
+
+	subbioctx = clone->bi_private;
+	if (!subbioctx)
+		panic("subbioctx is NULL !");
+
+	bioctx = subbioctx->bioctx;
+	if(!bioctx)
+		panic("bioctx is NULL!");
+	bio = bioctx->orig;
+	ctx = bioctx->ctx;
+
+
+	if (subbioctx->magic != SUBBIOCTX_MAGIC) {
+		/* private has been overwritten */
+		return;
+	}
+
+	/* If a single segment of the bio fails, the bio should be
+	 * recorded with this status. No translation entry
+	 * for the entire original bio should be maintained
+	 *
+	 * TODO: should we keep trying till the write succeed?
+	 * Maybe to another zone, maybe invoke the shrinker if
+	 * memory is low etc.
+	 */
+
+	if (clone->bi_status != BLK_STS_OK) {
+		/* we don't keep partial bio translation map entries.
+		 * The write either succeeds atomically or does not at
+		 * all
+		 */
+		remove_partial_entries(ctx, bio);
+		/* Remove the partial STL entry as well */
+		/* If this is a SMR zone, then a sector write failure
+		 * causes all further I/O in that zone to fail.
+		 * Hence we can no longer write to this zone
+		 */
+
+		switch(clone->bi_status) {
+			case BLK_STS_IOERR:
+				if(!nstl_zone_seq(ctx, clone->bi_iter.bi_sector))
+					mark_zone_erroneous(ctx, clone->bi_iter.bi_sector);
+			/* If this zone is sequential, then we do not have
+			 * to do anything. There will be a gap in this
+			 * segment. But thats about it.
+			 */
+				/*TODO: try writing the data elsewhere and
+				 * complete the write
+				 */
+				wf = ctx->write_frontier;
+				subbioctx->extent.pba = wf;
+				clone->bi_iter.bi_sector = wf; /* we use the save write frontier */
+				generic_make_request(clone);
+				return;
+
+			case BLK_STS_NOSPC:
+			/* our meta information does not match that of
+			 * the disk's state. We dont know what to do.
+			 */
+				panic("No space on disk! Mismanaged meta data");
+
+			case BLK_STS_RESOURCE:
+			/* TODO: memory is low. Can you try rewriting? */
+				panic("Low memory, cannot function!");
+			case BLK_STS_AGAIN:
+			/* You need to try only a few number of times.
+			 * TODO: keep count, or else you will loop on
+			 * this.
+			 */
+				subbioctx->retry++;
+				if (subbioctx->retry < 5) {
+					generic_make_request(clone);
+					return;
+				}
+				break;
+			default:
+				panic("Unknown IO error! better handling needed!");
+
+		}
+		
+		if (bio->bi_status == BLK_STS_OK) {
+			bio->bi_status = clone->bi_status;
+		}
+	}
+
+
+	/* We add the translation entry only when we know
+	 * that the write has made it to the disk
+	 */
+	if(clone->bi_status == BLK_STS_OK) {
+		ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+	}
+	kref_put(&bioctx->ref, clone_io_done);
+}
+
+
 /*
  * From the specifications:
  * When addressing these drives in LBA mode, all blocks (sectors) are
@@ -2665,7 +2671,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	bioctx->clone = clone;
 	/* TODO: Initialize refcount in bioctx and increment it every
 	 * time bio is split or padded */
-	refcount_set(&bioctx->ref, 2);
+	kref_init(&bioctx->ref);
 
 	printk(KERN_ERR "\n write frontier: %llu free_sectors_in_wf: %llu", ctx->write_frontier, ctx->free_sectors_in_wf);
 
@@ -2715,7 +2721,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 
 		/* Next we fetch the LBA that our DM got */
 		sector = bio->bi_iter.bi_sector;
-		refcount_inc(&bioctx->ref);
+		kref_get(&bioctx->ref);
 		subbio_ctx->extent.lba = sector;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
@@ -2757,6 +2763,10 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		generic_make_request(pad);
 	}
 	blk_finish_plug(&plug);
+	/* We call this, because initial value is 1, every inc is
+	 * offset by the dec in the bio_endio call
+	 */
+	kref_put(&bioctx->ref, clone_io_done);
 	atomic_inc(&ctx->nr_writes);
 	return 0;
 

@@ -74,7 +74,7 @@ struct revmap_meta_inmem {
 
 struct nstl_bioctx {
 	struct bio * clone;
-	refcount_t ref;
+	struct kref ref;
 	struct bio * orig;
 	struct ctx *ctx;
 };
