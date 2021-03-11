@@ -2337,8 +2337,12 @@ void wakeup_refcount_waiters(struct ctx *ctx)
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref)
 {
 	printk(KERN_ERR "\n value of ref: %d", refcount_read(ref));
+	spin_unlock_irq(&ctx->tm_ref_lock);
 	spin_lock_irq(&ctx->tm_ref_lock);
-	wait_event_lock_irq(ctx->refq, 1 == refcount_read(ref), ctx->tm_ref_lock);
+	if (1 < refcount_read(ref))
+		wait_event_lock_irq(ctx->refq, 1 == refcount_read(ref), ctx->tm_ref_lock);
+	else
+		printk(KERN_ERR "\n not waiting!");
 	spin_unlock_irq(&ctx->tm_ref_lock);
 }
 
@@ -2958,19 +2962,20 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned i
 	int i = 0;
 
 	while (i <= nr_extents) {
+		i++;
 		/* If there are no more recorded entries on disk, then
 		 * dont add an entries further
 		 */
 		if ((entry->lba == 0) && (entry->pba == 0)) {
-			i++;
 			continue;
 			
 		}
+		printk(KERN_ERR "\n entry->lba: %llu", entry->lba);
+		printk(KERN_ERR "\n entry->pba: %llu \n", entry->pba);
 		/* TODO: right now everything should be zeroed out */
-		panic("Why are there any already mapped extents?");
+		//panic("Why are there any already mapped extents?");
 		stl_update_range(ctx, entry->lba, entry->pba, NR_SECTORS_IN_BLK);
 		entry = entry + 1;
-		i++;
 	}
 	return 0;
 }
@@ -2994,6 +2999,10 @@ int read_translation_map(struct ctx *ctx)
 	unsigned long nrblks = ctx->sb->blk_count_tm;
 	struct block_device *bdev = ctx->dev->bdev;
 	int i = 0;
+	struct tm_entry * entry;
+
+	pba = pba / NR_SECTORS_IN_BLK;
+	printk(KERN_ERR "\n Reading TM entries from: %lu, nrblks: %d", pba, nrblks);
 	
 	ctx->n_extents = 0;
 	while(i < nrblks) {
@@ -3003,11 +3012,13 @@ int read_translation_map(struct ctx *ctx)
 		/* We read the extents in the entire block. the
 		 * redundant extents should be unpopulated and so
 		 * we should find 0 and break out */
-		read_extents_from_block(ctx, (struct tm_entry *)bh->b_page, nr_extents_in_blk);
+		//printk(KERN_ERR "\n pba: %llu", pba);
+		read_extents_from_block(ctx, (struct tm_entry *)bh->b_data, nr_extents_in_blk);
 		i = i + 1;
 		put_bh(bh);
-		pba = pba + NR_SECTORS_IN_BLK;
+		pba = pba + 1;
 	}
+	printk(KERN_ERR "\n TM entries read!");
 	return 0;
 }
 
@@ -3093,7 +3104,7 @@ int read_revmap(struct ctx *ctx)
 					/* free the successful bh till now */
 					return -1;
 				}
-				//process_revmap_entries_on_boot(ctx, bh->b_page, &ref);
+				process_revmap_entries_on_boot(ctx, bh->b_page, &ref);
 			}
 			byte = byte >> 1;
 		}
@@ -3109,6 +3120,7 @@ int read_revmap(struct ctx *ctx)
 	printk(KERN_ERR "\n Waiting on refcount! %d \n", refcount_read(&ref));
 	refcount_dec(&ref);
 	wait_on_refcount(ctx, &ref);
+	printk(KERN_ERR "\n wait is over!!");
 	return 0;
 }
 
@@ -3363,7 +3375,6 @@ int read_metadata(struct ctx * ctx)
 	printk(KERN_ERR "\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
 	read_revmap(ctx);
 	printk(KERN_INFO "Reverse map flushed!");
-
 	ret = read_translation_map(ctx);
 	if (0 > ret) {
 		put_page(ctx->sb_page);
@@ -3373,6 +3384,7 @@ int read_metadata(struct ctx * ctx)
 		return ret;
 	}
 	printk(KERN_INFO "\n extent_map read!");
+	return(-1);
 
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb1->zone_count_main /BITS_IN_BYTE;
