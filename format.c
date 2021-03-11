@@ -84,13 +84,21 @@ __le64 get_nr_blks(struct stl_sb *sb)
 	return nr_blks;
 }
 
-/* Stores as many entries as there are 4096 blks in 2 zones */
+/* Stores as many entries as there are 4096 blks. 2 zones is 131072
+ * entries. That requires 586 blocks and 1 block of bitmap.
+ * 1 block of bitmap can accomodate details for 4096 blocks.
+ * Hence we say that as many entries as can be accomodated in 4096
+ * blocks. One block has 48 entries.
+ */
 
 __le32 get_revmap_blk_count(struct stl_sb *sb)
 {
 	unsigned nr_rm_entries = 2 << (sb->log_zone_size - sb->log_block_size);
 	unsigned nr_rm_entries_per_blk = NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK;
 	unsigned nr_rm_blks = nr_rm_entries / nr_rm_entries_per_blk;
+
+
+	printf("\n nr_rm_entries: %d", nr_rm_entries);
 	if (nr_rm_entries % nr_rm_entries_per_blk)
 		nr_rm_blks++;
 	return nr_rm_blks;
@@ -121,7 +129,8 @@ __le32 get_revmap_bm_blk_count(struct stl_sb *sb)
 	unsigned nr_blks = nr_bytes / BLOCK_SIZE;
 	if (nr_bytes % BLOCK_SIZE)
 		nr_blks++;
-
+	printf("\n nr_revmap_blks: %d", nr_revmap_blks);
+	printf("\n revmap_bm_blk_count: %d", nr_blks);
 	return nr_blks;
 
 }

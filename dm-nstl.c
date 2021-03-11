@@ -1087,24 +1087,18 @@ struct page * flush_revmap_bitmap(struct ctx *ctx)
 {
 	struct bio * bio;
 	struct page *page;
-	int i, nr_pages;
+	int i;
 	sector_t pba;
-	struct page ** revmap_bm_pages;
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		return NULL;
 	}
-	nr_pages = ctx->sb->blk_count_revmap_bm;
-	revmap_bm_pages = ctx->revmap_bm;
-	for(i=0; i<nr_pages; i++) {
-		page = *revmap_bm_pages;
-		/* bio_add_page sets the bi_size for the bio */
-		if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
-			bio_put(bio);
-			return NULL;
-		}
-		revmap_bm_pages = revmap_bm_pages + 1;
+	page = ctx->revmap_bm;
+	/* bio_add_page sets the bi_size for the bio */
+	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
+		bio_put(bio);
+		return NULL;
 	}
 	pba = ctx->sb->revmap_pba;
 	bio->bi_end_io = revmap_bitmap_flushed;
@@ -1640,7 +1634,7 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks)
 		return NULL;
 	}
 
-	refcount_set(ref, 1);
+	refcount_set(ref, 2);
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		__free_pages(page, 0);
@@ -2247,19 +2241,18 @@ void mark_revmap_bit(struct ctx *ctx, u64 pba)
 	int bytenr;
 	int bitnr;
 	unsigned char mask;
-	struct page ** revmap_bm_pages;
 	struct page *page;
 	unsigned int blknr = 0;
-
-	revmap_bm_pages = ctx->revmap_bm;
 
 	pba = pba - ctx->sb->revmap_pba;
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
 	mask = (1 << bitnr);
 	blknr = bytenr / BLK_SZ;
-	revmap_bm_pages += blknr;
-	page = *revmap_bm_pages;
+	/* Only one revmap bm block is stored. */
+	if (blknr != 0)
+		panic("revmap bm calculations are wrong!");
+	page = ctx->revmap_bm;
 	ptr = page_address(page);
 
 	ptr = ptr + bytenr;
@@ -2277,19 +2270,18 @@ void clear_revmap_bit(struct ctx *ctx, u64 pba)
 	int bytenr;
 	int bitnr;
 	unsigned char mask;
-	struct page ** revmap_bm_pages;
 	struct page *page;
 	unsigned int blknr = 0;
-
-	revmap_bm_pages = ctx->revmap_bm;
 
 	pba = pba - ctx->sb->revmap_pba;
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
 	mask = ~(1 << bitnr);
 	blknr = bytenr / BLK_SZ;
-	revmap_bm_pages += blknr;
-	page = *revmap_bm_pages;
+	/* Only one revmap bm block is stored. */
+	if (blknr != 0)
+		panic("revmap bm calculations are wrong!");
+	page = ctx->revmap_bm;
 	ptr = page_address(page);
 
 	ptr = ptr + bytenr;
@@ -2310,16 +2302,15 @@ int is_revmap_block_available(struct ctx *ctx, u64 pba)
 	struct page *page;
 	unsigned int blknr = 0;
 
-	revmap_bm_pages = ctx->revmap_bm;
-
 	pba = pba - ctx->sb->revmap_pba;
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
 	blknr = bytenr / BLK_SZ;
-	revmap_bm_pages += blknr;
-	page = *revmap_bm_pages;
+	/* Only one revmap bm block is stored. */
+	if (blknr != 0)
+		panic("revmap bm calculations are wrong!");
+	page = ctx->revmap_bm;
 	ptr = page_address(page);
-
 	ptr = ptr + bytenr;
 	temp = *ptr;
 
@@ -2345,8 +2336,9 @@ void wakeup_refcount_waiters(struct ctx *ctx)
 
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref)
 {
+	printk(KERN_ERR "\n value of ref: %d", refcount_read(ref));
 	spin_lock_irq(&ctx->tm_ref_lock);
-	wait_event_lock_irq(ctx->refq, !refcount_read(ref), ctx->tm_ref_lock);
+	wait_event_lock_irq(ctx->refq, 1 == refcount_read(ref), ctx->tm_ref_lock);
 	spin_unlock_irq(&ctx->tm_ref_lock);
 }
 
@@ -2391,6 +2383,7 @@ void revmap_entries_flushed(struct bio *bio)
 			/* By now add_block_based_translations would have
 			 * incremented the reference atleast once!
 			 */
+			refcount_dec(revmap_bio_ctx->ref);
 			wait_on_refcount(ctx, revmap_bio_ctx->ref);
 			kfree(&revmap_bio_ctx->ref);
 			/* now we calculate the pba where the revmap
@@ -2446,7 +2439,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 		return -ENOMEM;
 	}
 
-	refcount_set(ref, 1);
+	refcount_set(ref, 2);
 	revmap_bio_ctx = kmem_cache_alloc(ctx->revmap_bioctx_cache, GFP_KERNEL);
 	if (!revmap_bio_ctx) {
 		kfree(ref);
@@ -2670,7 +2663,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	bioctx->clone = clone;
 	/* TODO: Initialize refcount in bioctx and increment it every
 	 * time bio is split or padded */
-	refcount_set(&bioctx->ref, 1);
+	refcount_set(&bioctx->ref, 2);
 
 	printk(KERN_ERR "\n write frontier: %llu free_sectors_in_wf: %llu", ctx->write_frontier, ctx->free_sectors_in_wf);
 
@@ -3025,20 +3018,18 @@ int read_revmap_bitmap(struct ctx *ctx)
 	unsigned long nrblks = ctx->sb->blk_count_revmap_bm;
 	struct block_device *bdev = ctx->dev->bdev;
 	int i = 0;
-	struct page ** revmap_bm = ctx->revmap_bm;
 	sector_t blknr = pba /NR_SECTORS_IN_BLK;
-	
-	while(i < nrblks) {
-		bh = __bread(bdev, blknr, BLK_SZ);
-		if (!bh) {
-			/* free the successful bh till now */
-			return -1;
-		}
-		*revmap_bm  = bh->b_page;
-		revmap_bm = revmap_bm + 1;
-		i = i + 1;
-		pba = pba + NR_SECTORS_IN_BLK;
+
+	if (nrblks != 1) {
+		panic("\n Wrong revmap bitmap calculations!");
 	}
+	
+	bh = __bread(bdev, blknr, BLK_SZ);
+	if (!bh) {
+		/* free the successful bh till now */
+		return -1;
+	}
+	ctx->revmap_bm = bh->b_page;
 	return 0;
 
 }
@@ -3049,6 +3040,8 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, refcount
 	struct stl_revmap_extent *extent;
 	struct stl_revmap_entry_sector *entry_sector;
 	int i = 0, j;
+
+	printk(KERN_INFO "\n Inside process revmap_entries_on_boot!" );
 
 	add_block_based_translation(ctx,  page, ref);
 	entry_sector = (struct stl_revmap_entry_sector *) page;
@@ -3066,52 +3059,54 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, refcount
 int read_revmap(struct ctx *ctx)
 {
 	struct buffer_head *bh = NULL;
-	struct page ** revmap_bm_pages = ctx->revmap_bm;
-	unsigned int nrblks = ctx->sb->blk_count_revmap_bm;
-	int i = 0, j, byte = 0;
+	int i = 0, byte = 0;
 	struct page *page;
 	char *ptr;
 	unsigned int blknr = 0;
 	unsigned long pba;
 	struct block_device *bdev = NULL;
+	char flush_needed = 0;
 	refcount_t ref;
 	refcount_set(&ref, 2);
 
 	pba = ctx->sb->revmap_pba/NR_SECTORS_IN_BLK;
-
-	printk(KERN_ERR "\n PBA for first revmap blk: %eu", pba);
-	printk(KERN_ERR "\n nr of revmap bitmap blks: %u", nrblks);
+	printk(KERN_ERR "\n PBA for first revmap blk: %u", pba);
 	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
 
 	/* We read the revmap bitmap first. If a bit is set,
 	 * then the corresponding revmap blk is read
 	 */
-	while (i < nrblks) {
-		page = *revmap_bm_pages;
-		ptr = (char *) page_address(page);
-		for (j = 0; j < BLK_SZ; j++) {
-			byte = *ptr;
-			while(byte) {
-				if (byte & 1) {
-					pba += (blknr + j );
-					printk(KERN_ERR "\n read revmap blk: %lu", pba);
-					bh = __bread(bdev, pba, BLK_SZ);
-					if (!bh) {
-						/* free the successful bh till now */
-						return -1;
-					}
-					process_revmap_entries_on_boot(ctx, bh->b_page, &ref);
+	page = ctx->revmap_bm;
+	if (!page)
+		return -1;
+	ptr = (char *) page_address(page);
+	printk(KERN_ERR "\n page_address: %llu", ptr);
+	for (i = 0; i < BLK_SZ; i++, pba++) {
+		byte = *ptr;
+		while(byte) {
+			if (byte & 1) {
+				printk(KERN_ERR "\n WHY IS THIS BYTE SET??");
+				flush_needed = 1;
+				printk(KERN_ERR "\n read revmap blk: %lu", pba);
+				bh = __bread(bdev, pba, BLK_SZ);
+				if (!bh) {
+					/* free the successful bh till now */
+					return -1;
 				}
-				byte = byte >> 1;
+				//process_revmap_entries_on_boot(ctx, bh->b_page, &ref);
 			}
-			ptr = ptr + 1;
+			byte = byte >> 1;
 		}
-		revmap_bm_pages += 1;
-		blknr = blknr + BLK_SZ;
+		ptr = ptr + 1;
 	}
-	spin_lock(&ctx->flush_lock);
-	flush_translation_blocks(ctx);
-	spin_unlock(&ctx->flush_lock);
+	printk(KERN_ERR "\n flush_needed: %d", flush_needed);
+	if (flush_needed) {
+		printk(KERN_ERR "\n Why do we need to flush!!");
+		spin_lock(&ctx->flush_lock);
+		flush_translation_blocks(ctx);
+		spin_unlock(&ctx->flush_lock);
+	}
+	printk(KERN_ERR "\n Waiting on refcount! %d \n", refcount_read(&ref));
 	refcount_dec(&ref);
 	wait_on_refcount(ctx, &ref);
 	return 0;
@@ -3355,8 +3350,17 @@ int read_metadata(struct ctx * ctx)
 		ret = do_recovery(ctx);
 		return ret;
 	}
+	printk(KERN_INFO "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
+	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
 
-	read_revmap_bitmap(ctx);
+	ret = read_revmap_bitmap(ctx);
+	if (ret) {
+		put_page(ctx->sb_page);
+		put_page(ctx->ckpt_page);
+		return -1;
+	}
+	printk(KERN_ERR "\n revmap bitmap read!");
+	printk(KERN_ERR "\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
 	read_revmap(ctx);
 	printk(KERN_INFO "Reverse map flushed!");
 
@@ -3364,6 +3368,7 @@ int read_metadata(struct ctx * ctx)
 	if (0 > ret) {
 		put_page(ctx->sb_page);
 		put_page(ctx->ckpt_page);
+		put_page(ctx->revmap_bm);
 		printk(KERN_ERR "\n read_extent_map failed! cannot read the metadata ");
 		return ret;
 	}
@@ -3541,18 +3546,53 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", ctx->dev->bdev->bd_part->start_sect);
 	printk(KERN_INFO "\n sc->dev->bdev->bd_part->nr_sects: %llu", ctx->dev->bdev->bd_part->nr_sects);
 
+
 	ctx->extent_pool = mempool_create_slab_pool(MIN_EXTENTS, extents_slab);
 	if (!ctx->extent_pool)
 		goto put_dev;
 
-	ctx->revmap_bm = kmalloc(sizeof(struct page *) * ctx->sb->blk_count_revmap_bm, GFP_KERNEL);
-	if (!ctx->revmap_bm)
-		goto free_extent_pool;
+	disk_size = i_size_read(ctx->dev->bdev->bd_inode);
+	printk(KERN_INFO "\n The disk size as read from the bd_inode: %llu", disk_size);
+	printk(KERN_INFO "\n max sectors: %llu", disk_size/512);
+	printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
+	spin_lock_init(&ctx->lock);
+	spin_lock_init(&ctx->sit_kv_store_lock);
+	spin_lock_init(&ctx->tm_ref_lock);
+
+	atomic_set(&ctx->io_count, 0);
+	atomic_set(&ctx->n_reads, 0);
+	atomic_set(&ctx->pages_alloced, 0);
+	atomic_set(&ctx->nr_writes, 0);
+	atomic_set(&ctx->nr_failed_writes, 0);
+	atomic_set(&ctx->revmap_blk_count, 0);
+	atomic_set(&ctx->revmap_sector_count, 0);
+	atomic_set(&ctx->zone_revmap_count, 0);
+	ctx->target = 0;
+	printk(KERN_ERR "\n About to read metadata! 1 \n");
+	spin_lock_init(&ctx->flush_lock);
+	printk(KERN_ERR "\n About to read metadata! 2 \n");
+	init_waitqueue_head(&ctx->tm_blk_flushq);
+	spin_lock_init(&ctx->tm_flush_lock);
+	printk(KERN_ERR "\n About to read metadata! 3 \n");
+	init_waitqueue_head(&ctx->zone_entry_flushq);
+	spin_lock_init(&ctx->flush_zone_lock);
+	atomic_set(&ctx->nr_pending_writes, 0);
+	atomic_set(&ctx->nr_sit_pages, 0);
+	atomic_set(&ctx->nr_tm_pages, 0);
+	printk(KERN_ERR "\n About to read metadata! 4 \n");
+	init_waitqueue_head(&ctx->refq);
+	init_waitqueue_head(&ctx->rev_blk_flushq);
+	ctx->mounted_time = ktime_get_real_seconds();
+
+	printk(KERN_ERR "\n About to read metadata! 5 ! \n");
 
     	ret = read_metadata(ctx);
 	if (ret < 0)
-		goto free_revmap_bm;
+		goto free_extent_pool;
 
+	ctx->ckpt->clean = 0;
+	ctx->revmap_pba = ctx->sb->revmap_pba;
+	return(-1);
 	max_pba = ctx->dev->bdev->bd_inode->i_size / 512;
 	sprintf(ctx->nodename, "stl/%s", argv[1]);
 	ret = -EINVAL;
@@ -3572,24 +3612,6 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	printk(KERN_INFO "max_pba = %d", ctx->max_pba);
 	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier + 1;
 
-
-	disk_size = i_size_read(ctx->dev->bdev->bd_inode);
-	printk(KERN_INFO "\n The disk size as read from the bd_inode: %llu", disk_size);
-	printk(KERN_INFO "\n max sectors: %llu", disk_size/512);
-	printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
-	spin_lock_init(&ctx->lock);
-	spin_lock_init(&ctx->sit_kv_store_lock);
-	spin_lock_init(&ctx->tm_ref_lock);
-
-	atomic_set(&ctx->io_count, 0);
-	atomic_set(&ctx->n_reads, 0);
-	atomic_set(&ctx->pages_alloced, 0);
-	atomic_set(&ctx->nr_writes, 0);
-	atomic_set(&ctx->nr_failed_writes, 0);
-	atomic_set(&ctx->revmap_blk_count, 0);
-	atomic_set(&ctx->revmap_sector_count, 0);
-	atomic_set(&ctx->zone_revmap_count, 0);
-	ctx->target = 0;
 
 	ret = -ENOMEM;
 	dm_target->error = "dm-stl: No memory";
@@ -3627,25 +3649,6 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	if (0 > ret) {
 		goto stop_gc_thread;
 	}
-	
-	/*
-	if (register_shrinker(nstl_shrinker))
-		goto free_revmap_bm;
-	*/
-	
-	ctx->revmap_pba = ctx->sb->revmap_pba;
-	ctx->ckpt->clean = 0;
-	spin_lock_init(&ctx->flush_lock);
-	init_waitqueue_head(&ctx->tm_blk_flushq);
-	spin_lock_init(&ctx->tm_flush_lock);
-	init_waitqueue_head(&ctx->zone_entry_flushq);
-	spin_lock_init(&ctx->flush_zone_lock);
-	atomic_set(&ctx->nr_pending_writes, 0);
-	atomic_set(&ctx->nr_sit_pages, 0);
-	atomic_set(&ctx->nr_tm_pages, 0);
-	init_waitqueue_head(&ctx->refq);
-	init_waitqueue_head(&ctx->rev_blk_flushq);
-	ctx->mounted_time = ktime_get_real_seconds();
 	ctx->s_chksum_driver = crypto_alloc_shash("crc32c", 0, 0);
 	if (IS_ERR(ctx->s_chksum_driver)) {
 		printk(KERN_ERR "Cannot load crc32c driver.");
@@ -3653,6 +3656,12 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 		ctx->s_chksum_driver = NULL;
 		goto destroy_cache;
 	}
+	/*
+	if (register_shrinker(nstl_shrinker))
+		goto stop_gc_thread;
+	*/
+
+	
 	return 0;
 /* failed case */
 destroy_cache:
@@ -3668,9 +3677,9 @@ destroy_page_pool:
 		mempool_destroy(ctx->page_pool);
 free_extent_pool:
 	mempool_destroy(ctx->extent_pool);
-free_revmap_bm:
-	kfree(ctx->revmap_bm);
 free_metadata_pages:
+	if (ctx->revmap_bm)
+		put_page(ctx->revmap_bm);
 	if (ctx->sb_page)
 		put_page(ctx->sb_page);
 	if (ctx->ckpt_page)
@@ -3701,7 +3710,12 @@ static void stl_dtr(struct dm_target *dm_target)
 
 	/* TODO : free extent page
 	 * and segentries page */
-	kfree(ctx->revmap_bm);		
+	if (ctx->revmap_bm)
+		put_page(ctx->revmap_bm);
+	if (ctx->sb_page)
+		put_page(ctx->sb_page);
+	if (ctx->ckpt_page)
+		put_page(ctx->ckpt_page);
 	destroy_caches(ctx);
 	stl_gc_thread_stop(ctx);
 	bioset_exit(ctx->bs);

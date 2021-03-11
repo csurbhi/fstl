@@ -245,7 +245,7 @@ struct ctx {
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
 	 * non contiguous pages in memory
 	 */
-	struct page **revmap_bm;		/* Stores the bitmap for the reverse map blocks flush status (65536 * 2) */
+	struct page *revmap_bm;		/* Stores the bitmap for the reverse map blocks flush status (65536 * 2) */
 	u8	revmap_bm_order;
 	atomic_t tm_flush_count;
 	atomic_t sit_flush_count;
