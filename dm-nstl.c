@@ -510,7 +510,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 	struct extent *e;
 	unsigned nr_sectors, overlap;
 
-	printk(KERN_INFO "Read begins! ");
+	//printk(KERN_INFO "Read begins! ");
 
 	atomic_inc(&ctx->n_reads);
 	while(split != bio) {
@@ -521,7 +521,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		/* note that beginning of extent is >= start of bio */
 		/* [----bio-----] [eeeeeee]  */
 		if (e == NULL || e->lba >= sector + nr_sectors)  {
-			printk(KERN_ERR "\n Case of no overlap");
+			//printk(KERN_ERR "\n Case of no overlap");
 			zero_fill_bio(bio);
 			bio_endio(bio);
 			break;
@@ -529,7 +529,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		   [---------bio------] */
 		else if (e->lba <= sector) {
-			printk(KERN_ERR "\n e->lba <= sector");
+			//printk(KERN_ERR "\n e->lba <= sector");
 			overlap = e->lba + e->len - sector;
 			if (overlap < nr_sectors)
 				nr_sectors = overlap;
@@ -538,7 +538,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		/*             [eeeeeeeeeeee]
 			       [---------bio------] */
 		else {
-			printk(KERN_ERR "\n e->lba >  sector");
+			//printk(KERN_ERR "\n e->lba >  sector");
 			nr_sectors = e->lba - sector;
 			split = bio_split(bio, nr_sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, bio);
@@ -559,7 +559,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
 		generic_make_request(split);
 	}
-	printk(KERN_INFO "\n Read end");
+	//printk(KERN_INFO "\n Read end");
 	return 0;
 }
 
@@ -1472,7 +1472,9 @@ void read_complete(struct bio * bio)
 	ctx = read_ctx->ctx;
 	ref = read_ctx->ref;
 
+	spin_lock_irq(&ctx->tm_ref_lock);
 	refcount_dec(ref);
+	spin_unlock_irq(&ctx->tm_ref_lock);
 	wakeup_refcount_waiters(ctx);
 	/* bio_alloc done, hence bio_put */
 	bio_put(bio);
@@ -1645,9 +1647,9 @@ void write_tmbl_complete(struct bio *bio)
 	 */
 	list_for_each(temp, &tm_page->reflist) {
 		refnode = list_entry(temp, struct ref_list, list);
-		spin_lock(&ctx->tm_flush_lock);
+		spin_lock_irq(&ctx->tm_ref_lock);
 		refcount_dec(refnode->ref);
-		spin_unlock(&ctx->tm_flush_lock);
+		spin_unlock_irq(&ctx->tm_ref_lock);
 		kmem_cache_free(ctx->reflist_cache, refnode);
 		/* Wakeup anyone who is waiting on this reference */
 		wakeup_refcount_waiters(ctx);
@@ -2216,10 +2218,12 @@ void wait_on_refcount(struct ctx *ctx, refcount_t *ref)
 	printk(KERN_ERR "\n value of ref: %d", refcount_read(ref));
 	spin_unlock_irq(&ctx->tm_ref_lock);
 	spin_lock_irq(&ctx->tm_ref_lock);
-	if (1 < refcount_read(ref))
-		wait_event_lock_irq(ctx->refq, 1 == refcount_read(ref), ctx->tm_ref_lock);
-	else
-		printk(KERN_ERR "\n not waiting!");
+	if (1 < refcount_read(ref)) {
+		wait_event_lock_irq(ctx->refq, (1 == refcount_read(ref)), ctx->tm_ref_lock);
+	}
+	else {
+		printk(KERN_ERR "\n Not waiting!");
+	}
 	spin_unlock_irq(&ctx->tm_ref_lock);
 }
 
@@ -2264,8 +2268,11 @@ void revmap_entries_flushed(struct bio *bio)
 			/* By now add_block_based_translations would have
 			 * incremented the reference atleast once!
 			 */
+			spin_lock_irq(&ctx->tm_ref_lock);
 			refcount_dec(revmap_bio_ctx->ref);
+			spin_unlock_irq(&ctx->tm_ref_lock);
 			wait_on_refcount(ctx, revmap_bio_ctx->ref);
+			wakeup_refcount_waiters(ctx);
 			kfree(&revmap_bio_ctx->ref);
 			/* now we calculate the pba where the revmap
 			 * is flushed. We can reuse that pba as all
@@ -2468,17 +2475,27 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	return;
 }
 
+/* 
+ * TODO: If status is not OK, remove the translation
+ * entries for this bio
+ * We need to go back to the older values.
+ * But right now, we have not saved them.
+ */
 void clone_io_done(struct kref *kref)
 {
 	struct bio *bio;
 	struct bio *clone;
 	struct nstl_bioctx * nstl_bioctx;
+	static int count;
 
+	printk(KERN_ERR "I/O done, freeing....! %d", count);
 	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
 	bio = nstl_bioctx->orig;
 	clone = nstl_bioctx->clone;
 	bio_endio(bio);
 	bio_put(clone);
+	count++;
+	printk(KERN_ERR "freeing done! %d", count);
 }
 
 /* can you create the translation entry here?
@@ -2512,6 +2529,7 @@ static void nstl_clone_endio(struct bio * clone)
 
 	if (subbioctx->magic != SUBBIOCTX_MAGIC) {
 		/* private has been overwritten */
+		printk(KERN_ERR "\n subbioctx->magic OVERWRITTEN!");
 		return;
 	}
 
@@ -2525,6 +2543,7 @@ static void nstl_clone_endio(struct bio * clone)
 	 */
 
 	if (clone->bi_status != BLK_STS_OK) {
+		printk(KERN_ERR "\n write end io status not OK");
 		/* we don't keep partial bio translation map entries.
 		 * The write either succeeds atomically or does not at
 		 * all
@@ -2588,7 +2607,10 @@ static void nstl_clone_endio(struct bio * clone)
 	 * that the write has made it to the disk
 	 */
 	if(clone->bi_status == BLK_STS_OK) {
-		ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		 /*
+		 ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		*/
 		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
 	}
 	kref_put(&bioctx->ref, clone_io_done);
@@ -2633,8 +2655,8 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		return -1;
 	}
 
-	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", sectors);
 	nr_sectors = bio_sectors(bio);
+	printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", nr_sectors);
 	if (unlikely(nr_sectors <= 0)) {
 		printk(KERN_ERR "\n Less than 0 sectors (%d) requested!, nbios: %u", nr_sectors, nbios);
 		bio->bi_status = BLK_STS_OK;
@@ -2684,7 +2706,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 			printk(KERN_ERR "\n insufficient memory!");
 			goto fail;
 		}
-
+		subbio_ctx->magic = SUBBIOCTX_MAGIC;
 		spin_lock_irqsave(&ctx->lock, flags);
 		/*-------------------------------*/
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
@@ -3126,8 +3148,11 @@ int read_revmap(struct ctx *ctx)
 		spin_unlock(&ctx->flush_lock);
 	}
 	printk(KERN_ERR "\n Waiting on refcount! %d \n", refcount_read(&ref));
+	spin_lock_irq(&ctx->tm_ref_lock);
 	refcount_dec(&ref);
+	spin_unlock_irq(&ctx->tm_ref_lock);
 	wait_on_refcount(ctx, &ref);
+	wakeup_refcount_waiters(ctx);
 	printk(KERN_ERR "\n wait is over!!");
 	return 0;
 }
@@ -3361,6 +3386,7 @@ int read_metadata(struct ctx * ctx)
 	}
 	put_page(page);
 	ctx->sb = sb2;
+	ctx->max_pba = ctx->sb->max_pba;
 
 	ckpt = get_cur_checkpoint(ctx);
 	if (NULL == ckpt) {
@@ -3374,8 +3400,17 @@ int read_metadata(struct ctx * ctx)
 		ret = do_recovery(ctx);
 		return ret;
 	}
+	ctx->ckpt->clean = 0;
+	ctx->revmap_pba = ctx->sb->revmap_pba;
 	printk(KERN_INFO "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
 	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
+
+	ctx->write_frontier = ctx->ckpt->cur_frontier_pba;
+	printk(KERN_INFO "%s %d kernel wf: %llu\n", __func__, __LINE__, ctx->write_frontier);
+	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
+	printk(KERN_INFO "%s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->wf_end);
+	printk(KERN_INFO "max_pba = %d", ctx->max_pba);
+	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier + 1;
 
 	ret = read_revmap_bitmap(ctx);
 	if (ret) {
@@ -3614,40 +3649,21 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	init_waitqueue_head(&ctx->refq);
 	init_waitqueue_head(&ctx->rev_blk_flushq);
 	ctx->mounted_time = ktime_get_real_seconds();
+	ctx->extent_tbl_root = RB_ROOT;
+	rwlock_init(&ctx->extent_tbl_lock);
 
-	printk(KERN_ERR "\n About to read metadata! 5 ! \n");
+	ctx->tm_rb_root = RB_ROOT;
 
-    	ret = read_metadata(ctx);
-	if (ret < 0) 
-		goto free_extent_pool;
+	ctx->sit_rb_root = RB_ROOT;
+	rwlock_init(&ctx->sit_rb_lock);
 
-	ctx->ckpt->clean = 0;
-	ctx->revmap_pba = ctx->sb->revmap_pba;
-	max_pba = ctx->dev->bdev->bd_inode->i_size / 512;
-	sprintf(ctx->nodename, "stl/%s", argv[1]);
-	ret = -EINVAL;
-	printk(KERN_INFO "\n device records max_pba: %llu", max_pba);
-	ctx->max_pba = ctx->sb->max_pba;
-	printk(KERN_INFO "\n formatted max_pba: %d", ctx->max_pba);
-	if (ctx->max_pba > max_pba) {
-		dm_target->error = "dm-stl: Invalid max pba found on sb";
-		goto free_metadata_pages;
-	}
-	ctx->write_frontier = ctx->ckpt->cur_frontier_pba;
-
-	printk(KERN_INFO "%s %d kernel wf: %llu\n", __func__, __LINE__, ctx->write_frontier);
-	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
-	printk(KERN_INFO "%s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->wf_end);
-	printk(KERN_INFO "max_pba = %d", ctx->max_pba);
-	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier + 1;
-
-
+	ctx->sectors_copied = 0;
 	ret = -ENOMEM;
 	dm_target->error = "dm-stl: No memory";
 
 	ctx->page_pool = mempool_create_page_pool(MIN_POOL_PAGES, 0);
 	if (!ctx->page_pool)
-		goto free_metadata_pages;
+		goto free_extent_pool;
 
 	//printk(KERN_INFO "about to call bioset_init()");
 	ctx->bs = kzalloc(sizeof(*(ctx->bs)), GFP_KERNEL);
@@ -3658,25 +3674,9 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 		printk(KERN_ERR "\n bioset_init failed!");
 		goto free_bioset;
 	}
-
-	ctx->extent_tbl_root = RB_ROOT;
-	rwlock_init(&ctx->extent_tbl_lock);
-
-	ctx->tm_rb_root = RB_ROOT;
-
-	ctx->sit_rb_root = RB_ROOT;
-	rwlock_init(&ctx->sit_rb_lock);
-
-	ctx->sectors_copied = 0;
-
-	ret = stl_gc_thread_start(ctx);
-	if (ret) {
-		goto uninit_bioset;
-	}
-
 	ret = create_caches(ctx);
 	if (0 > ret) {
-		goto stop_gc_thread;
+		goto uninit_bioset;
 	}
 	printk(KERN_ERR "\n caches created!");
 	ctx->s_chksum_driver = crypto_alloc_shash("crc32c", 0, 0);
@@ -3686,6 +3686,28 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 		ctx->s_chksum_driver = NULL;
 		goto destroy_cache;
 	}
+
+	printk(KERN_ERR "\n About to read metadata! 5 ! \n");
+
+    	ret = read_metadata(ctx);
+	if (ret < 0) 
+		goto destroy_cache;
+
+	max_pba = ctx->dev->bdev->bd_inode->i_size / 512;
+	sprintf(ctx->nodename, "stl/%s", argv[1]);
+	ret = -EINVAL;
+	printk(KERN_INFO "\n device records max_pba: %llu", max_pba);
+	printk(KERN_INFO "\n formatted max_pba: %d", ctx->max_pba);
+	if (ctx->max_pba > max_pba) {
+		dm_target->error = "dm-stl: Invalid max pba found on sb";
+		goto free_metadata_pages;
+	}
+	
+	ret = stl_gc_thread_start(ctx);
+	if (ret) {
+		goto free_metadata_pages;
+	}
+
 	/*
 	if (register_shrinker(nstl_shrinker))
 		goto stop_gc_thread;
@@ -3693,17 +3715,8 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	printk(KERN_ERR "\n ctr() done!!");
 	return 0;
 /* failed case */
-destroy_cache:
-	destroy_caches(ctx);
 stop_gc_thread:
 	stl_gc_thread_stop(ctx);
-uninit_bioset:
-	bioset_exit(ctx->bs);
-free_bioset:
-	kfree(ctx->bs);
-destroy_page_pool:
-	if (ctx->page_pool)
-		mempool_destroy(ctx->page_pool);
 free_metadata_pages:
 	if (ctx->revmap_bm)
 		put_page(ctx->revmap_bm);
@@ -3713,6 +3726,16 @@ free_metadata_pages:
 		put_page(ctx->ckpt_page);
 	/* TODO : free extent page
 	 * and segentries page */
+destroy_cache:
+	destroy_caches(ctx);
+uninit_bioset:
+	bioset_exit(ctx->bs);
+free_bioset:
+	kfree(ctx->bs);
+destroy_page_pool:
+	if (ctx->page_pool)
+		mempool_destroy(ctx->page_pool);
+
 free_extent_pool:
 	mempool_destroy(ctx->extent_pool);
 put_dev:
