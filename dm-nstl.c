@@ -964,7 +964,6 @@ struct page * flush_revmap_bitmap(struct ctx *ctx)
 {
 	struct bio * bio;
 	struct page *page;
-	int i;
 	sector_t pba;
 
 	bio = bio_alloc(GFP_KERNEL, 1);
@@ -1423,8 +1422,8 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	 * We convert sectors to blocks
 	 */
 	for (i=0; i<len/8; i++) {
+		spin_lock(&ctx->tm_page_lock);
 		lock_page(page);
-		SetPageDirty(page);
 		get_page(page);
 		if (ptr->lba != 0) {
 			/* decrement vblocks for the segment that has
@@ -1441,10 +1440,14 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 		lba = lba + BLK_SIZE;
 		pba = pba + BLK_SIZE;
 		ptr = ptr + 1;
+		SetPageDirty(page);
 		put_page(page);
+		spin_unlock(&ctx->tm_page_lock);
 		index = index + 1;
 		if (TM_ENTRIES_BLK == index) {
+			spin_lock(&ctx->tm_page_lock);
 			tm_page = search_tm_kv_store(ctx, lba, &parent);
+			spin_unlock(&ctx->tm_page_lock);
 			if (!tm_page) {
 				tm_page = add_tm_entry_kv_store(ctx, lba, ref);
 				if (!tm_page) {
@@ -1612,15 +1615,18 @@ void remove_tm_blk_kv_store(struct ctx *ctx, u64 blknr)
 
 /*
  *
- * ctx->tm_flush_lock is used for two things:
- * a) refcount for every translation page
- * b) for translation page flags: lock, dirty flag.
+ * ctx->tm_page_lock is used for:
+ * a) for translation page flags: lock, dirty flag.
+ * b) For adding pages to tm store. Removing pages and
+ * searching pages from tm store.
  *
- * Note: add_block_based_translation() is called with the ctx->tm_flush_lock
- * held. When 100 translation pages collect in memory, they are
- * flushed to disk by the same function and thus under the same tm_flush_lock.
+ * Note: 
+ * When 100 translation pages collect in memory, they are
+ * flushed to disk. This flushing function also holds the
+ * tm_page_lock at certain points when it checks the page
+ * flag status.
  * 
- * write_tmbl_complete() calls this same tm_flush_lock. It will be blocked
+ * write_tmbl_complete() calls this same tm_page_lock. It will be blocked
  * till all the pages are submitted and eventually
  * add_block_based_translation() completes. The flush also has a plug
  * function, where all the pages are flushed together.
@@ -1662,7 +1668,7 @@ void write_tmbl_complete(struct bio *bio)
 		 */
 		panic("Could not read the translation entry block");
 	}
-	spin_lock(&ctx->tm_flush_lock);
+	spin_lock(&ctx->tm_page_lock);
 	/* If the page was locked, then since the page was submitted,
 	 * write has been attempted
 	 */
@@ -1675,7 +1681,7 @@ void write_tmbl_complete(struct bio *bio)
 		put_page(page);
 		bio_free_pages(bio);
 	}
-	spin_unlock(&ctx->tm_flush_lock);
+	spin_unlock(&ctx->tm_page_lock);
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
 	kmem_cache_free(ctx->tm_page_write_cache, tm_page_write_ctx);
@@ -1697,12 +1703,12 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 
 	/* Only flush if the page needs flushing */
 
-	spin_lock(&ctx->tm_flush_lock);
+	spin_lock(&ctx->tm_page_lock);
 	if (!PageDirty(page)) {
-		spin_unlock(&ctx->tm_flush_lock);
+		spin_unlock(&ctx->tm_page_lock);
 		return;
 	}
-	spin_unlock(&ctx->tm_flush_lock);
+	spin_unlock(&ctx->tm_page_lock);
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
@@ -1730,7 +1736,8 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	tm_page_write_ctx->tm_page = node_ent;
        	tm_page_write_ctx->ctx = ctx;
 	bio->bi_private = tm_page_write_ctx;
-	/* Note we are called with the ctx->tm_flush_lock held here!!
+	spin_lock(&ctx->tm_page_lock);
+	/* Note we are called with the ctx->tm_page_lock held here!!
 	 * We unlock the page here. If the page is locked again
 	 * then it was done from the write path.
 	 * page is not flushed again unless its dirtied again!
@@ -1741,6 +1748,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	 */
 	get_page(page);
 	unlock_page(page);
+	spin_unlock(&ctx->tm_page_lock);
 	submit_bio(bio);
 }
 
@@ -1979,8 +1987,9 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 	}
 	INIT_LIST_HEAD(&refnode->list);
 
-
+	spin_lock(&ctx->tm_page_lock);
 	new = search_tm_kv_store(ctx, blknr, &parent);
+	spin_unlock(&ctx->tm_page_lock);
 	if (new) {
 		list_for_each(temp, &new->reflist) {
 			tempref = list_entry(temp, struct ref_list, list);
@@ -2013,6 +2022,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 		return NULL;
 	}
 
+	spin_lock(&ctx->tm_page_lock);
 	/* Add this page to a RB tree based KV store.
 	 * Key is: blknr for this corresponding block
 	 */
@@ -2028,7 +2038,8 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 	INIT_LIST_HEAD(&new->reflist);
 	new->blknr = blknr;
 	lock_page(new->page);
-	/* This is a new page, cannot be dirty */
+	/* This is a new page, cannot be dirty, dont flush from a
+	 * parallel thread! */
 	ClearPageDirty(new->page);
 	refnode->ref = ref;
 	refcount_inc(ref);
@@ -2036,6 +2047,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 	rb_insert_color(&new->rb, root);
 	atomic_inc(&ctx->nr_tm_pages);
 	atomic_inc(&ctx->tm_flush_count);
+	spin_unlock(&ctx->tm_page_lock);
 	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_PAGES) {
 		if (spin_trylock(&ctx->flush_lock)) {
 			atomic_set(&ctx->tm_flush_count, 0);
@@ -2050,8 +2062,6 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 }
 
 /* Make the length in terms of sectors or blocks?
- *
- * This function is called with ctx->tm_flush_lock held!
  *
  */
 int add_block_based_translation(struct ctx *ctx, struct page *page, refcount_t *ref)
@@ -2247,9 +2257,7 @@ void revmap_entries_flushed(struct bio *bio)
 				atomic_dec(&ctx->zone_revmap_count);
 				wake_up(&ctx->zone_entry_flushq);
 			}
-			spin_lock(&ctx->tm_flush_lock);
 			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx->ref);
-			spin_unlock(&ctx->tm_flush_lock);
 			/* Wakeup waiters waiting on the block barrier
 			 * */
 			wake_up(&ctx->rev_blk_flushq);
@@ -2422,8 +2430,9 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	int i, j;
 	struct page * page = NULL;
 
-	spin_lock(&ctx->rev_flush_lock);
+	spin_lock(&ctx->rev_entries_lock);
 
+	i = atomic_read(&ctx->revmap_sector_count);
 	j = atomic_read(&ctx->revmap_blk_count);
 	if (0 == j) {
 		/* we need to make sure the previous block is on the
@@ -2440,14 +2449,13 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	}
 	page = ctx->revmap_page;
 	ptr = (struct stl_revmap_entry_sector *)page_address(page);
-	i = atomic_read(&ctx->revmap_sector_count);
 	ptr->extents[i].lba = lba;
     	ptr->extents[i].pba = pba;
 	ptr->extents[i].len = nrsectors;
 	atomic_inc(&ctx->revmap_blk_count);
 	atomic_inc(&ctx->revmap_sector_count);
 
-	if (j  % NR_EXT_ENTRIES_PER_SEC == 0) {
+	if (i  % NR_EXT_ENTRIES_PER_SEC == 0) {
 		ptr->crc = calculate_crc(ctx, page);
 		atomic_set(&ctx->revmap_sector_count, 0);
 		if (NR_EXT_ENTRIES_PER_BLK == j) {
@@ -2471,7 +2479,7 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 			ptr = ptr + SECTOR_SIZE;
 		}
 	}
-	spin_unlock(&ctx->rev_flush_lock);
+	spin_unlock(&ctx->rev_entries_lock);
 	return;
 }
 
@@ -2869,7 +2877,9 @@ static void do_checkpoint(struct ctx *ctx)
 	update_checkpoint(ctx);
 	flush_checkpoint(ctx);
 	blk_finish_plug(&plug);
+	spin_lock(&ctx->flush_lock);
 	flush_sit(ctx);
+	spin_unlock(&ctx->flush_lock);
 	/* We need to wait for all of this to be over before 
 	 * we proceed
 	 */
@@ -3624,6 +3634,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	spin_lock_init(&ctx->lock);
 	spin_lock_init(&ctx->sit_kv_store_lock);
 	spin_lock_init(&ctx->tm_ref_lock);
+	spin_lock_init(&ctx->rev_entries_lock);
 
 	atomic_set(&ctx->io_count, 0);
 	atomic_set(&ctx->n_reads, 0);
@@ -3638,7 +3649,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	spin_lock_init(&ctx->flush_lock);
 	printk(KERN_ERR "\n About to read metadata! 2 \n");
 	init_waitqueue_head(&ctx->tm_blk_flushq);
-	spin_lock_init(&ctx->tm_flush_lock);
+	spin_lock_init(&ctx->tm_page_lock);
 	printk(KERN_ERR "\n About to read metadata! 3 \n");
 	init_waitqueue_head(&ctx->zone_entry_flushq);
 	spin_lock_init(&ctx->flush_zone_lock);

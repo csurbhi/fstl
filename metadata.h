@@ -225,8 +225,9 @@ struct ctx {
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
 	wait_queue_head_t tm_blk_flushq;
-	spinlock_t tm_flush_lock;
+	spinlock_t tm_page_lock;
 	spinlock_t tm_ref_lock;
+	spinlock_t rev_entries_lock; 	/* protects pending_writes, revmap_[sector/blk]_count */
 	spinlock_t sit_flush_lock;
 	spinlock_t rev_flush_lock;
 	spinlock_t ckpt_lock;
