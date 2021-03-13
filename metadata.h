@@ -73,7 +73,6 @@ struct revmap_meta_inmem {
 };
 
 struct nstl_bioctx {
-	struct bio * clone;
 	struct kref ref;
 	struct bio * orig;
 	struct ctx *ctx;

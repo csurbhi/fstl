@@ -2496,7 +2496,6 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 void clone_io_done(struct kref *kref)
 {
 	struct bio *bio;
-	struct bio *clone;
 	struct nstl_bioctx * nstl_bioctx;
 	static int count;
 	struct ctx *ctx;
@@ -2505,9 +2504,7 @@ void clone_io_done(struct kref *kref)
 	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
 	ctx = nstl_bioctx->ctx;
 	bio = nstl_bioctx->orig;
-	clone = nstl_bioctx->clone;
 	bio_endio(bio);
-	bio_put(clone);
 	count++;
 	//kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
 	printk(KERN_ERR "freeing done! %d", count);
@@ -2541,12 +2538,18 @@ static void nstl_clone_endio(struct bio * clone)
 	bio = bioctx->orig;
 	ctx = bioctx->ctx;
 
+	printk(KERN_ERR "\n 1. subbioctx: %llu", subbioctx);
+	kref_put(&bioctx->ref, clone_io_done);
+	printk(KERN_ERR "\n 2. subbioctx: %llu", subbioctx);
+	//kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+
 
 	if (subbioctx->magic != SUBBIOCTX_MAGIC) {
 		/* private has been overwritten */
-		printk(KERN_ERR "\n subbioctx->magic OVERWRITTEN!");
+		printk(KERN_ERR "\n !!!!!!!!!!!!!!!!subbioctx->magic OVERWRITTEN!");
 		return;
 	}
+	return;
 
 	/* If a single segment of the bio fails, the bio should be
 	 * recorded with this status. No translation entry
@@ -2628,6 +2631,7 @@ static void nstl_clone_endio(struct bio * clone)
 		*/
 	}
 	kref_put(&bioctx->ref, clone_io_done);
+	bio_put(clone);
 	//kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
@@ -2705,7 +2709,6 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 	}
 	bioctx->orig = bio;
-	bioctx->clone = clone;
 	/* TODO: Initialize refcount in bioctx and increment it every
 	 * time bio is split or padded */
 	kref_init(&bioctx->ref);
@@ -2715,12 +2718,13 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	blk_start_plug(&plug);
 	
 	do {
-
+		subbio_ctx = NULL;
 		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
 		if (!subbio_ctx) {
 			printk(KERN_ERR "\n insufficient memory!");
 			goto fail;
 		}
+		printk(KERN_ERR "\n subbio_ctx: %llu", subbio_ctx);
 		subbio_ctx->magic = SUBBIOCTX_MAGIC;
 		spin_lock_irqsave(&ctx->lock, flags);
 		/*-------------------------------*/
