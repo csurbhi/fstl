@@ -2509,7 +2509,7 @@ void clone_io_done(struct kref *kref)
 	bio_endio(bio);
 	bio_put(clone);
 	count++;
-	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
+	//kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
 	printk(KERN_ERR "freeing done! %d", count);
 }
 
@@ -2531,7 +2531,7 @@ static void nstl_clone_endio(struct bio * clone)
 	int ret;
 	u64 wf;
 
-	subbioctx = clone->bi_private;
+	subbioctx = (struct nstl_sub_bioctx *) clone->bi_private;
 	if (!subbioctx)
 		panic("subbioctx is NULL !");
 
@@ -2617,7 +2617,6 @@ static void nstl_clone_endio(struct bio * clone)
 		}
 	}
 
-
 	/* We add the translation entry only when we know
 	 * that the write has made it to the disk
 	 */
@@ -2628,8 +2627,8 @@ static void nstl_clone_endio(struct bio * clone)
 		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
 		*/
 	}
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 	kref_put(&bioctx->ref, clone_io_done);
+	//kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
 
