@@ -2540,15 +2540,16 @@ static void nstl_clone_endio(struct bio * clone)
 
 	printk(KERN_ERR "\n 1. subbioctx: %llu", subbioctx);
 	kref_put(&bioctx->ref, clone_io_done);
-	printk(KERN_ERR "\n 2. subbioctx: %llu", subbioctx);
-	//kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
-
-
 	if (subbioctx->magic != SUBBIOCTX_MAGIC) {
 		/* private has been overwritten */
 		printk(KERN_ERR "\n !!!!!!!!!!!!!!!!subbioctx->magic OVERWRITTEN!");
 		return;
 	}
+	bio_put(clone);
+	printk(KERN_ERR "\n 2. subbioctx: %llu", subbioctx);
+	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+	printk(KERN_ERR "\n 3. subbioctx: %llu", subbioctx);
+	subbioctx = NULL;
 	return;
 
 	/* If a single segment of the bio fails, the bio should be
