@@ -2506,7 +2506,7 @@ void clone_io_done(struct kref *kref)
 	bio = nstl_bioctx->orig;
 	bio_endio(bio);
 	count++;
-	//kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
+	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
 	printk(KERN_ERR "freeing done! %d", count);
 }
 
@@ -2538,19 +2538,11 @@ static void nstl_clone_endio(struct bio * clone)
 	bio = bioctx->orig;
 	ctx = bioctx->ctx;
 
-	printk(KERN_ERR "\n 1. subbioctx: %llu", subbioctx);
-	kref_put(&bioctx->ref, clone_io_done);
 	if (subbioctx->magic != SUBBIOCTX_MAGIC) {
 		/* private has been overwritten */
 		printk(KERN_ERR "\n !!!!!!!!!!!!!!!!subbioctx->magic OVERWRITTEN!");
 		return;
 	}
-	bio_put(clone);
-	printk(KERN_ERR "\n 2. subbioctx: %llu", subbioctx);
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
-	printk(KERN_ERR "\n 3. subbioctx: %llu", subbioctx);
-	subbioctx = NULL;
-	return;
 
 	/* If a single segment of the bio fails, the bio should be
 	 * recorded with this status. No translation entry
@@ -2626,14 +2618,12 @@ static void nstl_clone_endio(struct bio * clone)
 	 */
 	if(clone->bi_status == BLK_STS_OK) {
 		printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-		 /*
-		 ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
 		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-		*/
 	}
 	kref_put(&bioctx->ref, clone_io_done);
 	bio_put(clone);
-	//kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
 
@@ -2710,6 +2700,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 	}
 	bioctx->orig = bio;
+	bioctx->ctx = ctx;
 	/* TODO: Initialize refcount in bioctx and increment it every
 	 * time bio is split or padded */
 	kref_init(&bioctx->ref);
