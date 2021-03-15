@@ -960,54 +960,72 @@ void revmap_bitmap_flushed(struct bio *);
  * wait for the bitmap to be flushed.
  * We only initiate the flush for the bitmap.
  */
-struct page * flush_revmap_bitmap(struct ctx *ctx)
+void flush_revmap_bitmap(struct ctx *ctx)
 {
 	struct bio * bio;
 	struct page *page;
 	sector_t pba;
 
+	page = ctx->revmap_bm;
+	if (!page)
+		return;
+
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
-		return NULL;
+		return;
 	}
-	page = ctx->revmap_bm;
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
-		return NULL;
+		return;
 	}
 	pba = ctx->sb->revmap_pba;
+	bio->bi_private = ctx;
 	bio->bi_end_io = revmap_bitmap_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	bio_set_dev(bio, ctx->dev->bdev);
 	spin_lock_irq(&ctx->ckpt_lock);
+	printk(KERN_ERR "\n ckpt_lock aquired!, revmap_bm pba: %llu", pba);
 	if(ctx->flag_ckpt)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock_irq(&ctx->ckpt_lock);
-	bio->bi_private = ctx;
-	submit_bio(bio);
-	return page;
+	printk(KERN_ERR "\n ckpt_lock released!");
+	generic_make_request(bio);
+	printk(KERN_ERR "\n bio submitted!");
+	return;
 }
 
 /* We initiate a flush of a checkpoint,
  * we do not wait for it to complete
  */
-struct page * flush_checkpoint(struct ctx *ctx)
+void flush_checkpoint(struct ctx *ctx)
 {
 	struct bio * bio;
 	struct page *page;
 	sector_t pba;
+	struct stl_ckpt * ckpt;
 
 	page = ctx->ckpt_page;
+	if (!page)
+		return;
+
+	ckpt = (struct stl_ckpt *)page_address(page);
+	/* TODO: GC will not change the checkpoint, but will change
+	 * the SIT Info.
+	 */
+	if (ckpt->clean)
+		return;
+
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
-		return NULL;
+		return;
 	}
 
 	/* bio_add_page sets the bi_size for the bio */
 	if (PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
-		return NULL;
+		return;
 	}
 	pba = ctx->ckpt_pba;
 	/* Record the pba for the next ckpt */
@@ -1018,13 +1036,14 @@ struct page * flush_checkpoint(struct ctx *ctx)
 	bio->bi_end_io = ckpt_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	bio_set_dev(bio, ctx->dev->bdev);
 	spin_lock_irq(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock_irq(&ctx->ckpt_lock);
 	bio->bi_private = ctx;
-	submit_bio(bio);
-	return page;
+	generic_make_request(bio);
+	return;
 }
 
 
@@ -1101,22 +1120,31 @@ u32 calculate_crc(struct ctx *ctx, struct page *page)
 	return *(u32 *)desc.ctx;
 }
 
-
+/* Only called from do_checkpoint 
+ * during dtr 
+ * we assume that sit is flushed by this point 
+ */
 void update_checkpoint(struct ctx *ctx)
 {
 	struct page * page;
 	struct stl_ckpt * ckpt;
 
 	page = ctx->ckpt_page;
+	if (!page) {
+		printk(KERN_ERR "\n NO checkpoint page found! ");
+		return;
+	}
 	ckpt = (struct stl_ckpt *) page_address(page);
-	ckpt->version += 1;
+	if (ckpt->clean == 1)
+		return;
 	ckpt->user_block_count = ctx->user_block_count;
+	ckpt->version += 1;
 	ckpt->nr_invalid_zones = ctx->nr_invalid_zones;
 	ckpt->cur_frontier_pba = ctx->write_frontier;
 	ckpt->nr_free_zones = ctx->nr_freezones;
 	ckpt->elapsed_time = get_elapsed_time(ctx);
 	ckpt->clean = 1;
-	ckpt->crc = calculate_crc(ctx, page);
+	//ckpt->crc = calculate_crc(ctx, page);
 }
 
 /* TODO: We need to do this under a lock for concurrent writes
@@ -1539,7 +1567,8 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks)
 	read_ctx->ref = ref;
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio->bi_iter.bi_sector = pba;
-	submit_bio(bio);
+	bio_set_dev(bio, ctx->dev->bdev);
+	generic_make_request(bio);
 	wait_on_refcount(ctx, ref);
     	kfree(ref);
 	kmem_cache_free(ctx->read_ctx_cache, read_ctx);
@@ -1700,6 +1729,8 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 
 	node_ent = rb_entry(node, struct tm_page, rb);
 	page = node_ent->page;
+	if (!page)
+		return;
 
 	/* Only flush if the page needs flushing */
 
@@ -1733,6 +1764,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_end_io = write_tmbl_complete;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	bio_set_dev(bio, ctx->dev->bdev);
 	tm_page_write_ctx->tm_page = node_ent;
        	tm_page_write_ctx->ctx = ctx;
 	bio->bi_private = tm_page_write_ctx;
@@ -1749,7 +1781,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	get_page(page);
 	unlock_page(page);
 	spin_unlock(&ctx->tm_page_lock);
-	submit_bio(bio);
+	generic_make_request(bio);
 }
 
 
@@ -1884,6 +1916,9 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 
 	node_ent = rb_entry(node, struct sit_page, rb);
 	page = node_ent->page;
+	if (!page)
+		return;
+
 	spin_lock(&ctx->sit_flush_lock);
 	if (unlikely(!PageDirty(page))) {
 		spin_unlock(&ctx->sit_flush_lock);
@@ -1913,6 +1948,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_end_io = write_sitbl_complete;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	bio_set_dev(bio, ctx->dev->bdev);
 	sit_ctx->ctx = ctx;
 	spin_lock_irq(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt)
@@ -1923,7 +1959,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	spin_lock(&ctx->sit_flush_lock);
 	unlock_page(page);
 	spin_unlock(&ctx->sit_flush_lock);
-	submit_bio(bio);
+	generic_make_request(bio);
 }
 
 void flush_count_sit_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
@@ -2397,7 +2433,7 @@ void flush_revmap_entries(struct ctx *ctx)
 	int sector_nr, revmap_blk_count, index;
 
 	if (!page) {
-		panic("revmap page is NULL!");
+		return;
 	}
 
 	spin_lock(&ctx->rev_flush_lock);
@@ -2658,6 +2694,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	sector_t s8, sector = bio->bi_iter.bi_sector;
 	struct blk_plug plug;
 	sector_t wf;
+	struct stl_ckpt *ckpt;
 
 	if (is_disk_full(ctx)) {
 		bio->bi_status = BLK_STS_NOSPC;
@@ -2665,6 +2702,11 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		return -1;
 	}
 
+	/* ckpt must be updated. The state of the filesystem is
+	 * unclean until checkpoint happens!
+	 */
+	ckpt = (struct stl_ckpt *)page_address(ctx->ckpt_page);
+	ckpt->clean = 0;
 	nr_sectors = bio_sectors(bio);
 	printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", nr_sectors);
 	if (unlikely(nr_sectors <= 0)) {
@@ -2874,19 +2916,27 @@ static void do_checkpoint(struct ctx *ctx)
 	 * when all the blocks are flushed!
 	 */
 	atomic_set(&ctx->ckpt_ref, 1);
-	spin_unlock_irq(&ctx->ckpt_lock);
-	blk_start_plug(&plug);
-	flush_revmap_bitmap(ctx);
-	update_checkpoint(ctx);
-	flush_checkpoint(ctx);
-	blk_finish_plug(&plug);
 	spin_lock(&ctx->flush_lock);
 	flush_sit(ctx);
 	spin_unlock(&ctx->flush_lock);
+	printk(KERN_ERR "\n sit pages flushed!");
+	spin_unlock_irq(&ctx->ckpt_lock);
+	blk_start_plug(&plug);
+	flush_revmap_bitmap(ctx);
+	printk(KERN_ERR "\n revmap_bitmap flushed!\n");
+	update_checkpoint(ctx);
+	printk(KERN_ERR "\n checkpoint updated!");
+	flush_checkpoint(ctx);
+	blk_finish_plug(&plug);
+	printk(KERN_ERR "\n checkpoint flushed!");
 	/* We need to wait for all of this to be over before 
 	 * we proceed
 	 */
+	printk(KERN_ERR "\n ckpt_ref: %d \n", atomic_read(&ctx->ckpt_ref));
 	wait_for_ckpt_completion(ctx);
+	spin_lock(&ctx->flush_lock);
+	ctx->flag_ckpt = 0;
+	spin_unlock_irq(&ctx->ckpt_lock);
 }
 
 /*
@@ -3415,7 +3465,6 @@ int read_metadata(struct ctx * ctx)
 		ret = do_recovery(ctx);
 		return ret;
 	}
-	ctx->ckpt->clean = 0;
 	printk(KERN_INFO "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
 	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
 
@@ -3458,11 +3507,12 @@ int read_metadata(struct ctx * ctx)
 	printk(KERN_INFO "\n read segment entries, free bitmap created! \n");
 	if (ctx->nr_freezones != ckpt->nr_free_zones) { 
 		/* TODO: Do some recovery here.
-		 * For now we panic!!
-		 * SIT is flushed before CP. So CP could be stale.
-		 * Update checkpoint accordingly and record!
+		 * We do not wait for confirmation of SIT pages on the
+		 * disk. we match the SIT entries to that by the
+		 * translation map. we also make sure that the ckpt
+		 * entries are based on the translation map
 		 */
-		//panic("free zones in SIT and checkpoint does not match!");
+		do_recovery(ctx);
 		put_page(ctx->sb_page);
 		put_page(ctx->ckpt_page);
 		put_page(ctx->revmap_bm);
@@ -3762,14 +3812,18 @@ free_ctx:
 static void stl_dtr(struct dm_target *dm_target)
 {
 	struct ctx *ctx = dm_target->private;
-	dm_target->private = NULL;
 
+	printk(KERN_ERR "\n Inside dtr!");
 	flush_revmap_entries(ctx);
+	printk(KERN_ERR "\n rev map entries flushed!");
 	/* At this point we are sure that the revmap
 	 * entries have made it to the disk
 	 */
 	flush_translation_blocks(ctx);
+	printk(KERN_ERR "\n translation blocks flushed!");
 	do_checkpoint(ctx);
+	printk(KERN_ERR "\n checkpoint done!");
+	return;
 	/* If we are here, then there was no crash while writing out
 	 * the disk metadata
 	 */
@@ -3782,16 +3836,24 @@ static void stl_dtr(struct dm_target *dm_target)
 		put_page(ctx->sb_page);
 	if (ctx->ckpt_page)
 		put_page(ctx->ckpt_page);
+	printk(KERN_ERR "\n metadata pages freed! \n");
 	destroy_caches(ctx);
+	printk(KERN_ERR "\n caches destroyed! \n");
 	stl_gc_thread_stop(ctx);
+	printk(KERN_ERR "\n gc thread stopped! \n");
 	bioset_exit(ctx->bs);
+	printk(KERN_ERR "\n exited from bioset \n");
 	kfree(ctx->bs);
+	printk(KERN_ERR "\n bioset memory freed \n");
 	mempool_destroy(ctx->page_pool);
-	put_page(ctx->sb_page);
-	put_page(ctx->ckpt_page);
+	printk(KERN_ERR "\n memory pool destroyed\n");
 	mempool_destroy(ctx->extent_pool);
+	printk(KERN_ERR "\n extent_pool destroyed \n");
 	dm_put_device(dm_target, ctx->dev);
+	printk(KERN_ERR "\n device mapper target released\n");
 	kfree(ctx);
+	printk(KERN_ERR "\n ctx memory freed!\n");
+	printk(KERN_ERR "\n Goodbye World!\n");
 }
 
 int nstl_zone_reset(struct ctx *ctx, struct bio *bio)
