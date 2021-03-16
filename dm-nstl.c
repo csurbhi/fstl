@@ -2314,6 +2314,10 @@ void revmap_entries_flushed(struct bio *bio)
 	switch(bio->bi_status) {
 		case BLK_STS_OK:
 			atomic_dec(&ctx->nr_pending_writes);
+			printk(KERN_ERR "\n ctx->nr_pending_writes-- done. Val: %d \n. Waking up waiters", atomic_read(&ctx->nr_pending_writes));
+			/* Wakeup waiters waiting on the block barrier
+			 * */
+			wake_up(&ctx->rev_blk_flushq);
 			revmap_bio_ctx = bio->bi_private;
 			pba = revmap_bio_ctx->revmap_pba;
 			if (pba == zone_end(ctx, pba)) {
@@ -2321,9 +2325,6 @@ void revmap_entries_flushed(struct bio *bio)
 				wake_up(&ctx->zone_entry_flushq);
 			}
 			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx->ref);
-			/* Wakeup waiters waiting on the block barrier
-			 * */
-			wake_up(&ctx->rev_blk_flushq);
 			/* refcount will be synced when all the
 			 * translation entries are flushed
 			 * to the disk. We free the page before
@@ -2524,7 +2525,7 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	ptr->extents[i].len = nrsectors;
 	atomic_inc(&ctx->revmap_blk_count);
 	atomic_inc(&ctx->revmap_sector_count);
-	printk(KERN_ERR "\n revmap entry added! i+1: %d, j+1:%d \n", atomic_read(&ctx->revmap_blk_count), atomic_read(&ctx->revmap_sector_count));
+	printk(KERN_ERR "\n revmap entry added! j+1: %d, i+1:%d \n", atomic_read(&ctx->revmap_blk_count), atomic_read(&ctx->revmap_sector_count));
 	if (NR_EXT_ENTRIES_PER_SEC == (i+1)) {
 		//ptr->crc = calculate_crc(ctx, page);
 		ptr->crc = 0;
