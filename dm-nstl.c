@@ -1185,7 +1185,9 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 void wait_on_block_barrier(struct ctx * ctx)
 {
 	spin_lock_irq(&ctx->rev_flush_lock);
-	wait_event_lock_irq(ctx->rev_blk_flushq, !atomic_read(&ctx->nr_pending_writes), ctx->rev_flush_lock);
+	if (atomic_read(&ctx->nr_pending_writes)) {
+		wait_event_lock_irq(ctx->rev_blk_flushq, !atomic_read(&ctx->nr_pending_writes), ctx->rev_flush_lock);
+	}
 	spin_unlock_irq(&ctx->rev_flush_lock);
 }
 
@@ -1195,17 +1197,20 @@ void flush_translation_blocks(struct ctx *ctx);
 void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 {
 	spin_lock_irq(&ctx->rev_flush_lock);
-	if (1 != is_revmap_block_available(ctx, pba)) {
+	if (1 == is_revmap_block_available(ctx, pba)) {
+		spin_unlock_irq(&ctx->rev_flush_lock);
+		return;
+	}
+	spin_unlock_irq(&ctx->rev_flush_lock);
 /* You could wait here for ever if the translation blocks are not
  * flushed!
  */
-		spin_unlock_irq(&ctx->rev_flush_lock);
-		if (spin_trylock(&ctx->flush_lock)) {
-			flush_translation_blocks(ctx);
-			spin_unlock(&ctx->flush_lock);
-		}
-		spin_lock_irq(&ctx->rev_flush_lock);
+	if (spin_trylock(&ctx->flush_lock)) {
+		flush_translation_blocks(ctx);
+		spin_unlock(&ctx->flush_lock);
 	}
+
+	spin_lock_irq(&ctx->rev_flush_lock);
 	/* wait until atleast one zone's revmap entries are flushed */
 	wait_event_lock_irq(ctx->rev_blk_flushq, (1 == is_revmap_block_available(ctx, pba)), ctx->rev_flush_lock);
 	spin_unlock_irq(&ctx->rev_flush_lock);
@@ -2023,11 +2028,14 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 	struct list_head *temp;
 	struct ref_list *refnode, *tempref;
 
+	printk(KERN_ERR "\n add_tm_entry_kv_store: ctx: %llu, lba: %llu \n", ctx, lba);
+
 	refnode = kmem_cache_alloc(ctx->reflist_cache, GFP_KERNEL);
 	if (!refnode) {
 		return NULL;
 	}
 	INIT_LIST_HEAD(&refnode->list);
+	printk(KERN_ERR "\n refnode created! \n");
 
 	spin_lock(&ctx->tm_page_lock);
 	new = search_tm_kv_store(ctx, blknr, &parent);
@@ -2049,6 +2057,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 		return new;
 	}
 
+	printk(KERN_ERR "\n Allocating 'new' from tm_page_cache! \n");
 	new = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
 	if (!new) {
 		kmem_cache_free(ctx->reflist_cache, refnode);
@@ -2064,6 +2073,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 		return NULL;
 	}
 
+	printk(KERN_ERR "\n TM Block read! \n");
 	spin_lock(&ctx->tm_page_lock);
 	/* Add this page to a RB tree based KV store.
 	 * Key is: blknr for this corresponding block
@@ -2183,6 +2193,10 @@ void mark_revmap_bit(struct ctx *ctx, u64 pba)
 	unsigned int blknr = 0;
 
 	pba = pba - ctx->sb->revmap_pba;
+	if (pba < 0) {
+		printk(KERN_ERR "\n WRONG PBA!!");
+		panic("Bad PBA for revmap block!");
+	}
 	bytenr = pba/BITS_IN_BYTE;
 	bitnr = pba % BITS_IN_BYTE;
 	mask = (1 << bitnr);
@@ -2412,7 +2426,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 	bio->bi_iter.bi_sector = ctx->revmap_pba;
 	printk(KERN_ERR "\n flushing revmap at pba: %llu", ctx->revmap_pba);
 
-	wait_on_revmap_block_availability(ctx, bio->bi_iter.bi_sector);
+	//wait_on_revmap_block_availability(ctx, bio->bi_iter.bi_sector);
 
 	/* Adjust the revmap_pba for the next block 
 	 * Addressing is based on 512bytes sector.
@@ -2479,63 +2493,65 @@ void flush_revmap_entries(struct ctx *ctx)
 static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, unsigned int nrsectors)
 {
 	struct stl_revmap_entry_sector * ptr = NULL;
-	int i, j;
+	int i = 0, j = 0;
 	struct page * page = NULL;
 	static int count;
 
-	//spin_lock(&ctx->rev_entries_lock);
+	spin_lock(&ctx->rev_entries_lock);
 	count++;
-	return;
 	i = atomic_read(&ctx->revmap_sector_count);
 	j = atomic_read(&ctx->revmap_blk_count);
 	printk(KERN_ERR "\n spin lock aquired! %d i:%d j:%d\n", count, i, j);
-	//if (0 == j) {
+	if (0 == j) {
 		/* we need to make sure the previous block is on the
 		 * disk. We cannot overwrite without that.
 		 */
-		//page = alloc_page(__GFP_ZERO|GFP_KERNEL);
-		//if (!page) {
+		page = alloc_page(__GFP_ZERO|GFP_KERNEL);
+		if (!page) {
 			/* TODO: Do something more. For now panicking!
 			 */
-		//	panic("Low memory, could not allocate page!");
-		//}
-		//ctx->revmap_page = page;
-		//mark_revmap_bit(ctx, ctx->revmap_pba);
-	//}
-	//page = ctx->revmap_page;
-	//ptr = (struct stl_revmap_entry_sector *)page_address(page);
-	/*
+			printk(KERN_ERR "\n Could not allocate page: Low Memory!! \n");
+			panic("Low memory, could not allocate page!");
+		}
+		ctx->revmap_page = page;
+		mark_revmap_bit(ctx, ctx->revmap_pba);
+		printk(KERN_ERR "\n Marked pba: %llu in use!", ctx->revmap_pba);
+	}
+	page = ctx->revmap_page;
+	ptr = (struct stl_revmap_entry_sector *)page_address(page);
 	ptr->extents[i].lba = lba;
     	ptr->extents[i].pba = pba;
 	ptr->extents[i].len = nrsectors;
-	*/
 	atomic_inc(&ctx->revmap_blk_count);
 	atomic_inc(&ctx->revmap_sector_count);
-	if (i == NR_EXT_ENTRIES_PER_SEC) {
+	printk(KERN_ERR "\n revmap entry added! i+1: %d, j+1:%d \n", atomic_read(&ctx->revmap_blk_count), atomic_read(&ctx->revmap_sector_count));
+	if (NR_EXT_ENTRIES_PER_SEC == (i+1)) {
 		//ptr->crc = calculate_crc(ctx, page);
+		ptr->crc = 0;
 		atomic_set(&ctx->revmap_sector_count, 0);
-		if (NR_EXT_ENTRIES_PER_BLK == j) {
+		if (NR_EXT_ENTRIES_PER_BLK == (j+1)) {
 #ifdef BARRIER_NSTL
 			/* We only need to wait here to minimize
 			 * the loss of data, in case we end up
 			 * sending translation entries for write
 			 * sooner than they can be drained.
 			 */
-			//wait_on_block_barrier(ctx);
+			printk(KERN_ERR "\n Waiting on block barrier! \n");
+			wait_on_block_barrier(ctx);
 #endif
 			/* Flush the entries to the disk */
-			//pba = ptr->extents[NR_EXT_ENTRIES_PER_SEC - 1].pba;
+			pba = ptr->extents[NR_EXT_ENTRIES_PER_SEC - 1].pba;
 			/* TODO: Alternatively, we could flag, that
 			 * this is the last pba of the zone
 			 * from the caller of this function
 			 */
-			//flush_revmap_block_disk(ctx, page, pba);
+			flush_revmap_block_disk(ctx, page, pba);
 			atomic_set(&ctx->revmap_blk_count, 0);
-		} /*else {
+		} else {
 			ptr = ptr + 1;
-		}*/
+		}
 	}
-	//spin_unlock(&ctx->rev_entries_lock);
+	spin_unlock(&ctx->rev_entries_lock);
 	return;
 }
 

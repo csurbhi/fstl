@@ -132,8 +132,10 @@ struct stl_revmap_extent {
  */
 
 #define BLK_SIZE			4096
-#define NR_EXT_ENTRIES_PER_BLK 		BLK_SIZE/sizeof(struct stl_revmap_extent)
-#define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct stl_revmap_extent)
+//#define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct stl_revmap_extent)
+#define NR_EXT_ENTRIES_PER_SEC		6
+//#define NR_EXT_ENTRIES_PER_BLK 		NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK
+#define NR_EXT_ENTRIES_PER_BLK 		48
 #define MAX_EXTENTS_PER_ZONE		65536
 struct stl_revmap_entry_sector{
 	struct stl_revmap_extent extents[NR_EXT_ENTRIES_PER_SEC];
