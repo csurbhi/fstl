@@ -936,10 +936,11 @@ void ckpt_flushed(struct bio *bio)
 	struct ctx *ctx = bio->bi_private;
 
 	spin_lock_irq(&ctx->ckpt_lock);
-	if(ctx->flag_ckpt)
+	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
+		wake_up(&ctx->ckptq);
+	}
 	spin_unlock_irq(&ctx->ckpt_lock);
-	wake_up(&ctx->ckptq);
 	if (BLK_STS_OK == bio->bi_status) {
 		/* TODO: do something more! */
 		bio_put(bio);
@@ -979,11 +980,12 @@ void flush_revmap_bitmap(struct ctx *ctx)
 		bio_put(bio);
 		return;
 	}
-	pba = ctx->sb->revmap_pba;
+	pba = ctx->sb->revmap_bm_pba;
 	bio->bi_private = ctx;
 	bio->bi_end_io = revmap_bitmap_flushed;
-	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	printk(KERN_ERR "\n flushing revmap at pba: %llu", ctx->sb->revmap_bm_pba);
+	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	spin_lock_irq(&ctx->ckpt_lock);
 	printk(KERN_ERR "\n ckpt_lock aquired!, revmap_bm pba: %llu", pba);
@@ -1027,15 +1029,16 @@ void flush_checkpoint(struct ctx *ctx)
 		bio_put(bio);
 		return;
 	}
-	pba = ctx->ckpt_pba;
 	/* Record the pba for the next ckpt */
-	if (pba == ctx->sb->ckpt1_pba)
+	if (ctx->ckpt_pba == ctx->sb->ckpt1_pba)
 		ctx->ckpt_pba = ctx->sb->ckpt2_pba;
 	else
 		ctx->ckpt_pba = ctx->sb->ckpt1_pba;
+	pba = ctx->ckpt_pba;
 	bio->bi_end_io = ckpt_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	printk(KERN_ERR "\n flushing checkpoint at lba: %llu", pba);
 	bio_set_dev(bio, ctx->dev->bdev);
 	spin_lock_irq(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt)
@@ -1764,6 +1767,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_end_io = write_tmbl_complete;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	printk(KERN_ERR "\n flushing tm block at pba: %llu", pba);
 	bio_set_dev(bio, ctx->dev->bdev);
 	tm_page_write_ctx->tm_page = node_ent;
        	tm_page_write_ctx->ctx = ctx;
@@ -1865,10 +1869,11 @@ void write_sitbl_complete(struct bio *bio)
 	ctx = sit_ctx->ctx;
 	page = sit_ctx->page;
 	spin_lock_irq(&ctx->ckpt_lock);
-	if(ctx->flag_ckpt)
+	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
+		wake_up(&ctx->ckptq);
+	}
 	spin_unlock_irq(&ctx->ckpt_lock);
-	wake_up(&ctx->ckptq);
 
 	if (bio->bi_status != BLK_STS_OK) {
 		/*TODO: Perhaps retry!! or do something more
@@ -1948,6 +1953,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_end_io = write_sitbl_complete;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
+	printk(KERN_ERR "\n flush sit node page at lba: %llu", pba);
 	bio_set_dev(bio, ctx->dev->bdev);
 	sit_ctx->ctx = ctx;
 	spin_lock_irq(&ctx->ckpt_lock);
@@ -2139,11 +2145,18 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, refcount_t *
 void revmap_bitmap_flushed(struct bio *bio)
 {
 	struct ctx *ctx = bio->bi_private;
+	
+	if(!ctx) {
+		bio_put(bio);
+		return;
+	}
+
 	spin_lock_irq(&ctx->ckpt_lock);
-	if(ctx->flag_ckpt)
+	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
+		wake_up(&ctx->ckptq);
+	}
 	spin_unlock_irq(&ctx->ckpt_lock);
-	wake_up(&ctx->ckptq);
 	switch(bio->bi_status) {
 		case BLK_STS_OK:
 			/* bio_alloc, hence bio_put */
@@ -2397,6 +2410,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 	revmap_bio_ctx->page = page;
 	revmap_bio_ctx->ref = ref;
 	bio->bi_iter.bi_sector = ctx->revmap_pba;
+	printk(KERN_ERR "\n flushing revmap at pba: %llu", ctx->revmap_pba);
 
 	wait_on_revmap_block_availability(ctx, bio->bi_iter.bi_sector);
 
@@ -2412,6 +2426,8 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 	}
 	bio->bi_end_io = revmap_entries_flushed;
 	bio->bi_private = revmap_bio_ctx;
+	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
+	bio_set_dev(bio, ctx->dev->bdev);
 	atomic_inc(&ctx->nr_pending_writes);
 	generic_make_request(bio);
 	return 0;
@@ -2925,10 +2941,10 @@ static void do_checkpoint(struct ctx *ctx)
 	flush_revmap_bitmap(ctx);
 	printk(KERN_ERR "\n revmap_bitmap flushed!\n");
 	update_checkpoint(ctx);
-	printk(KERN_ERR "\n checkpoint updated!");
+	printk(KERN_ERR "\n checkpoint updated! \n");
 	flush_checkpoint(ctx);
 	blk_finish_plug(&plug);
-	printk(KERN_ERR "\n checkpoint flushed!");
+	printk(KERN_ERR "\n checkpoint flushed! \n");
 	/* We need to wait for all of this to be over before 
 	 * we proceed
 	 */
@@ -3712,6 +3728,8 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	printk(KERN_ERR "\n About to read metadata! 4 \n");
 	init_waitqueue_head(&ctx->refq);
 	init_waitqueue_head(&ctx->rev_blk_flushq);
+	init_waitqueue_head(&ctx->tm_blk_flushq);
+	init_waitqueue_head(&ctx->ckptq);
 	ctx->mounted_time = ktime_get_real_seconds();
 	ctx->extent_tbl_root = RB_ROOT;
 	rwlock_init(&ctx->extent_tbl_lock);
@@ -3823,7 +3841,6 @@ static void stl_dtr(struct dm_target *dm_target)
 	printk(KERN_ERR "\n translation blocks flushed!");
 	do_checkpoint(ctx);
 	printk(KERN_ERR "\n checkpoint done!");
-	return;
 	/* If we are here, then there was no crash while writing out
 	 * the disk metadata
 	 */
@@ -3854,6 +3871,7 @@ static void stl_dtr(struct dm_target *dm_target)
 	kfree(ctx);
 	printk(KERN_ERR "\n ctx memory freed!\n");
 	printk(KERN_ERR "\n Goodbye World!\n");
+	return;
 }
 
 int nstl_zone_reset(struct ctx *ctx, struct bio *bio)

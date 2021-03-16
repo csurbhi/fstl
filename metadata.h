@@ -238,7 +238,6 @@ struct ctx {
 	wait_queue_head_t refq;
 	wait_queue_head_t rev_blk_flushq;
 	wait_queue_head_t ckptq;
-	sector_t revmap_pba;
 	struct page * revmap_page;
 	spinlock_t flush_lock;
 	spinlock_t sit_kv_store_lock;
@@ -250,6 +249,7 @@ struct ctx {
 	atomic_t tm_flush_count;
 	atomic_t sit_flush_count;
 	sector_t ckpt_pba;
+	sector_t revmap_pba;
 	atomic_t nr_pending_writes;
 	atomic_t nr_sit_pages;
 	atomic_t nr_tm_pages;
