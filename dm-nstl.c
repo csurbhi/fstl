@@ -455,6 +455,7 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 		else if (e->lba < lba) {
 			e->len = lba - e->lba;
 			if (e->len == 0) {
+				wake_up(&ctx->rev_blk_flushq);
 				panic("Wrong length recorded in extent map table");
 			}
 			e = stl_rb_next(e);
@@ -727,6 +728,7 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 		sit_page = add_sit_entry_kv_store(ctx, pba);
 		if (!sit_page) {
 		/* TODO: do something, low memory */
+			wake_up(&ctx->rev_blk_flushq);
 			panic("Low memory, couldnt allocate sit entry");
 		}
 	}
@@ -766,6 +768,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 
 
 	if (unlikely(NULL == ctx)) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("This is a ctx bug");
 	}
 		
@@ -774,16 +777,19 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	bitnr = zonenr % BITS_IN_BYTE;
 
 	if(unlikely(bytenr > ctx->bitmap_bytes)) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("bytenr: %d > bitmap_bytes: %d", bytenr, ctx->bitmap_bytes);
 	}
 
 
 	if (unlikely(NULL == bitmap)) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("This is a ctx freezone bitmap bug!");
 	}
 
 	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
 		/* This bit was 1 and hence already free*/
+		wake_up(&ctx->rev_blk_flushq);
 		panic("\n Trying to free an already free zone! ");
 	}
 
@@ -802,6 +808,7 @@ static void mark_zone_gc_candidate(struct ctx *ctx , int zonenr)
 
 	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
 		/* This bit was 1 and hence already free*/
+		wake_up(&ctx->rev_blk_flushq);
 		panic("\n Trying to free an already free zone! ");
 	}
 
@@ -841,6 +848,7 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 		}
 		bitnr = bitnr + 1;
 		if (bitnr == BITS_IN_BYTE) {
+			wake_up(&ctx->rev_blk_flushq);
 			panic ("Wrong byte calculation!");
 		}
 	}
@@ -885,6 +893,7 @@ try_again:
 	ctx->write_frontier = zone_start(ctx, zone_nr) + ctx->sb->zone0_pba;
 	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
 	if (ctx->write_frontier > ctx->wf_end) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("wf > wf_end!!, nr_free_sectors: %llu", ctx->free_sectors_in_wf );
 	}
 	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier + 1;
@@ -1161,6 +1170,7 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	 * Its how we split the bio
 	 */
 	if (ctx->free_sectors_in_wf < sectors_s8) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("Wrong manipulation of wf; used unavailable sectors in a log");
 	}
 	
@@ -1170,6 +1180,7 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
 		get_new_zone(ctx);
 		if (ctx->write_frontier < 0) {
+			wake_up(&ctx->rev_blk_flushq);
 			panic("No more disk space available for writing!");
 		}
 	}
@@ -1347,6 +1358,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		sit_page= add_sit_entry_kv_store(ctx, pba);
 		if (!sit_page) {
 		/* TODO: do something, low memory */
+			wake_up(&ctx->rev_blk_flushq);
 			panic("Low memory, could not allocate sit_entry");
 		}
 	}
@@ -1385,6 +1397,7 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 		sit_page = add_sit_entry_kv_store(ctx, pba);
 		if (!sit_page) {
 		/* TODO: do something, low memory */
+			wake_up(&ctx->rev_blk_flushq);
 			panic("Low memory, could not allocate sit_entry");
 		}
 	}
@@ -1422,6 +1435,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 		sit_page = add_sit_entry_kv_store(ctx, pba);
 		if (!sit_page) {
 		/* TODO: do something, low memory */
+			wake_up(&ctx->rev_blk_flushq);
 			panic("Low memory, could not allocate sit_entry");
 		}
 	}
@@ -1499,6 +1513,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 					/* TODO: try freeing some
 					 * pages here
 					 */
+					wake_up(&ctx->rev_blk_flushq);
 					panic("Low memory, while adding tm entry ");
 				}
 			}
@@ -1509,7 +1524,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	return 0;	
 }
 
-void wakeup_refcount_waiters(struct ctx *ctx);
+void wake_up_refcount_waiters(struct ctx *ctx);
 
 void read_complete(struct bio * bio)
 {
@@ -1523,7 +1538,7 @@ void read_complete(struct bio * bio)
 	spin_lock_irq(&ctx->tm_ref_lock);
 	refcount_dec(ref);
 	spin_unlock_irq(&ctx->tm_ref_lock);
-	wakeup_refcount_waiters(ctx);
+	wake_up_refcount_waiters(ctx);
 	/* bio_alloc done, hence bio_put */
 	bio_put(bio);
 }
@@ -1704,7 +1719,7 @@ void write_tmbl_complete(struct bio *bio)
 		spin_unlock_irq(&ctx->tm_ref_lock);
 		kmem_cache_free(ctx->reflist_cache, refnode);
 		/* Wakeup anyone who is waiting on this reference */
-		wakeup_refcount_waiters(ctx);
+		wake_up_refcount_waiters(ctx);
 	}
 
 	if (bio->bi_status != BLK_STS_OK) {
@@ -1712,6 +1727,7 @@ void write_tmbl_complete(struct bio *bio)
 		 * or else you will loose the translation entries.
 		 * write them some place else!
 		 */
+		wake_up(&ctx->rev_blk_flushq);
 		panic("Could not read the translation entry block");
 	}
 	spin_lock(&ctx->tm_page_lock);
@@ -2190,6 +2206,7 @@ void revmap_bitmap_flushed(struct bio *bio)
 		default:
 			/*TODO: do something, for now panicing */
 			printk(KERN_ERR "\n Could not flush revmap bitmap");
+			wake_up(&ctx->rev_blk_flushq);
 			panic("IO error while flushing revmap block! Handle this better");
 			break;
 	}
@@ -2210,6 +2227,7 @@ void mark_revmap_bit(struct ctx *ctx, u64 pba)
 	pba = pba - ctx->sb->revmap_pba;
 	if (pba < 0) {
 		printk(KERN_ERR "\n WRONG PBA!!");
+		wake_up(&ctx->rev_blk_flushq);
 		panic("Bad PBA for revmap block!");
 	}
 	bytenr = pba/BITS_IN_BYTE;
@@ -2217,8 +2235,10 @@ void mark_revmap_bit(struct ctx *ctx, u64 pba)
 	mask = (1 << bitnr);
 	blknr = bytenr / BLK_SZ;
 	/* Only one revmap bm block is stored. */
-	if (blknr != 0)
+	if (blknr != 0) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("revmap bm calculations are wrong!");
+	}
 	page = ctx->revmap_bm;
 	ptr = page_address(page);
 
@@ -2246,8 +2266,10 @@ void clear_revmap_bit(struct ctx *ctx, u64 pba)
 	mask = ~(1 << bitnr);
 	blknr = bytenr / BLK_SZ;
 	/* Only one revmap bm block is stored. */
-	if (blknr != 0)
+	if (blknr != 0) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("revmap bm calculations are wrong!");
+	}
 	page = ctx->revmap_bm;
 	ptr = page_address(page);
 
@@ -2274,8 +2296,10 @@ int is_revmap_block_available(struct ctx *ctx, u64 pba)
 	bitnr = pba % BITS_IN_BYTE;
 	blknr = bytenr / BLK_SZ;
 	/* Only one revmap bm block is stored. */
-	if (blknr != 0)
+	if (blknr != 0) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("revmap bm calculations are wrong!");
+	}
 	page = ctx->revmap_bm;
 	ptr = page_address(page);
 	ptr = ptr + bytenr;
@@ -2296,7 +2320,7 @@ int is_revmap_block_available(struct ctx *ctx, u64 pba)
 /* TODO: IMPLEMENT 
  * Analyze if we do need multiple ref queues; one per ref
  */
-void wakeup_refcount_waiters(struct ctx *ctx)
+void wake_up_refcount_waiters(struct ctx *ctx)
 {
 	wake_up(&ctx->refq);
 }
@@ -2331,7 +2355,9 @@ void revmap_entries_flushed(struct bio *bio)
 			 * Right now, simply falling through.
 			 */
 		case BLK_STS_OK:
+			spin_lock_irq(&ctx->rev_flush_lock);
 			atomic_dec(&ctx->nr_pending_writes);
+			spin_unlock_irq(&ctx->rev_flush_lock);
 			printk(KERN_ERR "\n ctx->nr_pending_writes-- done. Val: %d \n. Waking up waiters", atomic_read(&ctx->nr_pending_writes));
 			/* Wakeup waiters waiting on the block barrier
 			 * */
@@ -2365,7 +2391,7 @@ void revmap_entries_flushed(struct bio *bio)
 			spin_unlock_irq(&ctx->tm_ref_lock);
 			printk(KERN_ERR "\n Inside revmap_entries_flushed():: waiting on refcount! \n");
 			wait_on_refcount(ctx, revmap_bio_ctx->ref);
-			wakeup_refcount_waiters(ctx);
+			wake_up_refcount_waiters(ctx);
 			kfree(&revmap_bio_ctx->ref);
 			/* now we calculate the pba where the revmap
 			 * is flushed. We can reuse that pba as all
@@ -2391,6 +2417,7 @@ void revmap_entries_flushed(struct bio *bio)
 			remove_partial_entries();
 			 */
 			printk(KERN_ERR "\n revmap_entries_flushed ERROR!! \n");
+			wake_up(&ctx->rev_blk_flushq);
 			panic("revmap block write error, needs better handling!");
 			break;
 	}
@@ -2443,7 +2470,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 	revmap_bio_ctx->magic = REVMAP_PRIV_MAGIC;
 	revmap_bio_ctx->page = page;
 	revmap_bio_ctx->ref = ref;
-	/* We want to wakeup waiters that are waiting for zone revmap
+	/* We want to wake_up waiters that are waiting for zone revmap
 	 * entries being flushed. We need to know when the pba in the
 	 * <lba, pba, len> trio is the last pba of a zone
 	 */
@@ -2453,6 +2480,12 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 	bio->bi_iter.bi_sector = ctx->revmap_pba;
 	wait_on_revmap_block_availability(ctx, bio->bi_iter.bi_sector);
 	printk(KERN_ERR "\n flushing revmap at pba: %llu", ctx->revmap_pba);
+	spin_lock_irq(&ctx->rev_flush_lock);
+	/*-------------------------------------------*/
+	mark_revmap_bit(ctx, ctx->revmap_pba);
+	/*-------------------------------------------*/
+	spin_unlock_irq(&ctx->rev_flush_lock);
+	printk(KERN_ERR "\n Marked pba: %llu in use!", ctx->revmap_pba);
 
 	/* Adjust the revmap_pba for the next block 
 	 * Addressing is based on 512bytes sector.
@@ -2468,7 +2501,11 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 	bio->bi_private = revmap_bio_ctx;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
+	spin_lock_irq(&ctx->rev_flush_lock);
+	/*-------------------------------------------*/
 	atomic_inc(&ctx->nr_pending_writes);
+	/*------------------------------------------*/
+	spin_unlock_irq(&ctx->rev_flush_lock);
 	generic_make_request(bio);
 	printk(KERN_ERR "\n ctx->nr_pending_writes++ done. Val: %d \n. bio submitted!! \n", atomic_read(&ctx->nr_pending_writes));
 	return 0;
@@ -2496,8 +2533,10 @@ void flush_revmap_entries(struct ctx *ctx)
 	 * will be added
 	 */
 	revmap_blk_count = atomic_read(&ctx->revmap_blk_count) - 1;
-	sector_nr = revmap_blk_count / NR_EXT_ENTRIES_PER_SEC;
 	index = atomic_read(&ctx->revmap_sector_count);
+	/*--------------------------------------------------*/
+	spin_unlock(&ctx->rev_flush_lock);
+	sector_nr = revmap_blk_count / NR_EXT_ENTRIES_PER_SEC;
 	ptr = ptr + sector_nr;
 	/* Flush the entries to the disk */
 	pba = ptr->extents[index].pba;
@@ -2506,8 +2545,6 @@ void flush_revmap_entries(struct ctx *ctx)
 	 * from the caller of this function
 	 */
 	flush_revmap_block_disk(ctx, page, pba);
-	/*--------------------------------------------------*/
-	spin_unlock(&ctx->rev_flush_lock);
 	wait_on_block_barrier(ctx);
 }
 
@@ -2524,8 +2561,14 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 
 	spin_lock(&ctx->rev_entries_lock);
 	count++;
+	spin_lock(&ctx->rev_flush_lock);
+	/*--------------------------------------------------*/
 	i = atomic_read(&ctx->revmap_sector_count);
 	j = atomic_read(&ctx->revmap_blk_count);
+	atomic_inc(&ctx->revmap_blk_count);
+	atomic_inc(&ctx->revmap_sector_count);
+	/*--------------------------------------------------*/
+	spin_unlock(&ctx->rev_flush_lock);
 	printk(KERN_ERR "\n spin lock aquired! %d i:%d j:%d\n", count, i, j);
 	if (0 == j) {
 		/* we need to make sure the previous block is on the
@@ -2535,20 +2578,17 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 		if (!page) {
 			/* TODO: Do something more. For now panicking!
 			 */
+			wake_up(&ctx->rev_blk_flushq);
 			printk(KERN_ERR "\n Could not allocate page: Low Memory!! \n");
 			panic("Low memory, could not allocate page!");
 		}
 		ctx->revmap_page = page;
-		mark_revmap_bit(ctx, ctx->revmap_pba);
-		printk(KERN_ERR "\n Marked pba: %llu in use!", ctx->revmap_pba);
 	}
 	page = ctx->revmap_page;
 	ptr = (struct stl_revmap_entry_sector *)page_address(page);
 	ptr->extents[i].lba = lba;
     	ptr->extents[i].pba = pba;
 	ptr->extents[i].len = nrsectors;
-	atomic_inc(&ctx->revmap_blk_count);
-	atomic_inc(&ctx->revmap_sector_count);
 	printk(KERN_ERR "\n revmap entry added! i+1: %d, j+1:%d \n", atomic_read(&ctx->revmap_sector_count) , atomic_read(&ctx->revmap_blk_count));
 	if (NR_EXT_ENTRIES_PER_SEC == (i+1)) {
 		//ptr->crc = calculate_crc(ctx, page);
@@ -2622,12 +2662,16 @@ static void nstl_clone_endio(struct bio * clone)
 	u64 wf;
 
 	subbioctx = (struct nstl_sub_bioctx *) clone->bi_private;
-	if (!subbioctx)
+	if (!subbioctx) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("subbioctx is NULL !");
+	}
 
 	bioctx = subbioctx->bioctx;
-	if(!bioctx)
+	if(!bioctx) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("bioctx is NULL!");
+	}
 	bio = bioctx->orig;
 	ctx = bioctx->ctx;
 
@@ -2680,10 +2724,12 @@ static void nstl_clone_endio(struct bio * clone)
 			/* our meta information does not match that of
 			 * the disk's state. We dont know what to do.
 			 */
+				wake_up(&ctx->rev_blk_flushq);
 				panic("No space on disk! Mismanaged meta data");
 
 			case BLK_STS_RESOURCE:
 			/* TODO: memory is low. Can you try rewriting? */
+				wake_up(&ctx->rev_blk_flushq);
 				panic("Low memory, cannot function!");
 			case BLK_STS_AGAIN:
 			/* You need to try only a few number of times.
@@ -2697,6 +2743,7 @@ static void nstl_clone_endio(struct bio * clone)
 				}
 				break;
 			default:
+				wake_up(&ctx->rev_blk_flushq);
 				panic("Unknown IO error! better handling needed!");
 
 		}
@@ -2827,6 +2874,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		if (s8 > ctx->free_sectors_in_wf){
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			if (s8 <= 0) {
+				wake_up(&ctx->rev_blk_flushq);
 				panic("Should always have atleast a block left ");
 			}
 			if (!(split = bio_split(clone, s8, GFP_NOIO, ctx->bs))){
@@ -3091,8 +3139,10 @@ static void mark_zone_occupied(struct ctx *ctx , int zonenr)
 	int bytenr = zonenr / BITS_IN_BYTE;
 	int bitnr = zonenr % BITS_IN_BYTE;
 
-	if (bytenr < ctx->bitmap_bytes)
+	if (bytenr < ctx->bitmap_bytes) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("\n Trying to set an invalid bit in the free zone bitmap. bytenr > bitmap_bytes");
+	}
 
 	if ((bitmap[bytenr] & (1 << bitnr)) == 0) {
 		/* This function can be called multiple times for the
@@ -3182,6 +3232,7 @@ int read_revmap_bitmap(struct ctx *ctx)
 	sector_t blknr = pba /NR_SECTORS_IN_BLK;
 
 	if (nrblks != 1) {
+		wake_up(&ctx->rev_blk_flushq);
 		panic("\n Wrong revmap bitmap calculations!");
 	}
 	
@@ -3278,7 +3329,7 @@ int read_revmap(struct ctx *ctx)
 	refcount_dec(&ref);
 	spin_unlock_irq(&ctx->tm_ref_lock);
 	wait_on_refcount(ctx, &ref);
-	wakeup_refcount_waiters(ctx);
+	wake_up_refcount_waiters(ctx);
 	printk(KERN_ERR "\n wait is over!!");
 	return 0;
 }
