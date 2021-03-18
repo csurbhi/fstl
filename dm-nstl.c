@@ -864,10 +864,6 @@ static int get_new_zone(struct ctx *ctx)
 	unsigned long zone_nr;
 	int trial;
 
-
-	atomic_inc(&ctx->zone_revmap_count);
-	wait_on_zone_barrier(ctx);
-
 	if (ctx->write_frontier > ctx->wf_end)
 		printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->write_frontier, ctx->wf_end);
 	BUG_ON(ctx->write_frontier > ctx->wf_end);
@@ -1197,12 +1193,12 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
  */
 void wait_on_block_barrier(struct ctx * ctx)
 {
-	spin_lock_irq(&ctx->rev_flush_lock);
+	spin_lock(&ctx->rev_flush_lock);
 	if (atomic_read(&ctx->nr_pending_writes)) {
 		printk(KERN_ERR "\n waiting on block barrier, nr_pending_writes: %d", atomic_read(&ctx->nr_pending_writes));
 		wait_event_lock_irq(ctx->rev_blk_flushq, 0 >= atomic_read(&ctx->nr_pending_writes), ctx->rev_flush_lock);
 	}
-	spin_unlock_irq(&ctx->rev_flush_lock);
+	spin_unlock(&ctx->rev_flush_lock);
 }
 
 int is_revmap_block_available(struct ctx *ctx, u64 pba);
@@ -1211,12 +1207,12 @@ void flush_translation_blocks(struct ctx *ctx);
 void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 {
 
-	spin_lock_irq(&ctx->rev_flush_lock);
+	spin_lock(&ctx->rev_flush_lock);
 	if (1 == is_revmap_block_available(ctx, pba)) {
-		spin_unlock_irq(&ctx->rev_flush_lock);
+		spin_unlock(&ctx->rev_flush_lock);
 		return;
 	}
-	spin_unlock_irq(&ctx->rev_flush_lock);
+	spin_unlock(&ctx->rev_flush_lock);
 /* You could wait here for ever if the translation blocks are not
  * flushed!
  */
@@ -1226,23 +1222,11 @@ void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 		spin_unlock(&ctx->flush_lock);
 	}
 
-	spin_lock_irq(&ctx->rev_flush_lock);
+	spin_lock(&ctx->rev_flush_lock);
 	/* wait until atleast one zone's revmap entries are flushed */
 	wait_event_lock_irq(ctx->rev_blk_flushq, (1 == is_revmap_block_available(ctx, pba)), ctx->rev_flush_lock);
-	spin_unlock_irq(&ctx->rev_flush_lock);
+	spin_unlock(&ctx->rev_flush_lock);
 }
-
-void wait_on_zone_barrier(struct ctx * ctx)
-{
-	spin_lock_irq(&ctx->flush_zone_lock);
-	/* wait until atleast one zone's revmap entries are flushed */
-	wait_event_lock_irq(ctx->zone_entry_flushq, (MAX_ZONE_REVMAP >= atomic_read(&ctx->zone_revmap_count)), ctx->flush_zone_lock);
-	spin_unlock_irq(&ctx->flush_zone_lock);
-	/* TODO: do we need to call checkpoint here?
-	 * checkpoint();
-	 */
-}
-
 
 void remove_sit_blk_kv_store(struct ctx *ctx, u64 pba)
 {
@@ -2160,6 +2144,9 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, refcount_t *
 	i = 0;
 	while (i < NR_SECTORS_IN_BLK) {
 		for(j=0; j < NR_EXT_ENTRIES_PER_SEC; j++) {
+			printk(KERN_ERR "ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", ptr->extents[j].lba, ptr->extents[j].pba, ptr->extents[j].len);
+			if (ptr->extents[j].lba == ptr->extents[j].pba == ptr->extents[j].len == 0)
+				continue;
 			tm_page = add_tm_entry_kv_store(ctx, ptr->extents[j].lba, ref);
 			if (!tm_page)
 				return -ENOMEM;
@@ -2355,20 +2342,13 @@ void revmap_entries_flushed(struct bio *bio)
 			 * Right now, simply falling through.
 			 */
 		case BLK_STS_OK:
-			spin_lock_irq(&ctx->rev_flush_lock);
+			spin_lock(&ctx->rev_flush_lock);
 			atomic_dec(&ctx->nr_pending_writes);
-			spin_unlock_irq(&ctx->rev_flush_lock);
+			spin_unlock(&ctx->rev_flush_lock);
 			printk(KERN_ERR "\n ctx->nr_pending_writes-- done. Val: %d \n. Waking up waiters", atomic_read(&ctx->nr_pending_writes));
 			/* Wakeup waiters waiting on the block barrier
 			 * */
 			wake_up(&ctx->rev_blk_flushq);
-			pba = revmap_bio_ctx->revmap_pba;
-			if (pba == zone_end(ctx, pba)) {
-				spin_lock_irq(&ctx->flush_zone_lock);
-				atomic_dec(&ctx->zone_revmap_count);
-				spin_unlock_irq(&ctx->flush_zone_lock);
-				wake_up(&ctx->zone_entry_flushq);
-			}
 			printk(KERN_ERR "\n Adding block based translation!");
 			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx->ref);
 			/* refcount will be synced when all the
@@ -2392,16 +2372,18 @@ void revmap_entries_flushed(struct bio *bio)
 			printk(KERN_ERR "\n Inside revmap_entries_flushed():: waiting on refcount! \n");
 			wait_on_refcount(ctx, revmap_bio_ctx->ref);
 			wake_up_refcount_waiters(ctx);
-			kfree(&revmap_bio_ctx->ref);
+			kfree(revmap_bio_ctx->ref);
 			/* now we calculate the pba where the revmap
 			 * is flushed. We can reuse that pba as all
 			 * entries related to it are on disk in the
 			 * right place.
 			 */
 			pba = bio->bi_iter.bi_sector;
-			spin_lock_irq(&ctx->rev_flush_lock);
+			spin_lock(&ctx->rev_flush_lock);
+			/*-------------------------------------------------------------*/
 			clear_revmap_bit(ctx, pba);
-			spin_unlock_irq(&ctx->rev_flush_lock);
+			/*-------------------------------------------------------------*/
+			spin_unlock(&ctx->rev_flush_lock);
 			/* Wakeup waiters waiting on revblk bit that 
 			 * indicates that revmap block is rewritable
 			 * since all the containing translation map
@@ -2434,11 +2416,14 @@ void revmap_entries_flushed(struct bio *bio)
  * pba: pba from the lba-pba map! We send this here, because we want
  *  to identify if this is the last pba of the zone.
  */
-int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
+int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 {
 	struct bio * bio;
 	struct revmap_meta_inmem *revmap_bio_ctx;
 	refcount_t *ref;
+
+	if (!page)
+		return -ENOMEM;
 
 	ref = (refcount_t *) kzalloc(sizeof(refcount_t), GFP_KERNEL);
 	if (!ref) {
@@ -2470,27 +2455,21 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 	revmap_bio_ctx->magic = REVMAP_PRIV_MAGIC;
 	revmap_bio_ctx->page = page;
 	revmap_bio_ctx->ref = ref;
-	/* We want to wake_up waiters that are waiting for zone revmap
-	 * entries being flushed. We need to know when the pba in the
-	 * <lba, pba, len> trio is the last pba of a zone
-	 */
-	revmap_bio_ctx->revmap_pba = pba;
-
 	printk(KERN_ERR "Checking if revmap blk at pba:%llu is available for writing", ctx->revmap_pba);
 	bio->bi_iter.bi_sector = ctx->revmap_pba;
 	wait_on_revmap_block_availability(ctx, bio->bi_iter.bi_sector);
 	printk(KERN_ERR "\n flushing revmap at pba: %llu", ctx->revmap_pba);
-	spin_lock_irq(&ctx->rev_flush_lock);
+	spin_lock(&ctx->rev_flush_lock);
 	/*-------------------------------------------*/
-	mark_revmap_bit(ctx, ctx->revmap_pba);
+	mark_revmap_bit(ctx, bio->bi_iter.bi_sector);
 	/*-------------------------------------------*/
-	spin_unlock_irq(&ctx->rev_flush_lock);
-	printk(KERN_ERR "\n Marked pba: %llu in use!", ctx->revmap_pba);
-
+	spin_unlock(&ctx->rev_flush_lock);
+	printk(KERN_ERR "\n Marked pba: %llu in use! \n", ctx->revmap_pba);
 	/* Adjust the revmap_pba for the next block 
 	 * Addressing is based on 512bytes sector.
 	 */
 	ctx->revmap_pba += NR_SECTORS_IN_BLK; 
+
 	/* if we have the pba of the translation table,
 	 * then reset the revmap pba to the original value
 	 */
@@ -2501,11 +2480,12 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 	bio->bi_private = revmap_bio_ctx;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
-	spin_lock_irq(&ctx->rev_flush_lock);
+	printk(KERN_ERR "\n requesting rev_flush_lock \n");
+	spin_lock(&ctx->rev_flush_lock);
 	/*-------------------------------------------*/
 	atomic_inc(&ctx->nr_pending_writes);
 	/*------------------------------------------*/
-	spin_unlock_irq(&ctx->rev_flush_lock);
+	spin_unlock(&ctx->rev_flush_lock);
 	generic_make_request(bio);
 	printk(KERN_ERR "\n ctx->nr_pending_writes++ done. Val: %d \n. bio submitted!! \n", atomic_read(&ctx->nr_pending_writes));
 	return 0;
@@ -2518,33 +2498,11 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u64 pba)
 void flush_revmap_entries(struct ctx *ctx)
 {
 	struct page *page = ctx->revmap_page;
-	sector_t pba;
-	struct stl_revmap_entry_sector * ptr;
-	int sector_nr, revmap_blk_count, index;
 
-	if (!page) {
+	if (!page)
 		return;
-	}
 
-	spin_lock(&ctx->rev_flush_lock);
-	/*--------------------------------------------------*/
-	ptr = (struct stl_revmap_entry_sector *)page_address(page);
-	/* The revmap_blk_count is the count where the next entry
-	 * will be added
-	 */
-	revmap_blk_count = atomic_read(&ctx->revmap_blk_count) - 1;
-	index = atomic_read(&ctx->revmap_sector_count);
-	/*--------------------------------------------------*/
-	spin_unlock(&ctx->rev_flush_lock);
-	sector_nr = revmap_blk_count / NR_EXT_ENTRIES_PER_SEC;
-	ptr = ptr + sector_nr;
-	/* Flush the entries to the disk */
-	pba = ptr->extents[index].pba;
-	/* TODO: Alternatively, we could flag, that
-	 * this is the last pba of the zone
-	 * from the caller of this function
-	 */
-	flush_revmap_block_disk(ctx, page, pba);
+	flush_revmap_block_disk(ctx, page);
 	wait_on_block_barrier(ctx);
 }
 
@@ -2557,19 +2515,34 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	struct stl_revmap_entry_sector * ptr = NULL;
 	int i = 0, j = 0;
 	struct page * page = NULL;
-	static int count;
 
-	spin_lock(&ctx->rev_entries_lock);
-	count++;
+	//spin_lock(&ctx->rev_entries_lock);
 	spin_lock(&ctx->rev_flush_lock);
 	/*--------------------------------------------------*/
 	i = atomic_read(&ctx->revmap_sector_count);
 	j = atomic_read(&ctx->revmap_blk_count);
 	atomic_inc(&ctx->revmap_blk_count);
 	atomic_inc(&ctx->revmap_sector_count);
+	if (NR_EXT_ENTRIES_PER_SEC == (i+1)) {
+		atomic_set(&ctx->revmap_sector_count, 0);
+		if (NR_EXT_ENTRIES_PER_BLK == (j+1)) {
+			atomic_set(&ctx->revmap_blk_count, 0);
 	/*--------------------------------------------------*/
-	spin_unlock(&ctx->rev_flush_lock);
-	printk(KERN_ERR "\n spin lock aquired! %d i:%d j:%d\n", count, i, j);
+			spin_unlock(&ctx->rev_flush_lock);
+			printk(KERN_ERR "\n Waiting on block barrier! \n");
+			wait_on_block_barrier(ctx);
+			flush_revmap_block_disk(ctx, page);
+		}
+		else {
+			spin_unlock(&ctx->rev_flush_lock);
+		}
+
+	} else {
+		/*--------------------------------------------------*/
+		spin_unlock(&ctx->rev_flush_lock);
+	}
+	printk(KERN_ERR "\n spin lock aquired! i:%d j:%d\n", i, j);
+	/* blk count before incrementing */
 	if (0 == j) {
 		/* we need to make sure the previous block is on the
 		 * disk. We cannot overwrite without that.
@@ -2586,37 +2559,15 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	}
 	page = ctx->revmap_page;
 	ptr = (struct stl_revmap_entry_sector *)page_address(page);
-	ptr->extents[i].lba = lba;
-    	ptr->extents[i].pba = pba;
-	ptr->extents[i].len = nrsectors;
-	printk(KERN_ERR "\n revmap entry added! i+1: %d, j+1:%d \n", atomic_read(&ctx->revmap_sector_count) , atomic_read(&ctx->revmap_blk_count));
 	if (NR_EXT_ENTRIES_PER_SEC == (i+1)) {
 		//ptr->crc = calculate_crc(ctx, page);
 		ptr->crc = 0;
-		atomic_set(&ctx->revmap_sector_count, 0);
-		if (NR_EXT_ENTRIES_PER_BLK == (j+1)) {
-#ifdef BARRIER_NSTL
-			/* We only need to wait here to minimize
-			 * the loss of data, in case we end up
-			 * sending translation entries for write
-			 * sooner than they can be drained.
-			 */
-			printk(KERN_ERR "\n Waiting on block barrier! \n");
-			wait_on_block_barrier(ctx);
-#endif
-			/* Flush the entries to the disk */
-			pba = ptr->extents[NR_EXT_ENTRIES_PER_SEC - 1].pba;
-			/* TODO: Alternatively, we could flag, that
-			 * this is the last pba of the zone
-			 * from the caller of this function
-			 */
-			flush_revmap_block_disk(ctx, page, pba);
-			atomic_set(&ctx->revmap_blk_count, 0);
-		} else {
-			ptr = ptr + 1;
-		}
 	}
-	spin_unlock(&ctx->rev_entries_lock);
+	ptr->extents[i].lba = lba;
+    	ptr->extents[i].pba = pba;
+	ptr->extents[i].len = nrsectors;
+	printk(KERN_ERR "\n revmap entry added! i+1: %d, j+1:%d \n", i+1, j+1);
+	//spin_unlock(&ctx->rev_entries_lock);
 	return;
 }
 
@@ -2681,6 +2632,8 @@ static void nstl_clone_endio(struct bio * clone)
 		return;
 	}
 
+
+
 	/* If a single segment of the bio fails, the bio should be
 	 * recorded with this status. No translation entry
 	 * for the entire original bio should be maintained
@@ -2705,6 +2658,7 @@ static void nstl_clone_endio(struct bio * clone)
 
 		switch(clone->bi_status) {
 			case BLK_STS_IOERR:
+				printk(KERN_ERR "\n IO error while writing to disk! Attempting writing somewhere else!");
 				if(!nstl_zone_seq(ctx, clone->bi_iter.bi_sector))
 					mark_zone_erroneous(ctx, clone->bi_iter.bi_sector);
 			/* If this zone is sequential, then we do not have
@@ -2719,32 +2673,34 @@ static void nstl_clone_endio(struct bio * clone)
 				clone->bi_iter.bi_sector = wf; /* we use the save write frontier */
 				generic_make_request(clone);
 				return;
-
-			case BLK_STS_NOSPC:
-			/* our meta information does not match that of
-			 * the disk's state. We dont know what to do.
-			 */
-				wake_up(&ctx->rev_blk_flushq);
-				panic("No space on disk! Mismanaged meta data");
-
-			case BLK_STS_RESOURCE:
-			/* TODO: memory is low. Can you try rewriting? */
-				wake_up(&ctx->rev_blk_flushq);
-				panic("Low memory, cannot function!");
 			case BLK_STS_AGAIN:
-			/* You need to try only a few number of times.
-			 * TODO: keep count, or else you will loop on
-			 * this.
-			 */
+				/* You need to try only a few number of times.
+				 * TODO: keep count, or else you will loop on
+				 * this.
+				 */
 				subbioctx->retry++;
 				if (subbioctx->retry < 5) {
 					generic_make_request(clone);
 					return;
 				}
 				break;
+
+			case BLK_STS_NOSPC:
+			/* our meta information does not match that of
+			 * the disk's state. We dont know what to do.
+			 */
+				wake_up(&ctx->rev_blk_flushq);
+				printk(KERN_ERR "No space on disk! Mismanaged meta data");
+				break;
+			case BLK_STS_RESOURCE:
+			/* TODO: memory is low. Can you try rewriting? */
+				wake_up(&ctx->rev_blk_flushq);
+				printk(KERN_ERR "Low memory, cannot function!");
+				break;
 			default:
 				wake_up(&ctx->rev_blk_flushq);
-				panic("Unknown IO error! better handling needed!");
+				printk(KERN_ERR "Unknown IO error! better handling needed!");
+				break;
 
 		}
 		
@@ -2752,7 +2708,6 @@ static void nstl_clone_endio(struct bio * clone)
 			bio->bi_status = clone->bi_status;
 		}
 	}
-
 	/* We add the translation entry only when we know
 	 * that the write has made it to the disk
 	 */
@@ -2764,6 +2719,9 @@ static void nstl_clone_endio(struct bio * clone)
 	kref_put(&bioctx->ref, clone_io_done);
 	bio_put(clone);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+	return;
+
+
 }
 
 
@@ -3810,7 +3768,6 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	atomic_set(&ctx->nr_failed_writes, 0);
 	atomic_set(&ctx->revmap_blk_count, 0);
 	atomic_set(&ctx->revmap_sector_count, 0);
-	atomic_set(&ctx->zone_revmap_count, 0);
 	ctx->target = 0;
 	printk(KERN_ERR "\n About to read metadata! 1 \n");
 	spin_lock_init(&ctx->flush_lock);
@@ -3818,8 +3775,6 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	init_waitqueue_head(&ctx->tm_blk_flushq);
 	spin_lock_init(&ctx->tm_page_lock);
 	printk(KERN_ERR "\n About to read metadata! 3 \n");
-	init_waitqueue_head(&ctx->zone_entry_flushq);
-	spin_lock_init(&ctx->flush_zone_lock);
 	atomic_set(&ctx->nr_pending_writes, 0);
 	atomic_set(&ctx->nr_sit_pages, 0);
 	atomic_set(&ctx->nr_tm_pages, 0);
