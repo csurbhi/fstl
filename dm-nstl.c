@@ -2720,8 +2720,6 @@ static void nstl_clone_endio(struct bio * clone)
 	bio_put(clone);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 	return;
-
-
 }
 
 
@@ -2770,7 +2768,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	ckpt = (struct stl_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
 	nr_sectors = bio_sectors(bio);
-	printk(KERN_INFO "\n ******* Inside map_write_io, requesting sectors: %d", nr_sectors);
+	printk(KERN_INFO "\n ******* Inside map_write_io, requesting lba: %llu sectors: %d", bio->bi_iter.bi_sector, nr_sectors);
 	if (unlikely(nr_sectors <= 0)) {
 		printk(KERN_ERR "\n Less than 0 sectors (%d) requested!, nbios: %u", nr_sectors, nbios);
 		bio->bi_status = BLK_STS_OK;
@@ -2820,7 +2818,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 			printk(KERN_ERR "\n insufficient memory!");
 			goto fail;
 		}
-		printk(KERN_ERR "\n subbio_ctx: %llu", subbio_ctx);
+		//printk(KERN_ERR "\n subbio_ctx: %llu", subbio_ctx);
 		subbio_ctx->magic = SUBBIOCTX_MAGIC;
 		spin_lock_irqsave(&ctx->lock, flags);
 		/*-------------------------------*/
@@ -2839,6 +2837,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 				printk(KERN_ERR "\n failed at bio_split! ");
 				goto fail;
 			}
+			bio_chain(split, clone);
 			/* Add a translation map entry for shortened
 			 * length
 			 */
@@ -2846,6 +2845,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		} 
 		else {
 			split = clone;
+			clone->bi_iter.bi_size = s8 << 9;
 			/* s8 might be bigger than nr_sectors. We want
 			 * to maintain the exact length in the
 			 * translation map, not padded entry
@@ -2863,6 +2863,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		subbio_ctx->extent.lba = sector;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
+
 		split->bi_private = subbio_ctx;
 		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
 		split->bi_end_io = nstl_clone_endio;
