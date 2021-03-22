@@ -745,9 +745,11 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	spin_unlock(&ctx->sit_kv_store_lock);
 
 	spin_lock_irqsave(&ctx->lock, flags);
+	/*-----------------------------------------------*/
 	ctx->nr_invalid_zones++;
 	pba = get_new_zone(ctx);
 	destn_zonenr = get_zone_nr(ctx, pba);
+	/*-----------------------------------------------*/
 	spin_unlock_irqrestore(&ctx->lock, flags);
 	if (0 > pba) {
 		printk(KERN_INFO "No more disk space available for writing!");
@@ -858,6 +860,8 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 void wait_on_zone_barrier(struct ctx *);
 static void add_ckpt_new_wf(struct ctx *, sector_t);
 /* moves the write frontier, returns the LBA of the packet trailer
+ *
+ * Always called with the ctx->lock held
 */
 static int get_new_zone(struct ctx *ctx)
 {
@@ -1157,7 +1161,7 @@ void update_checkpoint(struct ctx *ctx)
 	//ckpt->crc = calculate_crc(ctx, page);
 }
 
-/* TODO: We need to do this under a lock for concurrent writes
+/* Always called with the ctx->lock held
  */
 static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 {
@@ -2712,9 +2716,14 @@ static void nstl_clone_endio(struct bio * clone)
 	 * that the write has made it to the disk
 	 */
 	if(clone->bi_status == BLK_STS_OK) {
+		unsigned long flags = 0;
 		printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		spin_lock_irqsave(&ctx->lock, flags);
+		/*-------------------------------*/
 		ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		/*-------------------------------*/
+		spin_unlock_irqrestore(&ctx->lock, flags);
+		//add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
 	}
 	kref_put(&bioctx->ref, clone_io_done);
 	bio_put(clone);
@@ -2751,7 +2760,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	volatile int nbios = 0;
 	unsigned long flags;
 	unsigned nr_sectors = bio_sectors(bio);
-	sector_t s8, sector = bio->bi_iter.bi_sector;
+	sector_t s8, lba = bio->bi_iter.bi_sector;
 	struct blk_plug plug;
 	sector_t wf;
 	struct stl_ckpt *ckpt;
@@ -2812,6 +2821,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	blk_start_plug(&plug);
 	
 	do {
+		nr_sectors = bio_sectors(clone);
 		subbio_ctx = NULL;
 		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
 		if (!subbio_ctx) {
@@ -2837,7 +2847,6 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 				printk(KERN_ERR "\n failed at bio_split! ");
 				goto fail;
 			}
-			bio_chain(split, clone);
 			/* Add a translation map entry for shortened
 			 * length
 			 */
@@ -2845,7 +2854,6 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		} 
 		else {
 			split = clone;
-			clone->bi_iter.bi_size = s8 << 9;
 			/* s8 might be bigger than nr_sectors. We want
 			 * to maintain the exact length in the
 			 * translation map, not padded entry
@@ -2858,34 +2866,31 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
     		
 
 		/* Next we fetch the LBA that our DM got */
-		sector = bio->bi_iter.bi_sector;
+		lba = bio->bi_iter.bi_sector;
 		kref_get(&bioctx->ref);
-		subbio_ctx->extent.lba = sector;
+		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
 
-		split->bi_private = subbio_ctx;
 		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
+		split->bi_private = subbio_ctx;
 		split->bi_end_io = nstl_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
 		generic_make_request(split);
-		nr_sectors = bio_sectors(clone);
 	} while (split != clone);
 
-	/* When we did not split, we might need padding when the 
-	 * original request is not block aligned.
-	 * Note: we always split at block aligned. The remaining
-	 * portion may not be block aligned.
-	 *
+	/* We might need padding when the original request is not block
+	 * aligned.
 	 * We want to zero fill the padded portion of the last page.
 	 * We know that we always have a page corresponding to a bio.
-	 * The page is always block aligned.
+	 * A page is always 4096 bytes, but the request may be smaller.
 	 */
 	if (nr_sectors < s8) {
 		/* We need to zero out the remaining bytes
 		 * from the last page in the bio
 		 */
-		pad = bio_clone_fast(bio, GFP_KERNEL, NULL);
+		dump_stack();
+		pad = bio_clone_fast(clone, GFP_KERNEL, NULL);
 		pad->bi_iter.bi_size = s8 << 9;
 		/* We use the saved write frontier */
 		pad->bi_iter.bi_sector = wf;

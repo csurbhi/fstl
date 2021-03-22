@@ -49,7 +49,7 @@ int write_to_disk(int fd, char *buf, int len, int sectornr)
 
 	ret = lseek(fd, offset, SEEK_SET);
 	if (ret < 0) {
-		perror("Error in lseek: ");
+		perror("Error in lseek: \n");
 		exit(errno);
 	}
 	ret = write(fd, buf, len);
@@ -284,13 +284,17 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 	char buffer[4096];
 	int i, ret;
 
+	printf("\n Writing zeroed blks: %d", nr_blks);
+	
 	memset(buffer, 0, 4096);
 	for (i=0; i<nr_blks; i++) {
+		//printf("\n i: %d ", i);
 	    	ret = write_to_disk(fd, buffer, BLK_SZ, pba);
 		if (0 > ret) {
 			printf("\n Could not write zeroed blk! \n");
 			exit(ret);
 		}
+		pba = pba + 8;
 	}
 }
 
@@ -350,6 +354,7 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	printf("\n sb->ckpt2_pba: %u", sb->ckpt2_pba);
 	sb->sit_pba = get_sit_pba(sb);
 	sb->zone0_pba = get_zone0_pba(sb);
+	printf("\n sb->zone0_pba: %d", sb->zone0_pba);
 	sb->max_pba = get_max_pba(sb);
 	printf("\n sb->max_pba: %d", sb->max_pba);
 	sb->crc = 0;
@@ -542,6 +547,8 @@ int main()
 	free(sb2);
 	write_revmap(fd, sb1->revmap_pba, sb1->blk_count_revmap);
 	nrblks = get_nr_blks(sb1);
+	printf("\n nrblks: %lu", nrblks);
+	//write_zeroed_blks(fd, 0, nrblks);
 	printf("\n nrblks: %lu", nrblks);
 	write_tm(fd, sb1->tm_pba, sb1->blk_count_tm);
 	write_revmap_bitmap(fd, sb1->revmap_bm_pba, sb1->blk_count_revmap_bm);
