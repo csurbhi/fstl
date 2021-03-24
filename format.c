@@ -320,6 +320,24 @@ void write_revmap_bitmap(int fd, sector_t revmap_bm_pba, unsigned nr_blks)
 	write_zeroed_blks(fd, revmap_bm_pba, nr_blks);
 }
 
+unsigned long long get_current_frontier(struct stl_sb *sb)
+{
+	unsigned long sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
+	unsigned long sit_end_blk_nr = sit_end_pba / NR_SECTORS_IN_BLK;
+	unsigned int sit_zone_nr = sit_end_blk_nr / NR_BLKS_PER_ZONE;
+	if (sit_end_blk_nr % NR_BLKS_PER_ZONE > 0) {
+		sit_zone_nr = sit_zone_nr + 1;
+	}
+	
+	/* The data zones start in the next zone of that of the last
+	 * metadata zone
+	 */
+	printf("\n sit_end_pba: %ld", sit_end_pba);
+	printf("\n sit_end_blk_nr: %ld", sit_end_blk_nr);
+	printf("\n sit_zone_nr: %d", sit_zone_nr);
+	return (sit_zone_nr + 1) * (1 << (sb->log_zone_size - sb->log_sector_size));
+}
+
 struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 {
 	struct stl_sb *sb;
@@ -381,23 +399,7 @@ void set_bitmap(char *bitmap, unsigned int nrzones, char ch)
 	memset(bitmap, ch, nrbytes);
 }
 
-unsigned long long get_current_frontier(struct stl_sb *sb)
-{
-	unsigned long sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
-	unsigned long sit_end_blk_nr = sit_end_pba / NR_SECTORS_IN_BLK;
-	unsigned int sit_zone_nr = sit_end_blk_nr / NR_BLKS_PER_ZONE;
-	if (sit_end_blk_nr % NR_BLKS_PER_ZONE > 0) {
-		sit_zone_nr = sit_zone_nr + 1;
-	}
-	
-	/* The data zones start in the next zone of that of the last
-	 * metadata zone
-	 */
-	printf("\n sit_end_pba: %ld", sit_end_pba);
-	printf("\n sit_end_blk_nr: %ld", sit_end_blk_nr);
-	printf("\n sit_zone_nr: %d", sit_zone_nr);
-	return (sit_zone_nr + 1) * (1 << (sb->log_zone_size - sb->log_sector_size));
-}
+
 
 unsigned long long get_user_block_count(struct stl_sb *sb)
 {

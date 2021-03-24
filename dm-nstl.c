@@ -291,7 +291,7 @@ static inline void * stl_malloc(size_t size, gfp_t flags)
 
 static int stl_gc(void)
 {
-	printk(KERN_INFO "\n GC thread polling after every few seconds ");
+	//printk(KERN_INFO "\n GC thread polling after every few seconds ");
 	return 0;
 }
 
@@ -568,7 +568,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 			}
 			pba = e->pba + lba - e->lba;
 			split->bi_iter.bi_sector = pba;
-			bio_set_dev(bio, ctx->dev->bdev);
+			bio_set_dev(split, ctx->dev->bdev);
 			//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
 			generic_make_request(split);
 		}
