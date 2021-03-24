@@ -193,10 +193,14 @@ static struct extent *_stl_rb_geq(struct rb_root *root, off_t lba)
 		}
 		if (lba < e->lba) {
 			node = node->rb_left;
-		} else if (lba >= e->lba + e->len) {
-			node = node->rb_right;
 		} else {
-			return e;
+			if (lba >= e->lba + e->len) {
+				node = node->rb_right;
+			} else {
+				/* lba falls within "e"
+				 * (lba >= e->lba) && (lba < (e->lba + e->len)) */
+				return e;
+			}
 		}
 	}
 	return higher;
@@ -498,6 +502,7 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 	extent_get(new, 1, IN_MAP);
 	stl_rb_insert(ctx, new);
 	write_unlock_irqrestore(&ctx->extent_tbl_lock, flags);
+	printk(KERN_ERR "\n Inserted (lba: %llu pba: %llu len: %d) ", new->lba, new->pba, new->len);
 	if (split) {
 		mempool_free(split, ctx->extent_pool);
 		return 0;
@@ -518,7 +523,7 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 {
 	struct bio *split = NULL;
-	sector_t sector;
+	sector_t lba, pba;
 	struct extent *e;
 	unsigned nr_sectors, overlap;
 
@@ -526,50 +531,47 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 
 	atomic_inc(&ctx->n_reads);
 	while(split != bio) {
-		sector = bio->bi_iter.bi_sector;
-		e = stl_rb_geq(ctx, sector);
+		lba = bio->bi_iter.bi_sector;
+		e = stl_rb_geq(ctx, lba);
 		nr_sectors = bio_sectors(bio);
 
 		/* note that beginning of extent is >= start of bio */
 		/* [----bio-----] [eeeeeee]  */
-		if (e == NULL || e->lba >= sector + nr_sectors)  {
+		if (e == NULL || e->lba >= lba + nr_sectors)  {
 			//printk(KERN_ERR "\n Case of no overlap");
 			zero_fill_bio(bio);
 			bio_endio(bio);
 			break;
 		}
-		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
-		   [---------bio------] */
-		else if (e->lba <= sector) {
-			//printk(KERN_ERR "\n e->lba <= sector");
-			overlap = e->lba + e->len - sector;
-			if (overlap < nr_sectors)
-				nr_sectors = overlap;
-			sector = e->pba + sector - e->lba;
-		}
-		/*             [eeeeeeeeeeee]
+		if (e->lba > lba) {
+		/*               [eeeeeeeeeeee]
 			       [---------bio------] */
-		else {
-			//printk(KERN_ERR "\n e->lba >  sector");
-			nr_sectors = e->lba - sector;
+			//printk(KERN_ERR "\n e->lba >  lba");
+			nr_sectors = e->lba - lba;
 			split = bio_split(bio, nr_sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, bio);
 			zero_fill_bio(split);
 			bio_endio(split);
 			continue;
 		}
-
-		if (nr_sectors < bio_sectors(bio)) {
-			split = bio_split(bio, nr_sectors, GFP_NOIO, &fs_bio_set);
-			bio_chain(split, bio);
-		} else {
-			split = bio;
+		else { //(e->lba <= lba)
+		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
+		     [---------bio------] */
+			//printk(KERN_ERR "\n e->lba <= lba");
+			overlap = e->lba + e->len - lba;
+			if (overlap < nr_sectors) {
+				split = bio_split(bio, overlap, GFP_NOIO, &fs_bio_set);
+				bio_chain(split, bio);
+			} else {
+				split = bio;
+				printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d", lba, (e->pba + lba - e->lba), overlap);
+			}
+			pba = e->pba + lba - e->lba;
+			split->bi_iter.bi_sector = pba;
+			bio_set_dev(bio, ctx->dev->bdev);
+			//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
+			generic_make_request(split);
 		}
-
-		split->bi_iter.bi_sector = sector;
-		bio_set_dev(bio, ctx->dev->bdev);
-		//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
-		generic_make_request(split);
 	}
 	//printk(KERN_INFO "\n Read end");
 	return 0;

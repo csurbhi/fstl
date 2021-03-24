@@ -178,10 +178,12 @@ static struct extent *_stl_rb_geq(struct rb_root *root, off_t lba)
 		}
 		if (lba < e->lba) {
 			node = node->rb_left;
-		} else if (lba >= e->lba + e->len) {
-			node = node->rb_right;
 		} else {
-			return e;
+			if (lba >= e->lba + e->len) {
+				node = node->rb_right;
+			} else {
+				return e;
+			}
 		}
 	}
 	return higher;
