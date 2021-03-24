@@ -564,7 +564,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 				bio_chain(split, bio);
 			} else {
 				split = bio;
-				printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d", lba, (e->pba + lba - e->lba), overlap);
+				//printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d", lba, (e->pba + lba - e->lba), overlap);
 			}
 			pba = e->pba + lba - e->lba;
 			split->bi_iter.bi_sector = pba;
@@ -2732,7 +2732,7 @@ static void nstl_clone_endio(struct bio * clone)
 	 */
 	if(clone->bi_status == BLK_STS_OK) {
 		unsigned long flags = 0;
-		printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		//printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
 		spin_lock_irqsave(&ctx->lock, flags);
 		/*-------------------------------*/
 		ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
@@ -2792,7 +2792,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	ckpt = (struct stl_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
 	nr_sectors = bio_sectors(bio);
-	printk(KERN_INFO "\n ******* Inside map_write_io, requesting lba: %llu sectors: %d", bio->bi_iter.bi_sector, nr_sectors);
+	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting lba: %llu sectors: %d", bio->bi_iter.bi_sector, nr_sectors);
 	if (unlikely(nr_sectors <= 0)) {
 		printk(KERN_ERR "\n Less than 0 sectors (%d) requested!, nbios: %u", nr_sectors, nbios);
 		bio->bi_status = BLK_STS_OK;
@@ -2831,7 +2831,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	 * time bio is split or padded */
 	kref_init(&bioctx->ref);
 
-	printk(KERN_ERR "\n write frontier: %llu free_sectors_in_wf: %llu", ctx->write_frontier, ctx->free_sectors_in_wf);
+	//printk(KERN_ERR "\n write frontier: %llu free_sectors_in_wf: %llu", ctx->write_frontier, ctx->free_sectors_in_wf);
 
 	blk_start_plug(&plug);
 	
@@ -2853,7 +2853,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		 * ctx->nr_free_sectors_in_wf
 		 */
 		if (s8 > ctx->free_sectors_in_wf){
-			printk(KERN_ERR "SPLITTING!!!!!!!! s8: %d ctx->free_sectors_in_wf: %d", s8, ctx->free_sectors_in_wf);
+			//printk(KERN_ERR "SPLITTING!!!!!!!! s8: %d ctx->free_sectors_in_wf: %d", s8, ctx->free_sectors_in_wf);
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			if (s8 <= 0) {
 				wake_up(&ctx->rev_blk_flushq);
