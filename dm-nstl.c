@@ -399,59 +399,6 @@ int stl_gc_thread_stop(struct ctx *ctx)
 	return 0;
 }
 
-static int existing_node_extended(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
-{
-	struct extent *e = NULL;
-	struct rb_root *root = &ctx->extent_tbl_root;
-        struct rb_node *node = root->rb_node;  /* top of the tree */
-	int ret = 0;
-
-	write_lock_irqsave(&ctx->extent_tbl_lock, flags);
-        while (node) {
-                struct extent *e = container_of(node, struct extent, rb);
-                if (lba < e->lba) {
-			/* 
-			 * 	   ----------
-			 * ++++
-			 */
-                        node = node->rb_left;
-                } else { 
-			/* lba > e->lba */
-			if (lba > e->lba + e->len) {
-				/*
-				 * ---------
-				 *  		++++++
-				 */
-                        	node = node->rb_right;
-	                } else if (lba == e->lba + e->len) {
-				if (pba == e->pba + e->len) {
-					/* Simplest case:
-					 * [--][++++] -> [--++++]
-					 * no spliting needed. no addition of new node
-					 * needed
-					 */
-					e->len = e->len + len;
-					printk(KERN_ERR "\n merged! e->lba: %llu, e->pba: %llu e->len: %lu", e->lba, e->pba, e->len);
-					ret = 1;
-				} else {
-					break;
-				}
-
-        	        } else {
-				/*
-				 * lba > e->lba and lba < e->lba + e->len
-				 *
-				 * ---------------
-				 *     +++++++++++++++++
-				 */
-				break;
-			}
-		}
-	}
-	write_unlock_irqrestore(&ctx->extent_tbl_lock, flags);
-	return ret;
-}
-
 
 
 
@@ -470,27 +417,30 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 
 	BUG_ON(len == 0);
 
-	if (existing_node_extended(ctx, lba, pba)) {
-		return 0;
-	}
-
-	if (unlikely(!(split = mempool_alloc(ctx->extent_pool, GFP_NOIO)))) {
-		printk(KERN_ERR "\n %s %d No memory available for split!", __func__, __LINE__);
+	if (unlikely(!(split = mempool_alloc(ctx->extent_pool, GFP_NOIO))))
 		return -ENOMEM;
-	}
 
 	if (unlikely(!(new = mempool_alloc(ctx->extent_pool, GFP_NOIO)))) {
-		printk(KERN_ERR "\n %s %d No memory available for new!", __func__, __LINE__);
 		mempool_free(split, ctx->extent_pool);
 		return -ENOMEM;
 	}
 
 	write_lock_irqsave(&ctx->extent_tbl_lock, flags);
-
 	e = _stl_rb_geq(&ctx->extent_tbl_root, lba);
 
 	if (e != NULL) {
-		
+		if (e->lba + e->len == lba) {
+			e->len = e->len + len;
+			/* Simplest case:
+			 * [--][++++] -> [--++++]
+			 * no spliting needed. no addition of new node
+			 * needed
+			 */
+			write_unlock_irqrestore(&ctx->extent_tbl_lock, flags);
+			mempool_free(split, ctx->extent_pool);
+			mempool_free(new, ctx->extent_pool);
+			return 0;
+		}
 
 		/* [----------------------]        e     new     split
 		 *        [++++++]           -> [-----][+++++][--------]
@@ -506,7 +456,6 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 			extent_init(split, new_lba, new_pba, new_len);
 			extent_get(split, 1, IN_MAP);
 			stl_rb_insert(ctx, split);
-			printk(KERN_ERR "\n split!!!!!!!!!!!");
 
 			e = new;
 			split = NULL;
@@ -521,7 +470,6 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 				panic("Wrong length recorded in extent map table");
 			}
 			e = stl_rb_next(e);
-			printk(KERN_ERR "\n len adjusted!, new inserted! ");
 			/* no split needed */
 		}
 		/*          [------]
@@ -543,14 +491,12 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 			e->pba += diff;
 			e->len -= diff;
 			/* no split needed */
-			printk(KERN_ERR "\n e adjusted!! ");
 		}
 	}
 
 	extent_init(new, lba, pba, len);
 	extent_get(new, 1, IN_MAP);
 	stl_rb_insert(ctx, new);
-	printk(KERN_ERR "\n new inserted!");
 	write_unlock_irqrestore(&ctx->extent_tbl_lock, flags);
 	if (split) {
 		mempool_free(split, ctx->extent_pool);
