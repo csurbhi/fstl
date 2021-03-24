@@ -353,7 +353,7 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	sb->ckpt2_pba = sb->ckpt1_pba + NR_SECTORS_IN_BLK;
 	printf("\n sb->ckpt2_pba: %u", sb->ckpt2_pba);
 	sb->sit_pba = get_sit_pba(sb);
-	sb->zone0_pba = get_zone0_pba(sb);
+	sb->zone0_pba = get_current_frontier(sb);
 	printf("\n sb->zone0_pba: %d", sb->zone0_pba);
 	sb->max_pba = get_max_pba(sb);
 	printf("\n sb->max_pba: %d", sb->max_pba);

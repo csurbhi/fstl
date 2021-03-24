@@ -160,11 +160,9 @@ static void extent_init(struct extent *e, sector_t lba, sector_t pba, unsigned l
 static sector_t zone_start(struct ctx *ctx, sector_t pba) {
 	return pba - (pba % ctx->nr_lbas_in_zone);
 }
+
 static sector_t zone_end(struct ctx *ctx, sector_t pba) {
-	return zone_start(ctx, pba) + ctx->nr_lbas_in_zone;
-}
-static unsigned room_in_zone(struct ctx *ctx, sector_t sector) {
-	return zone_end(ctx, sector) - sector + 1;   
+	return zone_start(ctx, pba) + ctx->nr_lbas_in_zone - 1;
 }
 
 /* zone numbers begin from 0.
@@ -172,7 +170,7 @@ static unsigned room_in_zone(struct ctx *ctx, sector_t sector) {
  */
 static unsigned get_zone_nr(struct ctx *ctx, sector_t sector) {
 	sector_t zone_begins = zone_start(ctx, sector);
-	return (zone_begins / ctx->nr_lbas_in_zone);
+	return ( (zone_begins - ctx->sb->zone0_pba) / ctx->nr_lbas_in_zone);
 }
 
 
@@ -431,6 +429,19 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 	e = _stl_rb_geq(&ctx->extent_tbl_root, lba);
 
 	if (e != NULL) {
+		if (e->lba + e->len == lba) {
+			e->len = e->len + len;
+			/* Simplest case:
+			 * [--][++++] -> [--++++]
+			 * no spliting needed. no addition of new node
+			 * needed
+			 */
+			write_unlock_irqrestore(&ctx->extent_tbl_lock, flags);
+			mempool_free(split, ctx->extent_pool);
+			mempool_free(new, ctx->extent_pool);
+			return 0;
+		}
+
 		/* [----------------------]        e     new     split
 		 *        [++++++]           -> [-----][+++++][--------]
 		 */
@@ -868,9 +879,6 @@ static int get_new_zone(struct ctx *ctx)
 	unsigned long zone_nr;
 	int trial;
 
-	if (ctx->write_frontier > ctx->wf_end)
-		printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->write_frontier, ctx->wf_end);
-	BUG_ON(ctx->write_frontier > ctx->wf_end);
 	trial = 0;
 try_again:
 	zone_nr = get_next_freezone_nr(ctx);
@@ -890,8 +898,9 @@ try_again:
 	/* get_next_freezone_nr() starts from 0. We need to adjust
 	 * the pba with that of the actual first PBA of data segment 0
 	 */
-	ctx->write_frontier = zone_start(ctx, zone_nr) + ctx->sb->zone0_pba;
+	ctx->write_frontier = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
+	printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %llu zone_nr: %d write_frontier: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->write_frontier, ctx->wf_end);
 	if (ctx->write_frontier > ctx->wf_end) {
 		wake_up(&ctx->rev_blk_flushq);
 		panic("wf > wf_end!!, nr_free_sectors: %llu", ctx->free_sectors_in_wf );
@@ -1178,6 +1187,10 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
 	ctx->user_block_count -= sectors_s8 / NR_SECTORS_IN_BLK;
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
+		if ((ctx->write_frontier - 1) != ctx->wf_end) {
+			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->write_frontier, ctx->wf_end);
+			BUG_ON(ctx->write_frontier != (ctx->wf_end + 1));
+		}
 		get_new_zone(ctx);
 		if (ctx->write_frontier < 0) {
 			wake_up(&ctx->rev_blk_flushq);
@@ -2588,14 +2601,14 @@ void clone_io_done(struct kref *kref)
 	static int count;
 	struct ctx *ctx;
 
-	printk(KERN_ERR "I/O done, freeing....! %d", count);
+	//printk(KERN_ERR "I/O done, freeing....! %d", count);
 	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
 	ctx = nstl_bioctx->ctx;
 	bio = nstl_bioctx->orig;
 	bio_endio(bio);
 	count++;
 	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
-	printk(KERN_ERR "freeing done! %d", count);
+	//printk(KERN_ERR "freeing done! %d", count);
 }
 
 /* can you create the translation entry here?
@@ -2838,6 +2851,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		 * ctx->nr_free_sectors_in_wf
 		 */
 		if (s8 > ctx->free_sectors_in_wf){
+			printk(KERN_ERR "SPLITTING!!!!!!!! s8: %d ctx->free_sectors_in_wf: %d", s8, ctx->free_sectors_in_wf);
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			if (s8 <= 0) {
 				wake_up(&ctx->rev_blk_flushq);
@@ -3305,9 +3319,12 @@ sector_t get_zone_pba(struct stl_sb * sb, unsigned int segnr)
 }
 
 
+/* 
+ * Returns the pba of the last sector in the zone
+ */
 sector_t get_zone_end(struct stl_sb *sb, sector_t pba_start)
 {
-	return (pba_start + (1 << (sb->log_zone_size - sb->log_sector_size)));
+	return (pba_start + (1 << (sb->log_zone_size - sb->log_sector_size))) - 1;
 }
 
 
@@ -3363,6 +3380,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 	while (i < nr_seg_entries) {
 		if (entry->vblocks == 0) {
 			if (*zonenr == get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba)) {
+				printk(KERN_ERR "\n zonenr: %d is our cur_frontier! not marking it free!", *zonenr);
 				entry = entry + 1;
 				*zonenr= *zonenr + 1;
 				i++;
@@ -3547,11 +3565,12 @@ int read_metadata(struct ctx * ctx)
 	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
 
 	ctx->write_frontier = ctx->ckpt->cur_frontier_pba;
-	printk(KERN_INFO "%s %d kernel wf: %llu\n", __func__, __LINE__, ctx->write_frontier);
+	printk(KERN_ERR "%s %d ctx->write_frontier: %llu\n", __func__, __LINE__, ctx->write_frontier);
 	ctx->wf_end = zone_end(ctx, ctx->write_frontier);
-	printk(KERN_INFO "%s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->wf_end);
-	printk(KERN_INFO "max_pba = %d", ctx->max_pba);
+	printk(KERN_ERR "%s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->wf_end);
+	printk(KERN_ERR "max_pba = %d", ctx->max_pba);
 	ctx->free_sectors_in_wf = ctx->wf_end - ctx->write_frontier + 1;
+	printk(KERN_ERR "ctx->free_sectors_in_wf: %d", ctx->free_sectors_in_wf);
 
 	ret = read_revmap_bitmap(ctx);
 	if (ret) {
