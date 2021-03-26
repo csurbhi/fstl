@@ -69,6 +69,7 @@ struct revmap_meta_inmem {
 	struct ctx * ctx;
 	struct page *page;
 	refcount_t *ref;
+	sector_t pba; 		/* bio->bi_iter.bi_sector cannot be relied on in endio call */
 	u8 magic;
 };
 
@@ -224,10 +225,10 @@ struct ctx {
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
 	wait_queue_head_t tm_blk_flushq;
-	spinlock_t tm_page_lock;
 	spinlock_t tm_ref_lock;
 	spinlock_t rev_entries_lock; 	/* protects pending_writes, revmap_[sector/blk]_count */
 	spinlock_t sit_flush_lock;
+	spinlock_t tm_flush_lock;
 	spinlock_t rev_flush_lock;
 	spinlock_t ckpt_lock;
 	wait_queue_head_t zone_entry_flushq;
@@ -240,7 +241,8 @@ struct ctx {
 	wait_queue_head_t ckptq;
 	struct page * revmap_page;
 	spinlock_t flush_lock;
-	spinlock_t sit_kv_store_lock;
+	struct semaphore sit_kv_store_lock;
+	struct semaphore tm_kv_store_lock;
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
 	 * non contiguous pages in memory
 	 */
