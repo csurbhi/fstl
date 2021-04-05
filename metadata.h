@@ -240,7 +240,7 @@ struct ctx {
 	wait_queue_head_t rev_blk_flushq;
 	wait_queue_head_t ckptq;
 	struct page * revmap_page;
-	spinlock_t flush_lock;
+	struct semaphore flush_lock;
 	struct semaphore sit_kv_store_lock;
 	struct semaphore tm_kv_store_lock;
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
