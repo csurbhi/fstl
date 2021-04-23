@@ -259,6 +259,150 @@ static struct extent *stl_rb_next(struct extent *e)
 	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
 }
 
+/* Update mapping. Removes any total overlaps, edits any partial
+ * overlaps, adds new extent to map.
+ * if blocked by cleaning, returns the extent which we're blocked on.
+ */
+static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
+{
+	struct extent *e = NULL, *new = NULL, *split = NULL;
+	off_t new_lba, new_pba;
+	size_t new_len;
+	struct extent *tmp = NULL;
+	struct rb_node *node = ctx->extent_tbl_root.rb_node;  /* top of the tree */
+	struct extent *higher = NULL;
+	int diff = 0;
+
+	BUG_ON(len != 0);
+
+
+	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
+	if (unlikely(!new)) {
+		return -ENOMEM;
+	}
+	extent_init(new, lba, pba, len);
+	extent_get(new, 1, IN_MAP);
+	write_lock(&ctx->extent_tbl_lock);
+	while (node) {
+		e = rb_entry(node, struct extent, rb);
+		/* No overlap */
+		if (lba + len < e->lba) {
+			node = node->rb_left;
+			continue;
+		}
+		if (lba > e->lba + e->len) {
+			node = node->rb_right;
+			continue;
+		}
+		/* no overlap, but sequential 
+		 * Note: This case will never occur on the left node
+		 * as pba is physically increasing. You will never get
+		 * a pba that is smaller than an existing pba
+		 * This is also the reason why we will not see more
+		 * cascading merges as a result of this merge.
+		 */
+		if (lba == e->lba + e->len) {
+			if (pba == e->pba + e->len) {
+				e->len = e->len + len;
+				break;
+			}
+			/* else we cannot merge as physically
+			 * discontiguous
+			 */
+			node = node->rb_right;
+			continue;
+		}
+		/* new overlaps with e
+		 * new: ++++
+		 * e: --
+		 */
+
+		/* 
+		 * Case 1:
+		 *
+		 * 		+++++++++++
+		 * ---------------
+		 */
+		if ((lba > e->lba) && (lba < e->lba + len)) {
+			diff = (e->lba + e->len) - lba;
+			e->len = e->len - diff;
+			stl_rb_insert(ctx, new);
+			break;
+		}
+
+
+		 /*
+		 * Case2: complete overlap
+		 * 	++++++++++
+		 * -----------------------
+		 *
+		 */
+		if ((lba > e->lba)  && (lba + len < e->lba + e->len)) {
+			split = mempool_alloc(ctx->extent_pool, GFP_NOIO);
+			if (!split) {
+				mempool_free(new, ctx->extent_pool);
+				return -ENOMEM;
+			}
+			diff = e->lba - lba;
+			/* new should be physically discontiguous
+			 */
+			BUG_ON(e->pba + diff ==  pba);
+			e->len = diff;
+			stl_rb_insert(ctx, new);
+			extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
+			extent_get(split, 1, IN_MAP);
+			stl_rb_insert(ctx, split);
+			break;
+		}
+
+
+		/* 
+		 * Case 3:
+		 *	++++++++++++++++++++
+		 *	  ----- ------  --------
+		 * We need to remove all such e
+		 * the last e can have case 1
+		 *
+		 * here we compare left ends and right ends of 
+		 * new and existing node e
+		 */
+		while ((e!=NULL) && (lba < e->lba) && ((lba + len) > (e->lba + e->len))) {
+			tmp = stl_rb_next(e);
+			stl_rb_remove(ctx, e);
+			e = tmp;
+		}
+		if (!e) {
+			stl_rb_insert(ctx, new);
+			break;
+		}
+		/* else fall down to the next case for the last
+		 * component that partially overlaps*/
+
+		/* 
+		 * Case 4: 
+		 *
+		 * ++++++++++
+		 * 	--------------
+		 */
+		if ((lba < e->lba) && (lba + len > e->lba)) {
+			diff = lba + len - e->lba;
+			e->lba = e->lba + diff;
+			e->len = e->len - diff;
+			e->pba = e->pba + diff;
+			stl_rb_insert(ctx, new);
+			break;
+		}
+	}
+	if (!node) {
+		/* new node has to be added */
+		stl_rb_insert(ctx, new);
+		printk( "\n Inserted (lba: %u pba: %u len: %d) ", new->lba, new->pba, new->len);
+	}
+	write_unlock(&ctx->extent_tbl_lock);
+	return 0;
+}
+
+
 struct stl_gc_thread {
 	struct task_struct *stl_gc_task;
 	wait_queue_head_t stl_gc_wait_queue;
@@ -405,111 +549,6 @@ int stl_gc_thread_stop(struct ctx *ctx)
 	return 0;
 }
 
-
-
-
-/* Update mapping. Removes any total overlaps, edits any partial
- * overlaps, adds new extent to map.
- * if blocked by cleaning, returns the extent which we're blocked on.
- */
-static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
-{
-	struct extent *e = NULL, *new = NULL, *split = NULL;
-	off_t new_lba, new_pba;
-	size_t new_len;
-	struct extent *tmp = NULL;
-	int diff;
-
-	BUG_ON(len == 0);
-
-	if (unlikely(!(split = mempool_alloc(ctx->extent_pool, GFP_NOIO))))
-		return -ENOMEM;
-
-	if (unlikely(!(new = mempool_alloc(ctx->extent_pool, GFP_NOIO)))) {
-		mempool_free(split, ctx->extent_pool);
-		return -ENOMEM;
-	}
-
-	write_lock(&ctx->extent_tbl_lock);
-	e = _stl_rb_geq(&ctx->extent_tbl_root, lba);
-
-	if (e != NULL) {
-		if (e->lba + e->len == lba) {
-			e->len = e->len + len;
-			/* Simplest case:
-			 * [--][++++] -> [--++++]
-			 * no spliting needed. no addition of new node
-			 * needed
-			 */
-			write_unlock(&ctx->extent_tbl_lock);
-			mempool_free(split, ctx->extent_pool);
-			mempool_free(new, ctx->extent_pool);
-			return 0;
-		}
-
-		/* [----------------------]        e     new     split
-		 *        [++++++]           -> [-----][+++++][--------]
-		 */
-		if (e->lba < lba && ((e->lba + e->len) > (lba + len))) {
-			/* do this *before* inserting below */
-			e->len = lba - e->lba;
-			/* new is added at the end, first we split */
-			new_lba = lba + len;
-			new_len = e->lba + e->len - new_lba;
-			new_pba = e->pba + (new_lba - e->lba);
-
-			extent_init(split, new_lba, new_pba, new_len);
-			extent_get(split, 1, IN_MAP);
-			stl_rb_insert(ctx, split);
-
-			e = new;
-			split = NULL;
-		}
-		/* [------------]
-		 *        [+++++++++]        -> [------][+++++++++]
-		 */
-		else if (e->lba < lba) {
-			e->len = lba - e->lba;
-			if (e->len == 0) {
-				wake_up(&ctx->rev_blk_flushq);
-				panic("Wrong length recorded in extent map table");
-			}
-			e = stl_rb_next(e);
-			/* no split needed */
-		}
-		/*          [------]
-		 *   [+++++++++++++++]        -> [+++++++++++++++]
-		 */
-		while (e != NULL && ((e->lba + e->len) <= (lba + len))) {
-			tmp = stl_rb_next(e);
-			stl_rb_remove(ctx, e);
-			extent_put(ctx, e, 1, IN_MAP);
-			e = tmp;
-			/* no split needed */
-		}
-		/*          [------]
-		 *   [+++++++++]        -> [++++++++++][---]
-		 */
-		if (e != NULL && ((lba + len) > e->lba)) {
-			diff = (lba + len) - e->lba;
-			e->lba += diff;
-			e->pba += diff;
-			e->len -= diff;
-			/* no split needed */
-		}
-	}
-
-	extent_init(new, lba, pba, len);
-	extent_get(new, 1, IN_MAP);
-	stl_rb_insert(ctx, new);
-	write_unlock(&ctx->extent_tbl_lock);
-	printk(KERN_ERR "\n Inserted (lba: %llu pba: %llu len: %d) ", new->lba, new->pba, new->len);
-	if (split) {
-		mempool_free(split, ctx->extent_pool);
-		return 0;
-	}
-	return 0;
-}
 
 
 /*
@@ -1583,8 +1622,6 @@ void read_complete(struct bio * bio)
 	refcount_dec(ref);
 	spin_unlock(&ctx->tm_ref_lock);
 	wake_up_refcount_waiters(ctx);
-	/* bio_alloc done, hence bio_put */
-	bio_put(bio);
 }
 
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref);
@@ -2609,6 +2646,8 @@ void flush_revmap_entries(struct ctx *ctx)
 
 	//printk(KERN_ERR "ctx->revmap_page: %p", page_address(ctx->revmap_page));
 	flush_revmap_block_disk(ctx, page);
+	/* We wait for translation entries to be added! */
+	wait_on_block_barrier(ctx);
 }
 
 
@@ -4023,6 +4062,7 @@ static void stl_dtr(struct dm_target *dm_target)
 	printk(KERN_ERR "\n translation blocks flushed!");
 
 	printk(KERN_ERR "ctx->revmap_pba: %llu", __func__, ctx->revmap_pba - NR_SECTORS_IN_BLK);
+	/* We wait for revmap_entries endio call to be completed! */
 	wait_on_revmap_block_availability(ctx, ctx->revmap_pba - NR_SECTORS_IN_BLK);
 	printk(KERN_ERR "%s done!", __func__);
 
