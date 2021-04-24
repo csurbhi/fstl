@@ -273,9 +273,7 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 	struct extent *higher = NULL;
 	int diff = 0;
 
-	BUG_ON(len != 0);
-
-
+	BUG_ON(len == 0);
 	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 	if (unlikely(!new)) {
 		return -ENOMEM;
@@ -304,6 +302,7 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 		if (lba == e->lba + e->len) {
 			if (pba == e->pba + e->len) {
 				e->len = e->len + len;
+				printk(KERN_ERR "\n New node merged! ");
 				break;
 			}
 			/* else we cannot merge as physically
@@ -323,7 +322,7 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 		 * 		+++++++++++
 		 * ---------------
 		 */
-		if ((lba > e->lba) && (lba < e->lba + len)) {
+		if ((lba > e->lba) && (lba < e->lba + e->len)) {
 			diff = (e->lba + e->len) - lba;
 			e->len = e->len - diff;
 			stl_rb_insert(ctx, new);
@@ -341,9 +340,10 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 			split = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 			if (!split) {
 				mempool_free(new, ctx->extent_pool);
+				write_unlock(&ctx->extent_tbl_lock);
 				return -ENOMEM;
 			}
-			diff = e->lba - lba;
+			diff =  lba - e->lba;
 			/* new should be physically discontiguous
 			 */
 			BUG_ON(e->pba + diff ==  pba);
