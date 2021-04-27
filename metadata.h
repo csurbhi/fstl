@@ -39,9 +39,19 @@ struct tm_page_write_ctx {
 	struct tm_page *tm_page;
 };
 
+struct revmap_meta_inmem {
+	u64 revmap_pba;			/* PBA where the revmap entries should be written. Reset when the refcount is 0
+					 */
+	struct ctx * ctx;
+	struct page *page;
+	struct kref kref;
+	sector_t pba; 		/* bio->bi_iter.bi_sector cannot be relied on in endio call */
+	u8 magic;
+};
+
 struct ref_list
 {
-	refcount_t *ref;
+	struct revmap_meta_inmem *revmap_bio_ctx;
 	struct list_head list;
 };
 
@@ -61,16 +71,6 @@ struct sit_page {
 	struct rb_node rb;
 	sector_t blknr;
 	struct page *page;
-};
-
-struct revmap_meta_inmem {
-	u64 revmap_pba;			/* PBA where the revmap entries should be written. Reset when the refcount is 0
-					 */
-	struct ctx * ctx;
-	struct page *page;
-	refcount_t *ref;
-	sector_t pba; 		/* bio->bi_iter.bi_sector cannot be relied on in endio call */
-	u8 magic;
 };
 
 struct nstl_bioctx {
@@ -177,6 +177,7 @@ struct ctx {
 	int		  n_gc_candidates;
 
 	struct rb_root	  extent_tbl_root; /* in memory extent map */
+	struct rb_root	  rev_tbl_root; /* in memory reverse extent map */
 	struct rb_root    tm_rb_root;	          /* map RB tree */
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
 	rwlock_t          extent_tbl_lock;

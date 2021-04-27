@@ -220,9 +220,8 @@ static struct extent *stl_rb_geq(struct ctx *ctx, off_t lba)
 
 
 int _stl_verbose;
-static void stl_rb_insert(struct ctx *ctx, struct extent *new)
+static void __stl_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
 {
-	struct rb_root *root = &ctx->extent_tbl_root;
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct extent *e = NULL;
 
@@ -245,6 +244,14 @@ static void stl_rb_insert(struct ctx *ctx, struct extent *new)
 }
 
 
+int _stl_verbose;
+static void stl_rb_insert(struct ctx *ctx, struct extent *new)
+{
+	struct rb_root *root = &ctx->extent_tbl_root;
+	__stl_rb_insert(ctx, root, new);
+}
+
+
 static void stl_rb_remove(struct ctx *ctx, struct extent *e)
 {
 	struct rb_root *root = &ctx->extent_tbl_root;
@@ -263,13 +270,13 @@ static struct extent *stl_rb_next(struct extent *e)
  * overlaps, adds new extent to map.
  * if blocked by cleaning, returns the extent which we're blocked on.
  */
-static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
+static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
 {
 	struct extent *e = NULL, *new = NULL, *split = NULL;
 	off_t new_lba, new_pba;
 	size_t new_len;
 	struct extent *tmp = NULL;
-	struct rb_node *node = ctx->extent_tbl_root.rb_node;  /* top of the tree */
+	struct rb_node *node = root->rb_node;  /* top of the tree */
 	struct extent *higher = NULL;
 	int diff = 0;
 
@@ -400,6 +407,21 @@ static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t 
 	}
 	write_unlock(&ctx->extent_tbl_lock);
 	return 0;
+}
+
+
+static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
+{
+
+	struct rb_root *root = &ctx->extent_tbl_root;
+	__stl_update_range(ctx, root, lba, pba, len);
+
+}
+
+static int revtbl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
+{
+	struct rb_root *root = &ctx->rev_tbl_root;
+	__stl_update_range(ctx, root, pba, lba, len);
 }
 
 
@@ -1532,7 +1554,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 }
 
 struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node **parent);
-struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref);
+struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_meta_inmem *revmap_bio_ctx);
 /*
  * If this length cannot be accomodated in this page
  * search and add another page for this next
@@ -1543,7 +1565,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
  * Depending on the location within a page, add the lba.
  */
 int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba, 
-			  unsigned long pba, unsigned long len, refcount_t *ref)
+			  unsigned long pba, unsigned long len, struct revmap_meta_inmem *revmap_bio_ctx)
 {
 	struct tm_entry * ptr;
 	int i, index;
@@ -1590,7 +1612,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	/*-----------------------------------------------*/
 			up(&ctx->tm_kv_store_lock);
 			if (!tm_page) {
-				tm_page = add_tm_entry_kv_store(ctx, lba, ref);
+				tm_page = add_tm_entry_kv_store(ctx, lba, revmap_bio_ctx);
 				if (!tm_page) {
 					/* TODO: try freeing some
 					 * pages here
@@ -1764,6 +1786,38 @@ void remove_tm_blk_kv_store(struct ctx *ctx, u64 blknr)
 	kmem_cache_free(ctx->tm_page_cache, new);
 }
 
+
+void clear_revmap_bit(struct ctx *, u64);
+
+void revmap_block_release(struct kref *kref)
+{
+	struct revmap_meta_inmem * revmap_bio_ctx;
+	struct ctx *ctx;
+
+	revmap_bio_ctx = container_of(kref, struct revmap_meta_inmem, kref);
+	ctx = revmap_bio_ctx->ctx;
+
+	/* now we calculate the pba where the revmap
+	 * is flushed. We can reuse that pba as all
+	 * entries related to it are on disk in the
+	 * right place.
+	 */
+	spin_lock(&ctx->rev_flush_lock);
+	/*-------------------------------------------------------------*/
+	clear_revmap_bit(ctx, revmap_bio_ctx->pba);
+	/*-------------------------------------------------------------*/
+	spin_unlock(&ctx->rev_flush_lock);
+	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
+	/* Wakeup waiters waiting on revblk bit that 
+	 * indicates that revmap block is rewritable
+	 * since all the containing translation map
+	 * entries are now on disk
+	 */
+	printk(KERN_ERR "\n %s done!!", __func__);
+	wake_up(&ctx->rev_blk_flushq);
+	printk(KERN_ERR "\n wait is over!!");
+}
+
 /*
  * Note: 
  * When 100 translation pages collect in memory, they are
@@ -1779,6 +1833,7 @@ void write_tmbl_complete(struct bio *bio)
 	struct tm_page *tm_page;
 	struct list_head *temp;
 	struct ref_list *refnode;
+	struct revmap_meta_inmem * revmap_bio_ctx;
 	sector_t blknr;
 
 	tm_page_write_ctx = (struct tm_page_write_ctx *) bio->bi_private;
@@ -1793,13 +1848,11 @@ void write_tmbl_complete(struct bio *bio)
 	list_for_each(temp, &tm_page->reflist) {
 		refnode = list_entry(temp, struct ref_list, list);
 		spin_lock(&ctx->tm_ref_lock);
-		refcount_dec(refnode->ref);
+		revmap_bio_ctx = refnode->revmap_bio_ctx;
+		kref_put(&revmap_bio_ctx->kref, revmap_block_release);
 		spin_unlock(&ctx->tm_ref_lock);
 		kmem_cache_free(ctx->reflist_cache, refnode);
-		/* Wakeup anyone who is waiting on this reference */
-		wake_up_refcount_waiters(ctx);
 	}
-
 
 	if (bio->bi_status != BLK_STS_OK) {
 		/*TODO: Perhaps retry!! or do something more
@@ -2155,7 +2208,7 @@ void flush_count_sit_blocks(struct ctx *ctx, bool flush, int nrscan)
 /*
  * lba: from the LBA-PBA pair of a data block.
  */
-struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
+struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_meta_inmem *revmap_bio_ctx)
 {
 	struct rb_root *root = &ctx->tm_rb_root;
 	struct rb_node *parent = NULL;
@@ -2179,7 +2232,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 	if (new) {
 		list_for_each(temp, &new->reflist) {
 			tempref = list_entry(temp, struct ref_list, list);
-			if (tempref->ref == ref) {
+			if (tempref->revmap_bio_ctx->revmap_pba  == revmap_bio_ctx->revmap_pba) {
 				kmem_cache_free(ctx->reflist_cache, refnode);
 				up(&ctx->tm_kv_store_lock);
 				return new;
@@ -2188,8 +2241,8 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 		/* Add a refcount, only when this rev map page is used
 		 * for the first time
 		 */
-		refnode->ref = ref;
-		refcount_inc(ref);
+		refnode->revmap_bio_ctx = revmap_bio_ctx;
+		kref_get(&revmap_bio_ctx->kref);
 		list_add(&refnode->list, &new->reflist);
 		up(&ctx->tm_kv_store_lock);
 		return new;
@@ -2223,8 +2276,8 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 	 * code, just before freeing it.
 	 */
 	get_page(new->page);
-	refnode->ref = ref;
-	refcount_inc(ref);
+	refnode->revmap_bio_ctx = revmap_bio_ctx;
+	kref_get(&revmap_bio_ctx->kref);
 	list_add(&refnode->list, &new->reflist);
 
 	printk(KERN_ERR "\n TM Block read! (about to be added to the tm kv store)!) \n");
@@ -2248,7 +2301,6 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 	rb_insert_color(&new->rb, root);
 	atomic_inc(&ctx->nr_tm_pages);
 	atomic_inc(&ctx->tm_flush_count);
-	printk(KERN_ERR "\n TM Block added to the kv store! ref: %d", refcount_read(ref));
 	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_PAGES) {
 		/*---------------------------------------------*/
 		up(&ctx->tm_kv_store_lock);
@@ -2270,7 +2322,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, refcount_t *ref)
 /* Make the length in terms of sectors or blocks?
  *
  */
-int add_block_based_translation(struct ctx *ctx, struct page *page, refcount_t *ref)
+int add_block_based_translation(struct ctx *ctx, struct page *page, struct revmap_meta_inmem *revmap_bio_ctx)
 {
 	
 	struct stl_revmap_entry_sector * ptr;
@@ -2284,10 +2336,10 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, refcount_t *
 			if (0 == ptr->extents[j].pba)
 				continue;
 			printk(KERN_ERR "Adding TM entry: ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", ptr->extents[j].lba, ptr->extents[j].pba, ptr->extents[j].len);
-			tm_page = add_tm_entry_kv_store(ctx, ptr->extents[j].lba, ref);
+			tm_page = add_tm_entry_kv_store(ctx, ptr->extents[j].lba, revmap_bio_ctx);
 			if (!tm_page)
 				return -ENOMEM;
-			add_translation_entry(ctx, tm_page->page, ptr->extents[j].lba, ptr->extents[j].pba, ptr->extents[j].len, ref);
+			add_translation_entry(ctx, tm_page->page, ptr->extents[j].lba, ptr->extents[j].pba, ptr->extents[j].len, revmap_bio_ctx);
 		}
 		ptr = ptr + 1;
 		i++;
@@ -2482,7 +2534,7 @@ void revmap_entries_flushed(struct bio *bio)
 		case BLK_STS_OK:
 			//printk(KERN_ERR "\n Adding block based translation!");
 			printk(KERN_ERR "\n About to add_block_based_translation(): revmap_bio_ctx->page: %p", page_address(revmap_bio_ctx->page));
-			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx->ref);
+			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx);
 			/* refcount will be synced when all the
 			 * translation entries are flushed
 			 * to the disk. We free the page before
@@ -2508,31 +2560,10 @@ void revmap_entries_flushed(struct bio *bio)
 			 * incremented the reference atleast once!
 			 */
 			spin_lock(&ctx->tm_ref_lock);
-			refcount_dec(revmap_bio_ctx->ref);
+			kref_put(&revmap_bio_ctx->kref, revmap_block_release);
 			spin_unlock(&ctx->tm_ref_lock);
 			printk(KERN_ERR "\n Inside revmap_entries_flushed():: waiting on refcount! \n");
-			wake_up_refcount_waiters(ctx);
-			wait_on_refcount(ctx, revmap_bio_ctx->ref);
-			kfree(revmap_bio_ctx->ref);
-			/* now we calculate the pba where the revmap
-			 * is flushed. We can reuse that pba as all
-			 * entries related to it are on disk in the
-			 * right place.
-			 */
-			spin_lock(&ctx->rev_flush_lock);
-			/*-------------------------------------------------------------*/
-			clear_revmap_bit(ctx, pba);
-			/*-------------------------------------------------------------*/
-			spin_unlock(&ctx->rev_flush_lock);
-			kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
-			/* Wakeup waiters waiting on revblk bit that 
-			 * indicates that revmap block is rewritable
-			 * since all the containing translation map
-			 * entries are now on disk
-			 */
-			printk(KERN_ERR "\n %s done!!", __func__);
-			wake_up(&ctx->rev_blk_flushq);
-			break;
+						break;
 		default:
 			/* TODO: do something better?
 			 * remove all the entries from the in memory 
@@ -2561,33 +2592,25 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 {
 	struct bio * bio;
 	struct revmap_meta_inmem *revmap_bio_ctx;
-	refcount_t *ref;
 
 	if (!page)
 		return -ENOMEM;
 
-	ref = (refcount_t *) kzalloc(sizeof(refcount_t), GFP_KERNEL);
-	if (!ref) {
-		return -ENOMEM;
-	}
-
-	refcount_set(ref, 2);
 	revmap_bio_ctx = kmem_cache_alloc(ctx->revmap_bioctx_cache, GFP_KERNEL);
 	if (!revmap_bio_ctx) {
-		kfree(ref);
 		return -ENOMEM;
 	}
+	kref_init(&revmap_bio_ctx->kref);
+	kref_get(&revmap_bio_ctx->kref);
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
-		kfree(ref);
 		return -ENOMEM;
 	}
 	
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
-		kfree(ref);
 		bio_put(bio);
 		return -EFAULT;
 	}
@@ -2597,7 +2620,6 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	revmap_bio_ctx->ctx = ctx;
 	revmap_bio_ctx->magic = REVMAP_PRIV_MAGIC;
 	revmap_bio_ctx->page = page;
-	revmap_bio_ctx->ref = ref;
 	revmap_bio_ctx->pba = ctx->revmap_pba;
 	bio->bi_iter.bi_sector = ctx->revmap_pba;
 	printk(KERN_ERR "Checking if revmap blk at pba:%llu is available for writing! ctx->revmap_pba: %llu", bio->bi_iter.bi_sector, ctx->revmap_pba);
@@ -2863,6 +2885,7 @@ static void nstl_clone_endio(struct bio * clone)
 		spin_lock(&ctx->lock);
 		/*-------------------------------*/
 		ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		ret = revtbl_update_range(ctx, subbioctx->extent.pba, subbioctx->extent.lba, subbioctx->extent.len);
 		/*-------------------------------*/
 		spin_unlock(&ctx->lock);
 		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
@@ -3360,7 +3383,7 @@ int read_revmap_bitmap(struct ctx *ctx)
 }
 
 
-void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, refcount_t *ref)
+void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, struct revmap_meta_inmem *revmap_bio_ctx)
 {
 	struct stl_revmap_extent *extent;
 	struct stl_revmap_entry_sector *entry_sector;
@@ -3368,7 +3391,7 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, refcount
 
 	//printk(KERN_ERR "\n Inside process revmap_entries_on_boot!" );
 
-	add_block_based_translation(ctx,  page, ref);
+	add_block_based_translation(ctx,  page, revmap_bio_ctx);
 	//printk(KERN_ERR "\n Added block based translations!, will add memory based extent maps now.... \n");
 	entry_sector = (struct stl_revmap_entry_sector *) page_address(page);
 	while (i < NR_SECTORS_IN_BLK) {
@@ -3395,8 +3418,14 @@ int read_revmap(struct ctx *ctx)
 	unsigned long pba;
 	struct block_device *bdev = NULL;
 	char flush_needed = 0;
-	refcount_t ref;
-	refcount_set(&ref, 2);
+	struct revmap_meta_inmem *revmap_bio_ctx;
+
+	revmap_bio_ctx = kmem_cache_alloc(ctx->revmap_bioctx_cache, GFP_KERNEL);
+	if (!revmap_bio_ctx) {
+		return -ENOMEM;
+	}
+	kref_init(&revmap_bio_ctx->kref);
+	kref_get(&revmap_bio_ctx->kref);
 
 	bdev = ctx->dev->bdev;
 	pba = ctx->sb->revmap_pba/NR_SECTORS_IN_BLK;
@@ -3423,7 +3452,7 @@ int read_revmap(struct ctx *ctx)
 					/* free the successful bh till now */
 					return -1;
 				}
-				process_revmap_entries_on_boot(ctx, bh->b_page, &ref);
+				process_revmap_entries_on_boot(ctx, bh->b_page, revmap_bio_ctx);
 			}
 			byte = byte >> 1;
 		}
@@ -3436,13 +3465,9 @@ int read_revmap(struct ctx *ctx)
 		flush_translation_blocks(ctx);
 		up(&ctx->flush_lock);
 	}
-	printk(KERN_ERR "\n Waiting on refcount! %d \n", refcount_read(&ref));
 	spin_lock(&ctx->tm_ref_lock);
-	refcount_dec(&ref);
+	kref_put(&revmap_bio_ctx->kref, revmap_block_release);
 	spin_unlock(&ctx->tm_ref_lock);
-	wait_on_refcount(ctx, &ref);
-	wake_up_refcount_waiters(ctx);
-	printk(KERN_ERR "\n wait is over!!");
 	return 0;
 }
 
@@ -3949,6 +3974,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	init_waitqueue_head(&ctx->ckptq);
 	ctx->mounted_time = ktime_get_real_seconds();
 	ctx->extent_tbl_root = RB_ROOT;
+	ctx->rev_tbl_root = RB_ROOT;
 	rwlock_init(&ctx->extent_tbl_lock);
 
 	ctx->tm_rb_root = RB_ROOT;
