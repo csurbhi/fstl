@@ -181,6 +181,7 @@ struct ctx {
 	struct rb_root    tm_rb_root;	          /* map RB tree */
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
 	rwlock_t          extent_tbl_lock;
+	rwlock_t          rev_tbl_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
 

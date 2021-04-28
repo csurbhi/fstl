@@ -220,7 +220,7 @@ static struct extent *stl_rb_geq(struct ctx *ctx, off_t lba)
 
 
 int _stl_verbose;
-static void __stl_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
+static void stl_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
 {
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct extent *e = NULL;
@@ -244,17 +244,8 @@ static void __stl_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent
 }
 
 
-int _stl_verbose;
-static void stl_rb_insert(struct ctx *ctx, struct extent *new)
+static void stl_rb_remove(struct ctx *ctx, struct rb_root *root, struct extent *e)
 {
-	struct rb_root *root = &ctx->extent_tbl_root;
-	__stl_rb_insert(ctx, root, new);
-}
-
-
-static void stl_rb_remove(struct ctx *ctx, struct extent *e)
-{
-	struct rb_root *root = &ctx->extent_tbl_root;
 	rb_erase(&e->rb, root);
 	ctx->n_extents--;
 }
@@ -268,9 +259,8 @@ static struct extent *stl_rb_next(struct extent *e)
 
 /* Update mapping. Removes any total overlaps, edits any partial
  * overlaps, adds new extent to map.
- * if blocked by cleaning, returns the extent which we're blocked on.
  */
-static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
+static int stl_update_range(struct ctx *ctx, struct rb_root *root, rwlock_t *lock, sector_t lba, sector_t pba, size_t len)
 {
 	struct extent *e = NULL, *new = NULL, *split = NULL;
 	off_t new_lba, new_pba;
@@ -287,7 +277,7 @@ static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lb
 	}
 	extent_init(new, lba, pba, len);
 	extent_get(new, 1, IN_MAP);
-	write_lock(&ctx->extent_tbl_lock);
+	write_lock(lock);
 	while (node) {
 		e = rb_entry(node, struct extent, rb);
 		/* No overlap */
@@ -310,6 +300,7 @@ static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lb
 			if (pba == e->pba + e->len) {
 				e->len = e->len + len;
 				printk(KERN_ERR "\n New node merged! ");
+				mempool_free(new, ctx->extent_pool);
 				break;
 			}
 			/* else we cannot merge as physically
@@ -332,7 +323,7 @@ static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lb
 		if ((lba > e->lba) && (lba < e->lba + e->len)) {
 			diff = (e->lba + e->len) - lba;
 			e->len = e->len - diff;
-			stl_rb_insert(ctx, new);
+			stl_rb_insert(ctx, root, new);
 			break;
 		}
 
@@ -347,7 +338,7 @@ static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lb
 			split = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 			if (!split) {
 				mempool_free(new, ctx->extent_pool);
-				write_unlock(&ctx->extent_tbl_lock);
+				write_unlock(lock);
 				return -ENOMEM;
 			}
 			diff =  lba - e->lba;
@@ -355,10 +346,10 @@ static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lb
 			 */
 			BUG_ON(e->pba + diff ==  pba);
 			e->len = diff;
-			stl_rb_insert(ctx, new);
+			stl_rb_insert(ctx, root, new);
 			extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
 			extent_get(split, 1, IN_MAP);
-			stl_rb_insert(ctx, split);
+			stl_rb_insert(ctx, root, split);
 			break;
 		}
 
@@ -375,11 +366,11 @@ static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lb
 		 */
 		while ((e!=NULL) && (lba < e->lba) && ((lba + len) > (e->lba + e->len))) {
 			tmp = stl_rb_next(e);
-			stl_rb_remove(ctx, e);
+			stl_rb_remove(ctx, root, e);
 			e = tmp;
 		}
 		if (!e) {
-			stl_rb_insert(ctx, new);
+			stl_rb_insert(ctx, root, new);
 			break;
 		}
 		/* else fall down to the next case for the last
@@ -396,32 +387,17 @@ static int __stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lb
 			e->lba = e->lba + diff;
 			e->len = e->len - diff;
 			e->pba = e->pba + diff;
-			stl_rb_insert(ctx, new);
+			stl_rb_insert(ctx, root, new);
 			break;
 		}
 	}
 	if (!node) {
 		/* new node has to be added */
-		stl_rb_insert(ctx, new);
+		stl_rb_insert(ctx, root, new);
 		printk( "\n Inserted (lba: %u pba: %u len: %d) ", new->lba, new->pba, new->len);
 	}
-	write_unlock(&ctx->extent_tbl_lock);
+	write_unlock(lock);
 	return 0;
-}
-
-
-static int stl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
-{
-
-	struct rb_root *root = &ctx->extent_tbl_root;
-	__stl_update_range(ctx, root, lba, pba, len);
-
-}
-
-static int revtbl_update_range(struct ctx *ctx, sector_t lba, sector_t pba, size_t len)
-{
-	struct rb_root *root = &ctx->rev_tbl_root;
-	__stl_update_range(ctx, root, pba, lba, len);
 }
 
 
@@ -1812,6 +1788,8 @@ void revmap_block_release(struct kref *kref)
 	 * indicates that revmap block is rewritable
 	 * since all the containing translation map
 	 * entries are now on disk
+	 *
+	 * waiters call: wait_on_revmap_block_availability()
 	 */
 	printk(KERN_ERR "\n %s done!!", __func__);
 	wake_up(&ctx->rev_blk_flushq);
@@ -2695,8 +2673,8 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 			atomic_set(&ctx->revmap_blk_count, 0);
 	/*--------------------------------------------------*/
 			spin_unlock(&ctx->rev_flush_lock);
-			printk(KERN_ERR "\n Waiting on block barrier! \n");
-			wait_on_block_barrier(ctx);
+			//printk(KERN_ERR "\n Waiting on block barrier! \n");
+			//wait_on_block_barrier(ctx);
 			flush_revmap_block_disk(ctx, page);
 		}
 		else {
@@ -2884,8 +2862,8 @@ static void nstl_clone_endio(struct bio * clone)
 		printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu", __func__, bio->bi_iter.bi_sector);
 		spin_lock(&ctx->lock);
 		/*-------------------------------*/
-		ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-		ret = revtbl_update_range(ctx, subbioctx->extent.pba, subbioctx->extent.lba, subbioctx->extent.len);
+		ret = stl_update_range(ctx, &ctx->extent_tbl_root, &ctx->extent_tbl_lock, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+		ret = stl_update_range(ctx, &ctx->rev_tbl_root, &ctx->rev_tbl_lock, subbioctx->extent.pba, subbioctx->extent.lba, subbioctx->extent.len);
 		/*-------------------------------*/
 		spin_unlock(&ctx->lock);
 		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
@@ -3312,7 +3290,8 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned i
 		printk(KERN_ERR "\n entry->pba: %llu \n", entry->pba);
 		/* TODO: right now everything should be zeroed out */
 		//panic("Why are there any already mapped extents?");
-		stl_update_range(ctx, entry->lba, entry->pba, NR_SECTORS_IN_BLK);
+		stl_update_range(ctx, &ctx->extent_tbl_root, &ctx->extent_tbl_lock, entry->lba, entry->pba, NR_SECTORS_IN_BLK);
+		stl_update_range(ctx, &ctx->rev_tbl_root, &ctx->rev_tbl_lock, entry->pba, entry->lba, NR_SECTORS_IN_BLK);
 		entry = entry + 1;
 	}
 	return 0;
@@ -3399,7 +3378,8 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, struct r
 		for (j=0; j < NR_EXT_ENTRIES_PER_SEC; j++) {
 			if (extent[j].pba == 0)
 				continue;
-			stl_update_range(ctx, extent[j].lba, extent[j].pba, extent[j].len);
+			stl_update_range(ctx, &ctx->extent_tbl_root, &ctx->extent_tbl_lock, extent[j].lba, extent[j].pba, extent[j].len);
+			stl_update_range(ctx, &ctx->rev_tbl_root, &ctx->rev_tbl_lock, extent[j].pba, extent[j].lba, extent[j].len);
 		}
 		entry_sector = entry_sector + 1;
 		i++;
@@ -3976,6 +3956,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	ctx->extent_tbl_root = RB_ROOT;
 	ctx->rev_tbl_root = RB_ROOT;
 	rwlock_init(&ctx->extent_tbl_lock);
+	rwlock_init(&ctx->rev_tbl_lock);
 
 	ctx->tm_rb_root = RB_ROOT;
 
