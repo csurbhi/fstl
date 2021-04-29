@@ -26,6 +26,10 @@
 #define MAX_TM_PAGES 100
 #define MAX_SIT_PAGES 100
 #define NSTL_MAGIC 0xF2F52010
+#define GC_GREEDY 1
+#define GC_CB 2
+#define BG_GC 1
+#define FG_GC 2
 
 struct read_ctx {
 	struct ctx *ctx;
@@ -79,29 +83,24 @@ struct nstl_bioctx {
 	struct ctx *ctx;
 };
 
+struct sit_extent {
+	struct rb_node rb;	/* 20 bytes */
+	u32 zonenr;
+	u32 nrblks;
+	int cb_cost;
+};
+
 struct extent_entry {
 	sector_t lba;
 	sector_t pba;
-	size_t   len;
-}__packed;
-
-
+	size_t len;
+};
 
 struct nstl_sub_bioctx {
 	struct extent_entry extent;
 	struct nstl_bioctx * bioctx;
 	u8 magic;
 	u8 retry;
-};
-
-
-struct free_zone_info {
-	unsigned int nr_free_zones;
-	char * free_segmap;
-};
-
-struct victim_selection {
-	int (*select_victim)(struct stl_sb_info *);
 };
 
 struct cur_zone_info {
@@ -184,6 +183,7 @@ struct ctx {
 	rwlock_t          rev_tbl_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
+	int		  n_sit_extents;
 
 	mempool_t        *extent_pool;
 	mempool_t        *page_pool;
@@ -212,6 +212,8 @@ struct ctx {
 	int	bitmap_bytes;
 	time64_t mounted_time;
 	time64_t elapsed_time;
+	time64_t min_mtime;
+	time64_t max_mtime;
 	unsigned int flag_ckpt;
 	atomic_t nr_writes;
        	atomic_t nr_failed_writes;
@@ -226,6 +228,7 @@ struct ctx {
 	struct kmem_cache *tm_page_write_cache;
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
+	struct kmem_cache *sit_extent_cache;
 	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_ref_lock;
 	spinlock_t rev_entries_lock; 	/* protects pending_writes, revmap_[sector/blk]_count */

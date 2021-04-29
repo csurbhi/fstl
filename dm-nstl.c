@@ -157,21 +157,29 @@ static void extent_init(struct extent *e, sector_t lba, sector_t pba, unsigned l
 #define MIN_POOL_IOS 16
 #define MIN_COPY_REQS 16
 
-static sector_t zone_start(struct ctx *ctx, sector_t pba) {
+static sector_t zone_start(struct ctx *ctx, sector_t pba)
+{
 	return pba - (pba % ctx->nr_lbas_in_zone);
 }
 
-static sector_t zone_end(struct ctx *ctx, sector_t pba) {
+static sector_t zone_end(struct ctx *ctx, sector_t pba)
+{
 	return zone_start(ctx, pba) + ctx->nr_lbas_in_zone - 1;
 }
 
 /* zone numbers begin from 0.
  * The freebit map is marked with bit 0 representing zone 0
  */
-static unsigned get_zone_nr(struct ctx *ctx, sector_t sector) {
+static unsigned get_zone_nr(struct ctx *ctx, sector_t sector)
+{
 	sector_t zone_begins = zone_start(ctx, sector);
 	//printk(KERN_ERR "%s zone_begins: %llu sb->zone0_pba: %llu ctx->nr_lbas_in_zone: %d", __func__, zone_begins, ctx->sb->zone0_pba, ctx->nr_lbas_in_zone);
 	return ( (zone_begins - ctx->sb->zone0_pba) / ctx->nr_lbas_in_zone);
+}
+
+static sector_t get_first_pba_for_zone(struct ctx *ctx, unsigned int zonenr)
+{
+	return ctx->sb->zone0_pba + (zonenr * ctx->nr_lbas_in_zone);
 }
 
 
@@ -241,6 +249,26 @@ static void stl_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
 	ctx->n_extents++;
+}
+
+static struct extent * revmap_rb_search(struct ctx *ctx, sector_t pba)
+{
+	struct rb_root *root = &ctx->rev_tbl_root;
+	struct rb_node *link = root->rb_node;
+	struct extent *e = NULL;
+
+	/* Go to the bottom of the tree */
+	while (link) {
+		e = container_of(link, struct extent, rb);
+		if (pba == e->pba)
+			return e;
+		if (pba < e->pba) {
+			link = link->rb_left;
+		} else {
+			link = link->rb_right;
+		}
+	}
+	return e;
 }
 
 
@@ -358,13 +386,17 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, rwlock_t *loc
 		 * Case 3:
 		 *	++++++++++++++++++++
 		 *	  ----- ------  --------
+		 *
+		 * Could also be exact same: 
+		 * 	+++++
+		 * 	-----
 		 * We need to remove all such e
 		 * the last e can have case 1
 		 *
 		 * here we compare left ends and right ends of 
 		 * new and existing node e
 		 */
-		while ((e!=NULL) && (lba < e->lba) && ((lba + len) > (e->lba + e->len))) {
+		while ((e!=NULL) && (lba <= e->lba) && ((lba + len) >= (e->lba + e->len))) {
 			tmp = stl_rb_next(e);
 			stl_rb_remove(ctx, root, e);
 			e = tmp;
@@ -431,16 +463,70 @@ static inline void * stl_malloc(size_t size, gfp_t flags)
 	return addr;
 }
 
-static int stl_gc(void)
+/* For BG_GC mode, go to the left most node in the 
+ * in mem stl_extents RB tree 
+ * For FG_GC; apply greedy to only the left most part of the tree
+ * Ideally we want consequitive segments that are in the left most
+ * part of the tree; or we want 'n' sequential zones that give the
+ * most of any other 'n'
+ */
+static int get_zone_for_gc(struct ctx *ctx, int mode)
 {
-	printk(KERN_INFO "\n GC thread polling after every few seconds ");
-	/* Complete the GC and then sync the block device */
-	//sync_blockdev(ctx->dev->bdev);
-	return 0;
+	int zonenr = 0;
+	struct rb_node *node;
+
+	if (mode == BG_GC) {
+		node = rb_first(&ctx->sit_rb_root);
+		zonenr = rb_entry(node, struct sit_extent, rb)->zonenr; 
+		return zonenr;
+	}
+	/* TODO: Mode: FG_GC */
+	return zonenr;
+
 }
 
-static int gc_zonenr(int zonenr)
+
+static void move_blocks(struct ctx *ctx, struct extent *e)
 {
+
+}
+
+static int get_gc_dest_zone(struct ctx *ctx)
+{
+}
+
+/*
+ * TODO: write code for FG_GC
+ */
+static int stl_gc(struct ctx *ctx)
+{
+	int zonenr, i, newzone = 0;
+	sector_t pba;
+	struct extent *e = NULL;
+
+	printk(KERN_INFO "\n GC thread polling after every few seconds ");
+
+	zonenr = get_zone_for_gc(ctx, BG_GC);
+	newzone = get_gc_dest_zone(ctx);
+	pba = get_first_pba_for_zone(ctx, zonenr);
+	/* Lookup this pba in the reverse table to find the
+	 * corresponding LBA. 
+	 * TODO: If the valid blocks are sequential, we need to keep
+	 * this segment as an open segment that can append data. We do
+	 * not need to perform GC on this segment.
+	 *
+	 * We need to eventually change the
+	 * translation map in memory and on disk so that the LBA
+	 * points to the new PBA
+	 */
+	for (i=0; i<ctx->nr_lbas_in_zone;) {
+		e = revmap_rb_search(ctx, pba);
+		BUG_ON(e == NULL);
+		i = i + e->len;
+		move_blocks(ctx, e);
+	}
+	/* Complete the GC and then sync the block device */
+	sync_blockdev(ctx->dev->bdev);
 	return 0;
 }
 
@@ -453,8 +539,8 @@ static int gc_zonenr(int zonenr)
 static int gc_thread_fn(void * data)
 {
 
-	struct ctx *sc = (struct ctx *) data;
-	struct stl_gc_thread *gc_th = sc->gc_th;
+	struct ctx *ctx = (struct ctx *) data;
+	struct stl_gc_thread *gc_th = ctx->gc_th;
 	wait_queue_head_t *wq = &gc_th->stl_gc_wait_queue;
 	unsigned int wait_ms;
 
@@ -481,14 +567,12 @@ static int gc_thread_fn(void * data)
 		 * You need some check for is_idle()
 		 * */
 		if(!stl_is_idle()) {
-			//increase_sleep_time();
+			/* increase sleep time */
+			wait_ms = wait_ms * 2;
 			/* unlock mutex */
 			continue;
-
 		}
-		stl_gc();
-
-
+		stl_gc(ctx);
 	} while(!kthread_should_stop());
 	return 0;
 }
@@ -927,7 +1011,7 @@ static int get_new_zone(struct ctx *ctx)
 try_again:
 	zone_nr = get_next_freezone_nr(ctx);
 	if (zone_nr < 0) {
-		stl_gc();
+		stl_gc(ctx);
 		if (0 == trial) {
 			trial++;
 			goto try_again;
@@ -1404,6 +1488,8 @@ void mark_segment_free(struct ctx *ctx, sector_t zonenr)
 	return;
 }
 
+void update_inmem_sit(struct ctx *, unsigned int , u32 , u64 );
+
 /*
  * pba: from the LBA-PBA pair. Of a data block
  */
@@ -1446,10 +1532,10 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	put_page(sit_page->page);
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
-	
+	update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
 }
 
-static void mark_zone_occupied(struct ctx *ctx , int zonenr);
+static void mark_zone_occupied(struct ctx *, int );
 /*
  * pba: from the LBA-PBA pair. Of a data block
  */
@@ -1524,9 +1610,12 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
 	ptr->mtime = get_elapsed_time(ctx);
+	if (ctx->max_mtime < ptr->mtime)
+		ctx->max_mtime = ptr->mtime;
 	put_page(sit_page->page);
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
+	update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
 }
 
 struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node **parent);
@@ -2727,17 +2816,16 @@ void clone_io_done(struct kref *kref)
 {
 	struct bio *bio;
 	struct nstl_bioctx * nstl_bioctx;
-	static int count;
 	struct ctx *ctx;
 
 	//printk(KERN_ERR "I/O done, freeing....! %d", count);
 	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
 	ctx = nstl_bioctx->ctx;
 	bio = nstl_bioctx->orig;
-	bio_endio(bio);
-	count++;
+	if (bio)
+		bio_endio(bio);
+
 	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
-	printk(KERN_ERR "freeing done! %d", count);
 }
 
 /* can you create the translation entry here?
@@ -2760,13 +2848,11 @@ static void nstl_clone_endio(struct bio * clone)
 
 	subbioctx = (struct nstl_sub_bioctx *) clone->bi_private;
 	if (!subbioctx) {
-		wake_up(&ctx->rev_blk_flushq);
 		panic("subbioctx is NULL !");
 	}
 
 	bioctx = subbioctx->bioctx;
 	if(!bioctx) {
-		wake_up(&ctx->rev_blk_flushq);
 		panic("bioctx is NULL!");
 	}
 	bio = bioctx->orig;
@@ -2774,11 +2860,9 @@ static void nstl_clone_endio(struct bio * clone)
 
 	if (subbioctx->magic != SUBBIOCTX_MAGIC) {
 		/* private has been overwritten */
-		printk(KERN_ERR "\n !!!!!!!!!!!!!!!!subbioctx->magic OVERWRITTEN!");
+		panic(KERN_ERR "\n !!!!!!!!!!!!!!!!subbioctx->magic OVERWRITTEN!");
 		return;
 	}
-
-
 
 	/* If a single segment of the bio fails, the bio should be
 	 * recorded with this status. No translation entry
@@ -2927,8 +3011,17 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		return -1;
 	}
 	
-	/* wait until there's room
-	*/
+	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
+	if (!clone) {
+		kmem_cache_free(ctx->bioctx_cache, bioctx);
+		printk(KERN_ERR "\n Insufficient memory!");
+		bio->bi_status = BLK_STS_RESOURCE;
+		bio_endio(bio);
+		/* We dont call bio_put() because the bio should not
+		 * get freed by memory management before bio_endio()
+		 */
+		return -ENOMEM;
+	}
 
 	bioctx = kmem_cache_alloc(ctx->bioctx_cache, GFP_KERNEL);
 	if (!bioctx) {
@@ -2941,17 +3034,6 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 	}
 
-	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
-	if (!clone) {
-		kmem_cache_free(ctx->bioctx_cache, bioctx);
-		printk(KERN_ERR "\n Insufficient memory!");
-		bio->bi_status = BLK_STS_RESOURCE;
-		bio_endio(bio);
-		/* We dont call bio_put() because the bio should not
-		 * get freed by memory management before bio_endio()
-		 */
-		return -ENOMEM;
-	}
 	bioctx->orig = bio;
 	bioctx->ctx = ctx;
 	/* TODO: Initialize refcount in bioctx and increment it every
@@ -3496,6 +3578,128 @@ int allocate_gc_zone_bitmap(struct ctx *ctx)
 	return 0;
 }
 
+/*
+ * Seginfo tree Management
+ */
+
+int _stl_verbose;
+static void sit_rb_insert(struct ctx *ctx, struct rb_root *root, struct sit_extent *new)
+{
+	struct rb_node **link = &root->rb_node, *parent = NULL;
+	struct sit_extent *e = NULL;
+
+	RB_CLEAR_NODE(&new->rb);
+
+	/* Go to the bottom of the tree */
+	while (*link) {
+		parent = *link;
+		e = container_of(parent, struct sit_extent, rb);
+		if (new->cb_cost < e->cb_cost) {
+			link = &(*link)->rb_left;
+		} else {
+			link = &(*link)->rb_right;
+		}
+	}
+	/* Put the new node there */
+	rb_link_node(&new->rb, parent, link);
+	rb_insert_color(&new->rb, root);
+	ctx->n_sit_extents++;
+}
+
+
+static void sit_rb_remove(struct ctx *ctx, struct rb_root *root, struct sit_extent *e)
+{
+	/* rb_erase resorts and rebalances the tree */
+	rb_erase(&e->rb, root);
+	ctx->n_sit_extents--;
+}
+
+
+static struct extent *sit_rb_next(struct sit_extent *e)
+{
+	struct rb_node *node = rb_next(&e->rb);
+	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
+}
+
+static int get_cb_cb_cost(struct ctx *ctx , u32 nrblks, u64 mtime)
+{
+	unsigned char u, age;
+	struct stl_sb *sb = ctx->sb;
+
+	u = (nrblks * 100) >> (sb->log_zone_size - sb->log_block_size);
+	age = 100 - div_u64(100 * (mtime - ctx->min_mtime),
+				ctx->max_mtime - ctx->min_mtime);
+
+	return UINT_MAX - ((100 * (100 - u) * age)/ (100 + u));
+}
+
+
+static int get_cb_cost(struct ctx *ctx, u32 nrblks, u64 age, char gc_mode)
+{
+	if (gc_mode == GC_GREEDY) {
+		return nrblks;
+	}
+	return get_cb_cb_cost(ctx, nrblks, nrblks);
+
+}
+
+/*
+ *
+ * TODO: Current default is Cost Benefit.
+ * But in the foreground mode, we want to do GC_GREEDY.
+ * Add a parameter in this function and write code for this
+ *
+ * When nrblks is 0, we update the cb_cost based on mtime only.
+ */
+void update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime)
+{
+	struct rb_root *root = &ctx->sit_rb_root;
+	struct rb_node **link = &root->rb_node, *parent = NULL;
+	struct sit_extent *e = NULL, *new = NULL;
+	int cb_cost = 0;
+
+	RB_CLEAR_NODE(&new->rb);
+
+	BUG_ON(nrblks == 0);
+
+	cb_cost = get_cb_cost(ctx, nrblks, mtime, GC_CB);
+	/* Go to the bottom of the tree */
+	while (*link) {
+		parent = *link;
+		e = container_of(parent, struct sit_extent, rb);
+		if (new->cb_cost == e->cb_cost) {
+			if (new->zonenr == zonenr) {
+				sit_rb_remove(ctx, root, e);
+				e->zonenr = zonenr;
+				cb_cost = get_cb_cost(ctx, e->nrblks, mtime, GC_CB);
+				e->cb_cost = cb_cost;
+				e->nrblks = nrblks;
+				sit_rb_insert(ctx, root, e);
+				return;
+			}
+			link = &(*link)->rb_left;
+			continue;
+
+		}
+		if (new->cb_cost < e->cb_cost) {
+			link = &(*link)->rb_left;
+		} else {
+			link = &(*link)->rb_right;
+		}
+	}
+	/* We are essentially adding a new node here */
+	new = kmem_cache_alloc(ctx->sit_extent_cache, GFP_KERNEL);
+	if (!new)
+		return -ENOMEM;
+	new->zonenr = zonenr;
+	new->cb_cost = cb_cost;
+	new->nrblks = nrblks;
+	rb_link_node(&new->rb, parent, link);
+	rb_insert_color(&new->rb, root);
+	ctx->n_sit_extents++;
+}
+
+
 /* TODO: create a freezone cache
  * create a gc zone cache
  * currently calling kzalloc
@@ -3532,6 +3736,11 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 		else if (entry->vblocks < nr_blks_in_zone) {
 			printk(KERN_ERR "\n *segnr: %u", *zonenr);
 			mark_zone_gc_candidate(ctx, *zonenr);
+			if (ctx->min_mtime > entry->mtime)
+				ctx->min_mtime = entry->mtime;
+			if (ctx->max_mtime < entry->mtime)
+				ctx->max_mtime = entry->mtime;
+			update_inmem_sit(ctx, *zonenr, entry->vblocks, entry->mtime);
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
@@ -3797,6 +4006,7 @@ static void destroy_caches(struct ctx *ctx)
 {	
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
 	kmem_cache_destroy(ctx->tm_page_cache);
+	kmem_cache_destroy(ctx->sit_extent_cache);
 	kmem_cache_destroy(ctx->reflist_cache);
 	kmem_cache_destroy(ctx->sit_ctx_cache);
 	kmem_cache_destroy(ctx->sit_page_cache);
@@ -3837,9 +4047,13 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->tm_page_cache) {
 		goto destroy_reflist_cache;
 	}
+	ctx->sit_extent_cache = kmem_cache_create("sit_extent_cache", sizeof(struct sit_extent), 0, SLAB_ACCOUNT, NULL);
+	if (!ctx->sit_page_cache) {
+		goto destroy_tm_page_cache;
+	}
 	ctx->subbio_ctx_cache = kmem_cache_create("subbio_ctx_cache", sizeof(struct nstl_sub_bioctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->subbio_ctx_cache) {
-		goto destroy_tm_page_cache;
+		goto destroy_sit_extent_cache;
 	}
 	ctx->read_ctx_cache = kmem_cache_create("read_ctx_cache", sizeof(struct read_ctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->read_ctx_cache) {
@@ -3855,6 +4069,8 @@ destroy_read_ctx_cache:
 	kmem_cache_destroy(ctx->read_ctx_cache);
 destroy_subbio_ctx_cache:
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
+destroy_sit_extent_cache:
+	kmem_cache_destroy(ctx->sit_extent_cache);
 destroy_tm_page_cache:
 	kmem_cache_destroy(ctx->tm_page_cache);
 destroy_reflist_cache:
