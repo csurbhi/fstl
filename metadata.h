@@ -163,6 +163,12 @@ struct stl_dev_info {
 
 struct stl_gc_thread;
 
+struct gc_extents {
+	struct extent_entry e;
+	struct bio *bio;
+	struct list_head list;
+};
+
 /* this has grown kind of organically, and needs to be cleaned up.
 */
 struct ctx {
@@ -170,17 +176,19 @@ struct ctx {
 	int               max_pba;
 
 	spinlock_t        lock;
-	sector_t          write_frontier; /* LBA, protected by lock */
-	sector_t          wf_end;
+	sector_t          app_write_frontier; /* LBA, protected by lock */
+	sector_t          gc_write_frontier; /* LBA, protected by lock */
+	sector_t          app_wf_end;
+	sector_t          gc_wf_end;
 	sector_t          free_sectors_in_wf;  /* Indicates the free sectors in the current write frontier */
+	sector_t          free_sectors_in_gc_wf;  /* Indicates the free sectors in the current gc  write frontier */
 	int		  n_gc_candidates;
 
 	struct rb_root	  extent_tbl_root; /* in memory extent map */
 	struct rb_root	  rev_tbl_root; /* in memory reverse extent map */
 	struct rb_root    tm_rb_root;	          /* map RB tree */
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
-	rwlock_t          extent_tbl_lock;
-	rwlock_t          rev_tbl_lock;
+	rwlock_t          metadata_update_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
 	int		  n_sit_extents;
@@ -229,6 +237,7 @@ struct ctx {
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
 	struct kmem_cache *sit_extent_cache;
+	struct kmem_cache *gc_extents_cache;
 	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_ref_lock;
 	spinlock_t rev_entries_lock; 	/* protects pending_writes, revmap_[sector/blk]_count */
@@ -246,6 +255,7 @@ struct ctx {
 	wait_queue_head_t ckptq;
 	struct page * revmap_page;
 	struct semaphore flush_lock;
+	struct semaphore gc_lock;
 	struct semaphore sit_kv_store_lock;
 	struct semaphore tm_kv_store_lock;
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
@@ -264,6 +274,7 @@ struct ctx {
 	unsigned int 	nr_invalid_zones;
 	unsigned int 	user_block_count;
 	struct crypto_shash *s_chksum_driver;
+	struct gc_extents * gc_extents;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 
