@@ -477,7 +477,7 @@ static inline void * stl_malloc(size_t size, gfp_t flags)
  * part of the tree; or we want 'n' sequential zones that give the
  * most of any other 'n'
  */
-static int get_zone_for_gc(struct ctx *ctx, int mode)
+static int select_zone_to_clean(struct ctx *ctx, int mode)
 {
 	int zonenr = 0;
 	struct rb_node *node;
@@ -922,17 +922,6 @@ static int stl_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, int
 done:
 	/* Release GC lock */
 	up(&ctx->gc_lock);
-	return 0;
-}
-
-
-unsigned int select_zone_to_clean(struct ctx *ctx, int gc_mode)
-{
-	return 0;
-}
-
-unsigned int get_gc_dest_zone(struct ctx *ctx)
-{
 	return 0;
 }
 
