@@ -158,6 +158,7 @@ struct stl_ckpt {
 	__le64 user_block_count;
 	__le32 nr_invalid_zones;	/* zones that have errors in them */
 	__le64 cur_frontier_pba;
+	__le64 cur_gc_frontier_pba;
 	__le64 nr_free_zones;
 	__le64 elapsed_time;		/* records the time elapsed since all the mounts */
 	__u8 clean;			/* becomes 0 in ctr and 1 in dtr. Used to identify crash */

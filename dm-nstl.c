@@ -1,6 +1,18 @@
 /*TODO:
- * Convert length to be that of blocks.
- * Currently it is that of sectors
+ *
+ *  Copyright (C) 2016 Peter Desnoyers and 2020 Surbhi Palande.
+ *
+ * This file is released under the GPL
+ *
+ * Note: 
+ * bio uses length in terms of 512 byte sectors.
+ * LBA on SMR drives is in terms of 512 byte sectors.
+ * The write frontier is advanced in terms of 4096 blocks
+ * Translation table has one entry for every block (i.e for every 8
+ * lbas) recorded on the disk
+ * The length in reverse translation table is the number of sectors.
+ * The length in the in-memory extent of translation table is in terms
+ * of sectors.
  */
 
 #include <linux/slab.h>
@@ -25,6 +37,7 @@
 #include <crypto/hash.h>
 #include <linux/list.h>
 #include <linux/list_sort.h>
+#include <linux/sched.h>
 
 #include "nstl-u.h"
 #include "stl-wait.h"
@@ -180,7 +193,7 @@ static sector_t get_first_pba_for_zone(struct ctx *ctx, unsigned int zonenr)
 
 static sector_t get_last_pba_for_zone(struct ctx *ctx, unsigned int zonenr)
 {
-	return (ctx->sb->zone0_pba + (zonenr * ctx->nr_lbas_in_zone) + ctx->nr_lbas_in_zone);
+	return (ctx->sb->zone0_pba + (zonenr * ctx->nr_lbas_in_zone) + ctx->nr_lbas_in_zone) - 1;
 }
 
 
@@ -216,12 +229,12 @@ static struct extent *_stl_rb_geq(struct rb_root *root, off_t lba)
 	return higher;
 }
 
-static struct extent *stl_rb_geq(struct ctx *ctx, off_t lba, unsigned int len)
+static struct extent *stl_rb_geq(struct ctx *ctx, off_t lba)
 {
 	struct extent *e = NULL;
 
 	read_lock(&ctx->metadata_update_lock); 
-	e = _stl_rb_geq(&ctx->extent_tbl_root, lba, len);
+	e = _stl_rb_geq(&ctx->extent_tbl_root, lba);
 	read_unlock(&ctx->metadata_update_lock); 
 
 	return e;
@@ -261,15 +274,24 @@ static struct extent * revmap_rb_search_geq(struct ctx *ctx, sector_t pba)
 	/* Go to the bottom of the tree */
 	while (link) {
 		e = container_of(link, struct extent, rb);
-		if (pba == e->pba)
-			return e;
 		if (((!higher) && (e->pba > pba)) || ((higher) && (e->pba < higher->pba))) {
 			higher = e;
 		}
 		if (pba < e->pba) {
 			link = link->rb_left;
 		} else {
-			link = link->rb_right;
+			if (pba >= e->pba + e->len) {
+				/* lba does not fall within this node
+				 */
+				link = link->rb_right;
+			}
+			else {
+				/* lba falls within this node and bio
+				 * should be using e 
+				 */
+				higher = e;
+				break;
+			}
 		}
 		e = NULL;
 	}
@@ -431,9 +453,9 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 	return 0;
 }
 
-static inline int is_stl_ioidle(void)
+static inline int is_stl_ioidle(struct ctx *ctx)
 {
-	return atomic_read(ctx->ioidle);
+	return atomic_read(&ctx->ioidle);
 }
 
 static inline void * stl_malloc(size_t size, gfp_t flags)
@@ -530,8 +552,10 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	gc_extent->e.len = s8;
 	/* Now allocate pages to the bio 
 	 * 2^3 sectors make 1 page
+	 * Since the length is blk aligned, we dont have to add a 1
+	 * to the nr_pages calculation
 	 */
-	nr_pages = ((gc_extent->e.len -1) >> 3) + 1;
+	nr_pages = (gc_extent->e.len >> 3);
 	/* bio_add_page sets the bi_size for the bio */
 	 
 	for(i=0; i<nr_pages; i++) {
@@ -551,6 +575,7 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio->bi_private = ctx;
 	bio->bi_end_io = read_extent_done;
 	gc_extent->bio = bio;
+	return 0;
 }
 
 static int free_gc_list(struct ctx *ctx)
@@ -597,6 +622,7 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
 		gc_extent = list_entry(list_head, struct gc_extents, list);
 		gc_extent->bio->bi_private = ref;
 		refcount_inc(ref);
+		/* setup bio sets bio->bi_end_io = read_extent_done */
 		submit_bio(gc_extent->bio);
 	}
 	/* When we arrive here, we know the last bio has completed.
@@ -659,7 +685,7 @@ static void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8);
  * from the disk, we are sure that the length is in terms of what is
  * found on disk.
  */
-static void write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
+static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 {
 	struct bio *bio;
 	struct list_head *list_head;
@@ -685,7 +711,7 @@ again:
 			 */
 			mark_disk_full(ctx);
 			printk(KERN_ERR "\n write end io status not OK");
-			return;
+			return -1;
 		}
 		if (bio->bi_status == BLK_STS_AGAIN) {
 			trials++;
@@ -695,7 +721,7 @@ again:
 		panic("GC writes failed! Perhaps a resource error");
 	}
 	move_gc_write_frontier(ctx, nrsectors);
-	return;
+	return 0;
 }
 
 
@@ -787,14 +813,14 @@ static int stl_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, int
 		if (NULL == e) {
 			break;
 		}
-		if (e->pba > last_pba + 1)
+		if (e->pba > last_pba)
 			break;
 		temp.pba = e->pba;
 		temp.lba = e->lba;
 		/* Don't change e directly, as e belongs to the
 		 * reverse map rb tree and we have the node address
 		 */
-		if (e->pba + e->len > last_pba + 1)
+		if (e->pba + e->len - 1 > last_pba)
 			temp.len = last_pba - e->pba + 1;
 		add_extent_to_gclist(ctx, &temp);
 		pba = e->pba + temp.len;
@@ -810,22 +836,29 @@ static int stl_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, int
 	 * order
 	 */
 	list_sort(NULL, &ctx->gc_extents->list, cmp_list_nodes);
+	/* Since our read_extents call, overwrites could have made
+	 * the blocks in this zone invalid. Thus we now take a 
+	 * write lock and then re-read the extents metadata; else we
+	 * will end up writing invalid blocks and loosing the
+	 * overwritten data
+	 */
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
 		write_lock(&ctx->metadata_update_lock);
 		e = revmap_rb_search_geq(ctx, pba);
+		/* entire extrents is lost by interim overwrites */
 		if (e->pba > gc_extent->e.pba + gc_extent->e.len) {
 			temp_ptr = list_next_entry(gc_extent, list);
 			list_head = &temp_ptr->list;
 			list_del(&gc_extent->list);
+			kmem_cache_free(ctx->gc_extents_cache, gc_extent);
 			continue;
 		}
+		/* extents are partially snipped */
 		if (e->pba > gc_extent->e.pba) {
-			diff = gc_extent->e.pba - e->pba;
 			gc_extent->e.pba = e->pba;
 			gc_extent->e.lba = e->lba;
 			gc_extent->e.len = e->len;
-			BUG_ON(gc_extent->e.len - e->len != diff);
 			/* bio advance will advance the bi_sector and bi_size
 		 	 */
 			bio_advance(gc_extent->bio, diff << 9);
@@ -859,10 +892,11 @@ static int stl_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, int
 				panic("No memory, couldnt split! write better code!");
 			}
 			diff = nr_sectors - s8;
-			new->e.pba = e->pba + diff;
-			new->e.lba = e->lba + diff;
+			new->e.pba = e->pba + nr_sectors;
+			new->e.lba = e->lba + nr_sectors;
 			new->e.len = diff;
 			new->bio = bio;
+			/* Add new after gc_extent */
 			list_add(&new->list, &gc_extent->list);
 		}
 		write_gc_extent(ctx, gc_extent);
@@ -876,7 +910,10 @@ static int stl_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, int
 		ret = stl_update_range(ctx, &ctx->extent_tbl_root, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 		ret = stl_update_range(ctx, &ctx->rev_tbl_root, gc_extent->e.pba, gc_extent->e.lba, gc_extent->e.len);
 		add_revmap_entries(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+		temp_ptr = list_next_entry(gc_extent, list);
+		list_head = &temp_ptr->list;
 		list_del(&gc_extent->list);
+		kmem_cache_free(ctx->gc_extents_cache, gc_extent);
 		write_unlock(&ctx->metadata_update_lock);
 	}
 	do_checkpoint(ctx);
@@ -936,7 +973,7 @@ static int gc_thread_fn(void * data)
 		 * and for idle time GC mode mutex_trylock()
 		 * You need some check for is_idle()
 		 * */
-		if(!is_stl_ioidle()) {
+		if(!is_stl_ioidle(ctx)) {
 			/* increase sleep time */
 			wait_ms = wait_ms * 2;
 			/* unlock mutex */
@@ -1010,7 +1047,7 @@ int stl_gc_thread_stop(struct ctx *ctx)
 void invoke_gc(unsigned long ptr)
 {
 	struct ctx *ctx = (struct ctx *) ptr;
-	wakeup_process(ctx->gc_th->stl_gc_task);
+	wake_up_process(ctx->gc_th->stl_gc_task);
 }
 
 
@@ -1019,29 +1056,31 @@ void stl_is_ioidle(struct kref *kref)
 	struct ctx *ctx;
 
 	ctx = container_of(kref, struct ctx, ongoing_iocount);
-	atomic_set(ctx->ioidle, 1);
+	atomic_set(&ctx->ioidle, 1);
 	/* Add the initialized timer to the global list */
+	/*
 	ctx->timer.function = invoke_gc;
 	ctx->timer.data = (unsigned long) ctx;
 	ctx->timer.expired = TIME_IDLE_JIFFIES;
 	add_timer(ctx->timer);
+	*/
 }
 
 void nstl_read_done(struct kref *kref)
 {
 	struct app_read_ctx *read_ctx;
 
-	read_ctx = container_of(kref, struct revmap_meta_inmem, kref);
-	bio_end(read_ctx->bio);
+	read_ctx = container_of(kref, struct app_read_ctx, kref);
+	bio_endio(read_ctx->bio);
 	bio_put(read_ctx->clone);
 }
 
 void nstl_subread_done(struct bio *bio)
 {
-	struct app_read_ctx = bio->bi_private;
-	struct ctx *ctx = app_read_ctx->ctx;
+	struct app_read_ctx *read_ctx = bio->bi_private;
+	struct ctx *ctx = read_ctx->ctx;
 
-	kref_put(read_ctx->kref, nstl_read_done);
+	kref_put(&read_ctx->kref, nstl_read_done);
 	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
 }
 
@@ -1062,6 +1101,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 	unsigned nr_sectors, overlap;
 
 	struct app_read_ctx *read_ctx;
+	struct bio *clone;
 
 	//printk(KERN_INFO "Read begins! ");
 	//
@@ -1081,7 +1121,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 	split = NULL;
 	while(split != clone) {
 		lba = clone->bi_iter.bi_sector;
-		e = stl_rb_geq(ctx, lba, len);
+		e = stl_rb_geq(ctx, lba);
 		nr_sectors = bio_sectors(clone);
 
 		/* note that beginning of extent is >= start of bio */
@@ -1139,7 +1179,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 				split = bio;
 				//printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d", lba, (e->pba + lba - e->lba), overlap);
 				split->bi_end_io = nstl_subread_done;
-				atomic_set(ctx->ioidle, 1);
+				atomic_set(&ctx->ioidle, 1);
 				kref_get(&ctx->ongoing_iocount);
 				kref_get(&read_ctx->kref);
 				split->bi_private = read_ctx;
@@ -2216,22 +2256,6 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 
 void wake_up_refcount_waiters(struct ctx *ctx);
 
-void read_complete(struct bio * bio)
-{
-	refcount_t *ref;
-       	struct ctx *ctx;
-	struct gc_read_ctx *read_ctx = bio->bi_private;
-
-	ctx = read_ctx->ctx;
-	ref = read_ctx->ref;
-
-	spin_lock(&ctx->tm_ref_lock);
-	refcount_dec(ref);
-	spin_unlock(&ctx->tm_ref_lock);
-	wake_up_refcount_waiters(ctx);
-}
-
-
 /*
  * Note that blknr is 4096 bytes aligned. Whereas our 
  * LBA is 512 bytes aligned. So we convert the blknr
@@ -2242,55 +2266,31 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks)
 {
 	struct bio * bio;
 	struct page *page;
-	refcount_t *ref;
-	struct read_ctx *read_ctx;
+	struct metadata_read_ctx *read_ctx;
 
 	u64 pba = (base + blknr * NR_SECTORS_IN_BLK);
     	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
 	if (!page )
 		return NULL;
 
-	ref = kzalloc(sizeof(refcount_t), GFP_KERNEL);
-	if (!ref) {
-		__free_pages(page, 0);
-		return NULL;
-	}
-
-	read_ctx = kmem_cache_alloc(ctx->read_ctx_cache, GFP_KERNEL);
-	if (!read_ctx) {
-		__free_pages(page, 0);
-		kfree(ref);
-		return NULL;
-	}
-
-	refcount_set(ref, 2);
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		__free_pages(page, 0);
-		kfree(ref);
-		kmem_cache_free(ctx->read_ctx_cache, read_ctx);
 		return NULL;
 	}
 	
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		__free_pages(page, 0);
-		kfree(ref);
-		kmem_cache_free(ctx->read_ctx_cache, read_ctx);
 		bio_put(bio);
 		return NULL;
 	}
-	bio->bi_end_io = read_complete;
 	bio->bi_private = &read_ctx;
 	read_ctx->ctx = ctx;
-	read_ctx->ref = ref;
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio->bi_iter.bi_sector = pba;
 	bio_set_dev(bio, ctx->dev->bdev);
-	generic_make_request(bio);
-	wait_on_refcount(ctx, ref);
-    	kfree(ref);
-	kmem_cache_free(ctx->read_ctx_cache, read_ctx);
+	submit_bio_wait(bio);
 	if (bio->bi_status != BLK_STS_OK) {
 		printk(KERN_DEBUG "\n Could not read the translation entry block");
 		bio_free_pages(bio);
@@ -3613,7 +3613,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 
 		/* Next we fetch the LBA that our DM got */
 		lba = bio->bi_iter.bi_sector;
-		atomic_set(ctx->ioidle, 1);
+		atomic_set(&ctx->ioidle, 1);
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
 		subbio_ctx->extent.lba = lba;
@@ -4595,18 +4595,18 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->subbio_ctx_cache) {
 		goto destroy_sit_extent_cache;
 	}
-	ctx->read_ctx_cache = kmem_cache_create("read_ctx_cache", sizeof(struct read_ctx), 0, SLAB_ACCOUNT, NULL);
-	if (!ctx->read_ctx_cache) {
-		goto destroy_subbio_ctx_cache;
-	}
 	ctx->gc_extents_cache = kmem_cache_create("gc_extents_cache", sizeof(struct gc_extents), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->gc_extents_cache) {
-		goto destroy_read_ctx_cache;
+		goto destroy_subbio_ctx_cache;
+	}
+	ctx->app_read_ctx_cache = kmem_cache_create("app_read_ctx_cache", sizeof(struct app_read_ctx), 0, SLAB_ACCOUNT, NULL);
+	if (!ctx->app_read_ctx_cache) {
+		goto destroy_gc_extents_cache;
 	}
 	return 0;
 /* failed case */
-destroy_read_ctx_cache:
-	kmem_cache_destroy(ctx->read_ctx_cache);
+destroy_gc_extents_cache:
+	kmem_cache_destroy(ctx->gc_extents_cache);
 destroy_subbio_ctx_cache:
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
 destroy_sit_extent_cache:
@@ -4769,7 +4769,10 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 		goto free_metadata_pages;
 	}
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
-	init_timer(ctx->timer);
+	/*
+	 * Will work with timer based invocation later
+	 * init_timer(ctx->timer);
+	 */
 	/*
 	ret = stl_gc_thread_start(ctx);
 	if (ret) {
@@ -4849,7 +4852,9 @@ static void stl_dtr(struct dm_target *dm_target)
 	if (ctx->ckpt_page)
 		put_page(ctx->ckpt_page);
 	printk(KERN_ERR "\n metadata pages freed! \n");
-	del_timer_sync(&ctx->timer_list);
+	/* timer based gc invocation for later
+	 * del_timer_sync(&ctx->timer_list);
+	 */
 	//destroy_caches(ctx);
 	//printk(KERN_ERR "\n caches destroyed! \n");
 	//stl_gc_thread_stop(ctx);

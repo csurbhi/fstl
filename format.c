@@ -338,6 +338,15 @@ unsigned long long get_current_frontier(struct stl_sb *sb)
 	return (sit_zone_nr + 1) * (1 << (sb->log_zone_size - sb->log_sector_size));
 }
 
+unsigned long long get_current_gc_frontier(struct stl_sb *sb)
+{
+	int zonenr = get_zone_count();
+
+	zonenr = zonenr - 20;
+	return (zonenr) * (1 << (sb->log_zone_size - sb->log_sector_size));
+}
+
+
 struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 {
 	struct stl_sb *sb;
@@ -449,6 +458,7 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 	ckpt->user_block_count = sb->zone_count_main << (sb->log_zone_size - sb->log_block_size);
 	ckpt->nr_invalid_zones = 0;
 	ckpt->cur_frontier_pba = get_current_frontier(sb);
+	ckpt->cur_gc_frontier_pba = get_current_gc_frontier(sb);
 	ckpt->nr_free_zones = sb->zone_count_main - 1; //1 for the current frontier
 	ckpt->elapsed_time = 0;
 	ckpt->clean = 1;  /* 1 indicates clean datastructures */
