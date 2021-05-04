@@ -31,11 +31,22 @@
 #define BG_GC 1
 #define FG_GC 2
 
-struct read_ctx {
+struct gc_read_ctx {
 	struct ctx *ctx;
 	refcount_t *ref;
 };
 
+struct app_read_ctx {
+	struct ctx *ctx;
+	struct kref kref; 	//sub read count;
+	struct bio *bio;
+	struct bio *clone;
+};
+
+struct metadata_read_ctx {
+	struct ctx *ctx;
+	refcount_t ref;
+};
 
 struct tm_page_write_ctx {
 	struct ctx *ctx;
@@ -161,7 +172,19 @@ struct stl_dev_info {
 #define MAX_TIME 5
 
 
-struct stl_gc_thread;
+struct stl_gc_thread {
+	struct task_struct *stl_gc_task;
+	wait_queue_head_t stl_gc_wait_queue;
+	/* for gc sleep time */
+	unsigned int urgent_sleep_time;
+	unsigned int min_sleep_time;
+        unsigned int max_sleep_time;
+        unsigned int no_gc_sleep_time;
+
+	/* for changing gc mode */
+        unsigned int gc_wake;
+};
+
 
 struct gc_extents {
 	struct extent_entry e;
@@ -231,13 +254,13 @@ struct ctx {
 	struct kmem_cache * subbio_ctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
-	struct kmem_cache *read_ctx_cache;
 	struct kmem_cache *reflist_cache;
 	struct kmem_cache *tm_page_write_cache;
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
 	struct kmem_cache *sit_extent_cache;
 	struct kmem_cache *gc_extents_cache;
+	struct kmem_cache *app_read_ctx_cache;
 	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_ref_lock;
 	spinlock_t rev_entries_lock; 	/* protects pending_writes, revmap_[sector/blk]_count */
@@ -275,6 +298,9 @@ struct ctx {
 	unsigned int 	user_block_count;
 	struct crypto_shash *s_chksum_driver;
 	struct gc_extents * gc_extents;
+	struct kref	ongoing_iocount;
+	atomic_t ioidle;
+	//struct timer_list timer_list;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 

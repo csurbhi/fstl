@@ -216,12 +216,12 @@ static struct extent *_stl_rb_geq(struct rb_root *root, off_t lba)
 	return higher;
 }
 
-static struct extent *stl_rb_geq(struct ctx *ctx, off_t lba)
+static struct extent *stl_rb_geq(struct ctx *ctx, off_t lba, unsigned int len)
 {
 	struct extent *e = NULL;
 
 	read_lock(&ctx->metadata_update_lock); 
-	e = _stl_rb_geq(&ctx->extent_tbl_root, lba);
+	e = _stl_rb_geq(&ctx->extent_tbl_root, lba, len);
 	read_unlock(&ctx->metadata_update_lock); 
 
 	return e;
@@ -431,23 +431,9 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 	return 0;
 }
 
-
-struct stl_gc_thread {
-	struct task_struct *stl_gc_task;
-	wait_queue_head_t stl_gc_wait_queue;
-	/* for gc sleep time */
-	unsigned int urgent_sleep_time;
-	unsigned int min_sleep_time;
-        unsigned int max_sleep_time;
-        unsigned int no_gc_sleep_time;
-
-	/* for changing gc mode */
-        unsigned int gc_wake;
-};
-
-static inline int stl_is_idle(void)
+static inline int is_stl_ioidle(void)
 {
-	return 1;
+	return atomic_read(ctx->ioidle);
 }
 
 static inline void * stl_malloc(size_t size, gfp_t flags)
@@ -501,6 +487,31 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 	list_add_tail(&ctx->gc_extents->list, &gc_extent->list);
 }
 
+void read_extent_done(struct bio *bio)
+{
+	int trial = 0;
+	refcount_t *ref;
+	
+	if (bio->bi_status != BLK_STS_OK) {
+		if (bio->bi_status == BLK_STS_IOERR) {
+			printk(KERN_ERR "\n GC read failed because of disk error!");
+			/* We need to continue this GC; this extent is
+			 * lost!
+			 */
+		}
+		else {
+			if (bio->bi_status  == BLK_STS_AGAIN) {
+				trial ++;
+				if (trial < 3)
+					submit_bio(bio);
+			}
+			panic("GC read of an extent failed! Could be a resource issue, write better error handling");
+		}
+	}
+	ref = bio->bi_private;
+	refcount_dec(ref);
+}
+
 static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 {
 	int nr_pages = 0;
@@ -538,6 +549,7 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_private = ctx;
+	bio->bi_end_io = read_extent_done;
 	gc_extent->bio = bio;
 }
 
@@ -563,29 +575,36 @@ static int free_gc_list(struct ctx *ctx)
 	}
 }
 
-static int submit_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_extent)
+void wait_on_refcount(struct ctx *ctx, refcount_t *ref);
+
+static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_extent)
 {
 
 	struct list_head *list_head;
 	struct gc_extents *gc_extent;
 	struct blk_plug plug;
+	refcount_t * ref;
+
+	ref = kzalloc(sizeof(refcount_t), GFP_KERNEL);
+	if (!ref) {
+		return -ENOMEM;
+	}
+
+	refcount_set(ref, 1);
 
 	blk_start_plug(&plug);
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
-		if (gc_extent != last_extent) {
-			bio_chain(gc_extent->bio, last_extent->bio);
-			submit_bio(gc_extent->bio);
-		}
+		gc_extent->bio->bi_private = ref;
+		refcount_inc(ref);
+		submit_bio(gc_extent->bio);
 	}
-	submit_bio_wait(last_extent->bio);
 	/* When we arrive here, we know the last bio has completed.
 	 * Since the previous bios were chained to this one, we know
 	 * that the previous bios have completed as well
 	 */
 	blk_finish_plug(&plug);
-
-
+	wait_on_refcount(ctx, ref);
 }
 
 /*
@@ -593,7 +612,7 @@ static int submit_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_ext
  * of what extent reading did not work! We can retry and if
  * the block did not work, we can do something more meaningful.
  */
-static int read_extents(struct ctx *ctx)
+static int read_gc_extents(struct ctx *ctx)
 {
 	struct bio *bio;
 	struct list_head *list_head;
@@ -611,7 +630,7 @@ static int read_extents(struct ctx *ctx)
 		}
 	}
 	last_extent = gc_extent;
-	submit_all_bios_and_wait(ctx, last_extent);
+	read_all_bios_and_wait(ctx, last_extent);
 }
 
 static int cmp_list_nodes(void *priv, struct list_head *lha, struct list_head *lhb)
@@ -640,7 +659,7 @@ static void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8);
  * from the disk, we are sure that the length is in terms of what is
  * found on disk.
  */
-static void write_extent(struct ctx *ctx, struct gc_extents *gc_extent)
+static void write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 {
 	struct bio *bio;
 	struct list_head *list_head;
@@ -786,7 +805,7 @@ static int stl_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, int
 	 * information table
 	 */
 	BUG_ON(list_empty(&ctx->gc_extents->list));
-	read_extents(ctx);
+	read_gc_extents(ctx);
 	/* Sort the list on LBAs. Write increasing LBAs in the same
 	 * order
 	 */
@@ -846,7 +865,7 @@ static int stl_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, int
 			new->bio = bio;
 			list_add(&new->list, &gc_extent->list);
 		}
-		write_extent(ctx, gc_extent);
+		write_gc_extent(ctx, gc_extent);
 		if (gc_extent->bio->bi_status != BLK_STS_OK) {
 			/* write error! disk is in a read mode! we
 			 * cannot perform any further GC
@@ -917,7 +936,7 @@ static int gc_thread_fn(void * data)
 		 * and for idle time GC mode mutex_trylock()
 		 * You need some check for is_idle()
 		 * */
-		if(!stl_is_idle()) {
+		if(!is_stl_ioidle()) {
 			/* increase sleep time */
 			wait_ms = wait_ms * 2;
 			/* unlock mutex */
@@ -979,11 +998,52 @@ int stl_gc_thread_start(struct ctx *ctx)
 
 int stl_gc_thread_stop(struct ctx *ctx)
 {
+	kthread_stop(ctx->gc_th->stl_gc_task);
 	kvfree(ctx->gc_th);
 	return 0;
 }
 
+/* When we find that the system is idle for a long time,
+ * then we invoke the stl_gc in a background mode
+ */
 
+void invoke_gc(unsigned long ptr)
+{
+	struct ctx *ctx = (struct ctx *) ptr;
+	wakeup_process(ctx->gc_th->stl_gc_task);
+}
+
+
+void stl_is_ioidle(struct kref *kref)
+{
+	struct ctx *ctx;
+
+	ctx = container_of(kref, struct ctx, ongoing_iocount);
+	atomic_set(ctx->ioidle, 1);
+	/* Add the initialized timer to the global list */
+	ctx->timer.function = invoke_gc;
+	ctx->timer.data = (unsigned long) ctx;
+	ctx->timer.expired = TIME_IDLE_JIFFIES;
+	add_timer(ctx->timer);
+}
+
+void nstl_read_done(struct kref *kref)
+{
+	struct app_read_ctx *read_ctx;
+
+	read_ctx = container_of(kref, struct revmap_meta_inmem, kref);
+	bio_end(read_ctx->bio);
+	bio_put(read_ctx->clone);
+}
+
+void nstl_subread_done(struct bio *bio)
+{
+	struct app_read_ctx = bio->bi_private;
+	struct ctx *ctx = app_read_ctx->ctx;
+
+	kref_put(read_ctx->kref, nstl_read_done);
+	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
+}
 
 /*
  * This is an asynchronous read, i.e we submit the request
@@ -1001,29 +1061,63 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 	struct extent *e;
 	unsigned nr_sectors, overlap;
 
+	struct app_read_ctx *read_ctx;
+
 	//printk(KERN_INFO "Read begins! ");
+	//
+	read_ctx = kmem_cache_alloc(ctx->app_read_ctx_cache, GFP_KERNEL);
+	if (!read_ctx)
+		return -ENOMEM;
+
+	kref_init(&read_ctx->kref);
 
 	atomic_inc(&ctx->n_reads);
-	while(split != bio) {
-		lba = bio->bi_iter.bi_sector;
-		e = stl_rb_geq(ctx, lba);
-		nr_sectors = bio_sectors(bio);
+	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
+	if (!clone)
+		return -ENOMEM;
+
+	read_ctx->clone = clone;
+
+	split = NULL;
+	while(split != clone) {
+		lba = clone->bi_iter.bi_sector;
+		e = stl_rb_geq(ctx, lba, len);
+		nr_sectors = bio_sectors(clone);
 
 		/* note that beginning of extent is >= start of bio */
-		/* [----bio-----] [eeeeeee]  */
+		/* [----bio-----] [eeeeeee] a
+		 *
+		 * eeeeeeeeeeeeee		eeeeeeeeeeeee
+		 * 	bbbbbbbbbbbbbbbbbbb
+		 *
+		 * bio will be split. The second part of the bio will
+		 * fall in this next case; it will be zerofilled.
+		 * But we do not want to rush to call end_io yet,
+		 * till the first portion has completed.
+		 *
+		 * However the case could might as well be:
+		 *
+		 * Where the entire bio did not have a single split
+		 * and no overlap either:
+		 *
+		 *		eeeeeeeeeeee
+		 * bbbbbb
+		 *
+		 */
 		if (e == NULL || e->lba >= lba + nr_sectors)  {
 			//printk(KERN_ERR "\n Case of no overlap");
 			zero_fill_bio(bio);
-			bio_endio(bio);
-			break;
+			kref_get(&read_ctx->kref);
+			nstl_subread_done(clone);
+			
 		}
 		if (e->lba > lba) {
 		/*               [eeeeeeeeeeee]
 			       [---------bio------] */
 			//printk(KERN_ERR "\n e->lba >  lba");
 			nr_sectors = e->lba - lba;
-			split = bio_split(bio, nr_sectors, GFP_NOIO, &fs_bio_set);
-			bio_chain(split, bio);
+			split = bio_split(clone, nr_sectors, GFP_NOIO, &fs_bio_set);
+			bio_chain(split, clone);
 			zero_fill_bio(split);
 			bio_endio(split);
 			continue;
@@ -1037,8 +1131,18 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 				split = bio_split(bio, overlap, GFP_NOIO, &fs_bio_set);
 				bio_chain(split, bio);
 			} else {
+				/* All the previous splits are chained
+				 * to this last one. No more bios will
+				 * be submitted once this is
+				 * submitted
+				 */
 				split = bio;
 				//printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d", lba, (e->pba + lba - e->lba), overlap);
+				split->bi_end_io = nstl_subread_done;
+				atomic_set(ctx->ioidle, 1);
+				kref_get(&ctx->ongoing_iocount);
+				kref_get(&read_ctx->kref);
+				split->bi_private = read_ctx;
 			}
 			pba = e->pba + lba - e->lba;
 			split->bi_iter.bi_sector = pba;
@@ -2116,7 +2220,7 @@ void read_complete(struct bio * bio)
 {
 	refcount_t *ref;
        	struct ctx *ctx;
-	struct read_ctx *read_ctx = bio->bi_private;
+	struct gc_read_ctx *read_ctx = bio->bi_private;
 
 	ctx = read_ctx->ctx;
 	ref = read_ctx->ref;
@@ -2127,7 +2231,6 @@ void read_complete(struct bio * bio)
 	wake_up_refcount_waiters(ctx);
 }
 
-void wait_on_refcount(struct ctx *ctx, refcount_t *ref);
 
 /*
  * Note that blknr is 4096 bytes aligned. Whereas our 
@@ -3371,6 +3474,7 @@ static void nstl_clone_endio(struct bio * clone)
 	bio_put(clone);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 	kref_put(&bioctx->ref, clone_io_done);
+	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
 	return;
 }
 
@@ -3509,7 +3613,9 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 
 		/* Next we fetch the LBA that our DM got */
 		lba = bio->bi_iter.bi_sector;
+		atomic_set(ctx->ioidle, 1);
 		kref_get(&bioctx->ref);
+		kref_get(&ctx->ongoing_iocount);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
@@ -4663,6 +4769,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 		goto free_metadata_pages;
 	}
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
+	init_timer(ctx->timer);
 	/*
 	ret = stl_gc_thread_start(ctx);
 	if (ret) {
@@ -4742,6 +4849,7 @@ static void stl_dtr(struct dm_target *dm_target)
 	if (ctx->ckpt_page)
 		put_page(ctx->ckpt_page);
 	printk(KERN_ERR "\n metadata pages freed! \n");
+	del_timer_sync(&ctx->timer_list);
 	//destroy_caches(ctx);
 	//printk(KERN_ERR "\n caches destroyed! \n");
 	//stl_gc_thread_stop(ctx);
