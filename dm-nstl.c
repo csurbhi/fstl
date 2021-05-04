@@ -2454,6 +2454,7 @@ void write_tmbl_complete(struct bio *bio)
 		bio_free_pages(bio);
 	} 
 	spin_unlock(&ctx->tm_flush_lock);
+	atomic_dec(&ctx->tm_flush_count);
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
 	printk(KERN_ERR "\n %s done!!!", __func__);
@@ -2537,8 +2538,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	}
 	spin_unlock(&ctx->ckpt_lock);
 printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu bio->bi_iter.bi_size: %u page:%p", __func__, bio->bi_iter.bi_sector, bio->bi_iter.bi_size, page_address(page));
-	//generic_make_request(bio);
-	write_tmbl_complete(bio);
+	generic_make_request(bio);
 }
 
 
