@@ -1048,6 +1048,7 @@ void stl_is_ioidle(struct kref *kref)
 
 	ctx = container_of(kref, struct ctx, ongoing_iocount);
 	atomic_set(&ctx->ioidle, 1);
+	printk(KERN_ERR "\n Stl is io idle!");
 	/* Add the initialized timer to the global list */
 	/*
 	ctx->timer.function = invoke_gc;
@@ -1057,22 +1058,16 @@ void stl_is_ioidle(struct kref *kref)
 	*/
 }
 
-void nstl_read_done(struct kref *kref)
-{
-	struct app_read_ctx *read_ctx;
-
-	read_ctx = container_of(kref, struct app_read_ctx, kref);
-	bio_endio(read_ctx->bio);
-	bio_put(read_ctx->clone);
-}
-
 void nstl_subread_done(struct bio *bio)
 {
 	struct app_read_ctx *read_ctx = bio->bi_private;
 	struct ctx *ctx = read_ctx->ctx;
 
-	kref_put(&read_ctx->kref, nstl_read_done);
+	bio_endio(read_ctx->bio);
 	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
+	kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
+	//printk(KERN_ERR "\n nstl_subread_done! \n");
+	bio_put(read_ctx->clone);
 }
 
 /*
@@ -1094,21 +1089,20 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 	struct app_read_ctx *read_ctx;
 	struct bio *clone;
 
-	//printk(KERN_INFO "Read begins! ");
-	//
+	printk(KERN_ERR "Read begins! ctx->app_read_ctx_cache: %llu", ctx->app_read_ctx_cache);
 	read_ctx = kmem_cache_alloc(ctx->app_read_ctx_cache, GFP_KERNEL);
 	if (!read_ctx)
 		return -ENOMEM;
 
-	kref_init(&read_ctx->kref);
-
 	atomic_inc(&ctx->n_reads);
 	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
-	if (!clone)
+	if (!clone) {
+		kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
 		return -ENOMEM;
+	}
 
-	read_ctx->clone = clone;
 	read_ctx->ctx = ctx;
+	read_ctx->bio = bio;
 
 	split = NULL;
 	while(split != clone) {
@@ -1137,17 +1131,18 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		 *
 		 */
 		if (e == NULL || e->lba >= lba + nr_sectors)  {
-			//printk(KERN_ERR "\n Case of no overlap");
+			//printk(KERN_ERR "\n Case of no overlap \n");
 			zero_fill_bio(clone);
-			kref_get(&read_ctx->kref);
+			kref_get(&ctx->ongoing_iocount);
 			clone->bi_private = read_ctx;
+			read_ctx->clone = clone;
 			nstl_subread_done(clone);
-			
+			return 0;
 		}
 		if (e->lba > lba) {
 		/*               [eeeeeeeeeeee]
 			       [---------bio------] */
-			//printk(KERN_ERR "\n e->lba >  lba");
+			printk(KERN_ERR "\n e->lba >  lba \n");
 			nr_sectors = e->lba - lba;
 			split = bio_split(clone, nr_sectors, GFP_NOIO, &fs_bio_set);
 			bio_chain(split, clone);
@@ -1158,7 +1153,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		else { //(e->lba <= lba)
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		     [---------bio------] */
-			//printk(KERN_ERR "\n e->lba <= lba");
+			printk(KERN_ERR "\n e->lba <= lba \n");
 			overlap = e->lba + e->len - lba;
 			if (overlap < nr_sectors) {
 				split = bio_split(bio, overlap, GFP_NOIO, &fs_bio_set);
@@ -1169,12 +1164,12 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 				 * be submitted once this is
 				 * submitted
 				 */
-				split = bio;
-				//printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d", lba, (e->pba + lba - e->lba), overlap);
+				split = clone;
+				printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d \n", lba, (e->pba + lba - e->lba), overlap);
 				split->bi_end_io = nstl_subread_done;
 				atomic_set(&ctx->ioidle, 1);
 				kref_get(&ctx->ongoing_iocount);
-				kref_get(&read_ctx->kref);
+				read_ctx->clone = clone;
 				split->bi_private = read_ctx;
 			}
 			pba = e->pba + lba - e->lba;
@@ -1184,7 +1179,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 			generic_make_request(split);
 		}
 	}
-	//printk(KERN_INFO "\n Read end");
+	printk(KERN_INFO "\n Read end");
 	return 0;
 }
 
@@ -4501,6 +4496,7 @@ int read_metadata(struct ctx * ctx)
 		printk(KERN_ERR "\n SIT and checkpoint does not match!");
 		return -1;
 	}
+	printk(KERN_ERR "\n Metadata read!");
 	return 0;
 }
 
@@ -4596,10 +4592,12 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->gc_extents_cache) {
 		goto destroy_subbio_ctx_cache;
 	}
+	printk(KERN_ERR "\n gc_extents_cache initialized to address: %llu", ctx->gc_extents_cache);
 	ctx->app_read_ctx_cache = kmem_cache_create("app_read_ctx_cache", sizeof(struct app_read_ctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->app_read_ctx_cache) {
 		goto destroy_gc_extents_cache;
 	}
+	printk(KERN_ERR "\n app_read_ctx_cache initialized to address: %llu", ctx->app_read_ctx_cache);
 	return 0;
 /* failed case */
 destroy_gc_extents_cache:
@@ -4745,6 +4743,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 		goto destroy_cache;
 	}
 
+	kref_init(&ctx->ongoing_iocount);
 	//printk(KERN_ERR "\n About to read metadata! 5 ! \n");
 
     	ret = read_metadata(ctx);
@@ -4761,10 +4760,13 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 		goto free_metadata_pages;
 	}
 
+	printk(KERN_ERR "\n Initializing gc_extents list, ctx->gc_extents_cache: %llu ", ctx->gc_extents_cache);
 	ctx->gc_extents = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 	if (!ctx->gc_extents) {
+		printk(KERN_ERR "\n Could not allocate gc_extent and hence could not initialized \n");
 		goto free_metadata_pages;
 	}
+	printk(KERN_ERR "\n Extent allocated....! ctx->gc_extents: %llu", ctx->gc_extents);
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
 	/*
 	 * Will work with timer based invocation later
@@ -4787,6 +4789,7 @@ static int stl_ctr(struct dm_target *dm_target, unsigned int argc, char **argv)
 	stl_gc_thread_stop(ctx);
 */
 free_metadata_pages:
+	printk(KERN_ERR "\n freeing metadata pages!");
 	if (ctx->revmap_bm)
 		put_page(ctx->revmap_bm);
 	if (ctx->sb_page)
