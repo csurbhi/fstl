@@ -1108,6 +1108,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 
 	read_ctx->clone = clone;
+	read_ctx->ctx = ctx;
 
 	split = NULL;
 	while(split != clone) {
@@ -1137,8 +1138,9 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		 */
 		if (e == NULL || e->lba >= lba + nr_sectors)  {
 			//printk(KERN_ERR "\n Case of no overlap");
-			zero_fill_bio(bio);
+			zero_fill_bio(clone);
 			kref_get(&read_ctx->kref);
+			clone->bi_private = read_ctx;
 			nstl_subread_done(clone);
 			
 		}
