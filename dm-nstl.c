@@ -4178,7 +4178,7 @@ static int get_cb_cost(struct ctx *ctx, u32 nrblks, u64 age, char gc_mode)
  *
  * When nrblks is 0, we update the cb_cost based on mtime only.
  */
-void update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime)
+int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime)
 {
 	struct rb_root *root = &ctx->sit_rb_root;
 	struct rb_node **link = &root->rb_node, *parent = NULL;
@@ -4227,6 +4227,7 @@ void update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	rb_insert_color(&new->rb, root);
 	ctx->n_sit_extents++;
 	write_unlock(&ctx->sit_rb_lock);
+	return 0;
 }
 
 
@@ -4270,7 +4271,8 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 				ctx->min_mtime = entry->mtime;
 			if (ctx->max_mtime < entry->mtime)
 				ctx->max_mtime = entry->mtime;
-			update_inmem_sit(ctx, *zonenr, entry->vblocks, entry->mtime);
+			if (!update_inmem_sit(ctx, *zonenr, entry->vblocks, entry->mtime))
+				panic("Memory error, write a memory shrinker!");
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
