@@ -2008,7 +2008,7 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 	/* Balance the tree after the blknr is addded to it */
 	rb_insert_color(&new->rb, root);
 	
-	atomic_inc(&ctx->nr_tm_pages);
+	atomic_inc(&ctx->nr_sit_pages);
 	atomic_inc(&ctx->sit_flush_count);
 
 	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
@@ -2533,6 +2533,8 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	/*-----------------------------------------------*/
 	spin_unlock(&ctx->tm_flush_lock);
 	spin_lock(&ctx->ckpt_lock);
+	/* The next code is related to synchronizing at dtr() time.
+	 */
 	if(ctx->flag_ckpt) {
 		atomic_inc(&ctx->ckpt_ref);
 	}
@@ -2669,6 +2671,7 @@ void write_sitbl_complete(struct bio *bio)
 	}
 	/*-------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
+	atomic_dec(&ctx->sit_flush_count);
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
 }
@@ -2731,13 +2734,12 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock(&ctx->ckpt_lock);
 	sit_ctx->page = page;
-	//spin_lock(&ctx->sit_flush_lock);
+	spin_lock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
-	//ClearPageDirty(page);
+	ClearPageDirty(page);
 	/*-------------------------*/
-	//spin_unlock(&ctx->sit_flush_lock);
-	write_sitbl_complete(bio);
-	//generic_make_request(bio);
+	spin_unlock(&ctx->sit_flush_lock);
+	generic_make_request(bio);
 }
 
 void flush_count_sit_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
