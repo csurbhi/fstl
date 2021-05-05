@@ -507,6 +507,7 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 	 * We always want to add the extents in a PBA increasing order
 	 */
 	list_add_tail(&ctx->gc_extents->list, &gc_extent->list);
+	return 0;
 }
 
 void read_extent_done(struct bio *bio)
@@ -578,7 +579,7 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	return 0;
 }
 
-static int free_gc_list(struct ctx *ctx)
+static void free_gc_list(struct ctx *ctx)
 {
 
 	struct list_head *list_head;
@@ -631,6 +632,7 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
 	 */
 	blk_finish_plug(&plug);
 	wait_on_refcount(ctx, ref);
+	return 0;
 }
 
 /*
@@ -638,7 +640,7 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
  * of what extent reading did not work! We can retry and if
  * the block did not work, we can do something more meaningful.
  */
-static int read_gc_extents(struct ctx *ctx)
+static void read_gc_extents(struct ctx *ctx)
 {
 	struct bio *bio;
 	struct list_head *list_head;
@@ -2037,7 +2039,7 @@ void mark_segment_free(struct ctx *ctx, sector_t zonenr)
 	return;
 }
 
-void update_inmem_sit(struct ctx *, unsigned int , u32 , u64 );
+int update_inmem_sit(struct ctx *, unsigned int , u32 , u64 );
 
 /*
  * pba: from the LBA-PBA pair. Of a data block
@@ -4204,7 +4206,7 @@ int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime
 				e->cb_cost = cb_cost;
 				e->nrblks = nrblks;
 				sit_rb_insert(ctx, root, e);
-				return;
+				return 0;
 			}
 			link = &(*link)->rb_left;
 			continue;
