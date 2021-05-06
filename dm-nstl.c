@@ -2275,7 +2275,6 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks)
 {
 	struct bio * bio;
 	struct page *page;
-	struct metadata_read_ctx *read_ctx;
 
 	u64 pba = (base + blknr * NR_SECTORS_IN_BLK);
     	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
@@ -2294,8 +2293,6 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks)
 		bio_put(bio);
 		return NULL;
 	}
-	bio->bi_private = &read_ctx;
-	read_ctx->ctx = ctx;
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio->bi_iter.bi_sector = pba;
 	bio_set_dev(bio, ctx->dev->bdev);
@@ -2907,7 +2904,7 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_me
 			up(&ctx->flush_lock);
 		}
 		down_interruptible(&ctx->tm_kv_store_lock);
-	} 
+	}
 	return new;
 }
 
