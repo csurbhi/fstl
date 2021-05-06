@@ -1089,7 +1089,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 	struct app_read_ctx *read_ctx;
 	struct bio *clone;
 
-	printk(KERN_ERR "Read begins! ctx->app_read_ctx_cache: %llu", ctx->app_read_ctx_cache);
+	//printk(KERN_ERR "Read begins! ctx->app_read_ctx_cache: %llu", ctx->app_read_ctx_cache);
 	read_ctx = kmem_cache_alloc(ctx->app_read_ctx_cache, GFP_KERNEL);
 	if (!read_ctx)
 		return -ENOMEM;
@@ -1135,8 +1135,14 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 			zero_fill_bio(clone);
 			kref_get(&ctx->ongoing_iocount);
 			clone->bi_private = read_ctx;
+			clone->bi_end_io = nstl_subread_done;
 			read_ctx->clone = clone;
-			nstl_subread_done(clone);
+			/* This bio could be the parent of other
+			 * chained bios. Its necessary to call
+			 * bio_endio and not the endio function
+			 * directly
+			 */
+			bio_endio(clone);
 			return 0;
 		}
 		if (e->lba > lba) {
@@ -1153,24 +1159,38 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 		else { //(e->lba <= lba)
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		     [---------bio------] */
-			printk(KERN_ERR "\n e->lba <= lba \n");
 			overlap = e->lba + e->len - lba;
+			printk(KERN_ERR "\n e->lba <= lba  e->lba: %lu lba: %lu overlap: %d \n", e->lba, lba, overlap);
 			if (overlap < nr_sectors) {
-				split = bio_split(bio, overlap, GFP_NOIO, &fs_bio_set);
-				bio_chain(split, bio);
+				split = bio_split(clone, overlap, GFP_NOIO, &fs_bio_set);
+				if (!split) {
+					printk(KERN_ERR "\n Could not split the clone! ERR ");
+					/* other bios could have
+					 * been chained to clone. Hence we
+					 *  should be calling bio_endio(clone)
+					 */
+					clone->bi_status = BLK_STS_RESOURCE;
+					kref_get(&ctx->ongoing_iocount);
+					clone->bi_private = read_ctx;
+					clone->bi_end_io = nstl_subread_done;
+					read_ctx->clone = clone;
+					bio_endio(clone);
+					return -ENOMEM;
+				}
+				bio_chain(split, clone);
 			} else {
 				/* All the previous splits are chained
 				 * to this last one. No more bios will
 				 * be submitted once this is
 				 * submitted
 				 */
+				atomic_set(&ctx->ioidle, 0);
 				split = clone;
 				printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d \n", lba, (e->pba + lba - e->lba), overlap);
-				split->bi_end_io = nstl_subread_done;
-				atomic_set(&ctx->ioidle, 1);
 				kref_get(&ctx->ongoing_iocount);
-				read_ctx->clone = clone;
 				split->bi_private = read_ctx;
+				split->bi_end_io = nstl_subread_done;
+				read_ctx->clone = clone;
 			}
 			pba = e->pba + lba - e->lba;
 			split->bi_iter.bi_sector = pba;
@@ -2222,11 +2242,10 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 			down_interruptible(&ctx->tm_kv_store_lock);
 	/*-----------------------------------------------*/
 			tm_page = search_tm_kv_store(ctx, lba, &parent);
-	/*-----------------------------------------------*/
-			up(&ctx->tm_kv_store_lock);
 			if (!tm_page) {
 				tm_page = add_tm_entry_kv_store(ctx, lba, revmap_bio_ctx);
 				if (!tm_page) {
+					up(&ctx->tm_kv_store_lock);
 					/* TODO: try freeing some
 					 * pages here
 					 */
@@ -2234,6 +2253,8 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 					panic("Low memory, while adding tm entry ");
 				}
 			}
+	/*-----------------------------------------------*/
+			up(&ctx->tm_kv_store_lock);
 			page = tm_page->page;
 			ptr = (struct tm_entry *) page_address(page);
 			index = 0;
@@ -2783,6 +2804,9 @@ void flush_count_sit_blocks(struct ctx *ctx, bool flush, int nrscan)
 
 /*
  * lba: from the LBA-PBA pair of a data block.
+ * Should be called with
+ *
+	(&ctx->tm_kv_store_lock);
  */
 struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_meta_inmem *revmap_bio_ctx)
 {
@@ -2802,15 +2826,12 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_me
 	INIT_LIST_HEAD(&refnode->list);
 	printk(KERN_ERR "\n refnode created! \n");
 
-	down_interruptible(&ctx->tm_kv_store_lock);
-	/*-----------------------------------------------*/
 	new = search_tm_kv_store(ctx, blknr, &parent);
 	if (new) {
 		list_for_each(temp, &new->reflist) {
 			tempref = list_entry(temp, struct ref_list, list);
 			if (tempref->revmap_bio_ctx->revmap_pba  == revmap_bio_ctx->revmap_pba) {
 				kmem_cache_free(ctx->reflist_cache, refnode);
-				up(&ctx->tm_kv_store_lock);
 				return new;
 			}
 		}
@@ -2820,7 +2841,6 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_me
 		refnode->revmap_bio_ctx = revmap_bio_ctx;
 		kref_get(&revmap_bio_ctx->kref);
 		list_add(&refnode->list, &new->reflist);
-		up(&ctx->tm_kv_store_lock);
 		return new;
 	}
 
@@ -2828,7 +2848,6 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_me
 	new = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
 	if (!new) {
 		kmem_cache_free(ctx->reflist_cache, refnode);
-		up(&ctx->tm_kv_store_lock);
 		return NULL;
 	}
 	
@@ -2838,7 +2857,6 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_me
 	if (!new->page) {
 		kmem_cache_free(ctx->reflist_cache, refnode);
 		kmem_cache_free(ctx->tm_page_cache, new);
-		up(&ctx->tm_kv_store_lock);
 		return NULL;
 	}
 	printk(KERN_ERR "\n tm node->page: %p", page_address(new->page));
@@ -2888,10 +2906,8 @@ struct tm_page *add_tm_entry_kv_store(struct ctx *ctx, u64 lba, struct revmap_me
 			flush_translation_blocks(ctx);
 			up(&ctx->flush_lock);
 		}
-	} else {
-		/*---------------------------------------------*/
-		up(&ctx->tm_kv_store_lock);
-	}
+		down_interruptible(&ctx->tm_kv_store_lock);
+	} 
 	return new;
 }
 
@@ -2912,7 +2928,9 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, struct revma
 			if (0 == ptr->extents[j].pba)
 				continue;
 			printk(KERN_ERR "Adding TM entry: ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", ptr->extents[j].lba, ptr->extents[j].pba, ptr->extents[j].len);
+			down_interruptible(&ctx->tm_kv_store_lock);
 			tm_page = add_tm_entry_kv_store(ctx, ptr->extents[j].lba, revmap_bio_ctx);
+			up(&ctx->tm_kv_store_lock);
 			if (!tm_page)
 				return -ENOMEM;
 			add_translation_entry(ctx, tm_page->page, ptr->extents[j].lba, ptr->extents[j].pba, ptr->extents[j].len, revmap_bio_ctx);
@@ -3603,7 +3621,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 
 		/* Next we fetch the LBA that our DM got */
 		lba = bio->bi_iter.bi_sector;
-		atomic_set(&ctx->ioidle, 1);
+		atomic_set(&ctx->ioidle, 0);
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
 		subbio_ctx->extent.lba = lba;
