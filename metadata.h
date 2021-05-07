@@ -112,6 +112,7 @@ struct nstl_sub_bioctx {
 	struct nstl_bioctx * bioctx;
 	u8 magic;
 	u8 retry;
+	struct completion write_done;
 };
 
 struct cur_zone_info {

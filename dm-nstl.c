@@ -3365,6 +3365,43 @@ void clone_io_done(struct kref *kref)
 	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
 }
 
+
+int clone_write_completed(void *data)
+{
+
+	struct nstl_sub_bioctx *subbioctx = NULL;
+	struct nstl_bioctx *bioctx = NULL;
+	struct bio *bio;
+	struct ctx *ctx;
+	int ret;
+
+	subbioctx = (struct nstl_sub_bioctx *) data;
+	bioctx = subbioctx->bioctx;
+	if(!bioctx) {
+		panic("bioctx is NULL!");
+	}
+	bio = bioctx->orig;
+	ctx = bioctx->ctx;
+
+	wait_for_completion(&subbioctx->write_done);
+
+	printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu", __func__, bio->bi_iter.bi_sector);
+	write_lock(&ctx->metadata_update_lock);
+	/*-------------------------------*/
+	ret = stl_update_range(ctx, &ctx->extent_tbl_root, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+	ret = stl_update_range(ctx, &ctx->rev_tbl_root, subbioctx->extent.pba, subbioctx->extent.lba, subbioctx->extent.len);
+	/*-------------------------------*/
+	add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+	write_unlock(&ctx->metadata_update_lock);
+	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+	kref_put(&bioctx->ref, clone_io_done);
+	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
+	return 0;
+}
+
+
+
 /* can you create the translation entry here?
  * What happens if you put a translation entry
  * for some data that did not make it to
@@ -3380,7 +3417,6 @@ static void nstl_clone_endio(struct bio * clone)
 	struct nstl_bioctx *bioctx = NULL;
 	struct bio *bio = NULL;
 	struct ctx * ctx = NULL;
-	int ret;
 	u64 wf;
 
 	subbioctx = (struct nstl_sub_bioctx *) clone->bi_private;
@@ -3394,12 +3430,6 @@ static void nstl_clone_endio(struct bio * clone)
 	}
 	bio = bioctx->orig;
 	ctx = bioctx->ctx;
-
-	if (subbioctx->magic != SUBBIOCTX_MAGIC) {
-		/* private has been overwritten */
-		panic(KERN_ERR "\n !!!!!!!!!!!!!!!!subbioctx->magic OVERWRITTEN!");
-		return;
-	}
 
 	/* If a single segment of the bio fails, the bio should be
 	 * recorded with this status. No translation entry
@@ -3456,17 +3486,13 @@ static void nstl_clone_endio(struct bio * clone)
 			/* our meta information does not match that of
 			 * the disk's state. We dont know what to do.
 			 */
-				wake_up(&ctx->rev_blk_flushq);
-				printk(KERN_ERR "No space on disk! Mismanaged meta data");
-				break;
+				panic("No space on disk! Mismanaged meta data");
 			case BLK_STS_RESOURCE:
 			/* TODO: memory is low. Can you try rewriting? */
-				wake_up(&ctx->rev_blk_flushq);
-				printk(KERN_ERR "Low memory, cannot function!");
+				panic("Low memory, cannot function!");
 				break;
 			default:
-				wake_up(&ctx->rev_blk_flushq);
-				printk(KERN_ERR "Unknown IO error! better handling needed!");
+				panic("Unknown IO error! better handling needed!");
 				break;
 
 		}
@@ -3481,17 +3507,9 @@ static void nstl_clone_endio(struct bio * clone)
 	if(clone->bi_status == BLK_STS_OK) {
 		printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
 		printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu", __func__, bio->bi_iter.bi_sector);
-		write_lock(&ctx->metadata_update_lock);
-		/*-------------------------------*/
-		ret = stl_update_range(ctx, &ctx->extent_tbl_root, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-		ret = stl_update_range(ctx, &ctx->rev_tbl_root, subbioctx->extent.pba, subbioctx->extent.lba, subbioctx->extent.len);
-		/*-------------------------------*/
-		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-		write_unlock(&ctx->metadata_update_lock);
 	}
+	complete(&subbioctx->write_done);
 	bio_put(clone);
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
-	kref_put(&bioctx->ref, clone_io_done);
 	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
 	return;
 }
@@ -3591,7 +3609,6 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 			goto fail;
 		}
 		//printk(KERN_ERR "\n subbio_ctx: %llu", subbio_ctx);
-		subbio_ctx->magic = SUBBIOCTX_MAGIC;
 		spin_lock(&ctx->lock);
 		/*-------------------------------*/
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
@@ -3634,6 +3651,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		atomic_set(&ctx->ioidle, 0);
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
+		init_completion(&subbio_ctx->write_done);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
@@ -3643,6 +3661,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		split->bi_end_io = nstl_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
 		printk(KERN_ERR "\n %s wf: %llu bio->bi_iter.bi_sector: %llu", __func__, wf, bio->bi_iter.bi_sector);
+		kthread_run(clone_write_completed, subbio_ctx, "clone_write_completion"); 
 		generic_make_request(split);
 	} while (split != clone);
 
@@ -4863,7 +4882,7 @@ static void stl_dtr(struct dm_target *dm_target)
 	printk(KERN_ERR "ctx->revmap_pba: %llu", __func__, ctx->revmap_pba - NR_SECTORS_IN_BLK);
 	/* We wait for revmap_entries endio call to be completed! */
 	wait_on_revmap_block_availability(ctx, ctx->revmap_pba - NR_SECTORS_IN_BLK);
-	printk(KERN_ERR "%s done!", __func__);
+	//printk(KERN_ERR "%s done!", __func__);
 
 	do_checkpoint(ctx);
 	//printk(KERN_ERR "\n checkpoint done!");
