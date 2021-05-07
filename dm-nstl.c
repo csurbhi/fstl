@@ -38,6 +38,7 @@
 #include <linux/list.h>
 #include <linux/list_sort.h>
 #include <linux/sched.h>
+#include <linux/async.h>
 
 #include "nstl-u.h"
 #include "stl-wait.h"
@@ -448,7 +449,7 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 	if (!node) {
 		/* new node has to be added */
 		stl_rb_insert(ctx, root, new);
-		printk( "\n Inserted (lba: %u pba: %u len: %d) ", new->lba, new->pba, new->len);
+		printk( "\n %s Inserted (lba: %u pba: %u len: %d) ", __func__, new->lba, new->pba, new->len);
 	}
 	return 0;
 }
@@ -2544,11 +2545,11 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_private = tm_page_write_ctx;
 	bio->bi_end_io = write_tmbl_complete;
 	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu bio->bi_iter.bi_size: %u page:%p", __func__, bio->bi_iter.bi_sector, bio->bi_iter.bi_size, page_address(page));
-	spin_lock(&ctx->tm_flush_lock);
+	//spin_lock(&ctx->tm_flush_lock);
 	/*-----------------------------------------------*/
-	ClearPageDirty(page);
+	//ClearPageDirty(page);
 	/*-----------------------------------------------*/
-	spin_unlock(&ctx->tm_flush_lock);
+	//spin_unlock(&ctx->tm_flush_lock);
 	spin_lock(&ctx->ckpt_lock);
 	/* The next code is related to synchronizing at dtr() time.
 	 */
@@ -3109,6 +3110,7 @@ int revmap_entries_flushed(void *data)
 	struct ctx * ctx;
 	sector_t pba;
 	struct revmap_meta_inmem *revmap_bio_ctx = (struct revmap_meta_inmem *)data;
+	struct page *page;
 
 	wait_for_completion(&revmap_bio_ctx->io_done);
 
@@ -3116,8 +3118,9 @@ int revmap_entries_flushed(void *data)
 	ctx = revmap_bio_ctx->ctx;
 	printk(KERN_ERR "\n revmap_entries flushed at pba: %llu ", pba);
 
-	printk(KERN_ERR "\n About to add_block_based_translation(): revmap_bio_ctx->page: %p", page_address(revmap_bio_ctx->page));
-	add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx);
+	page = revmap_bio_ctx->page;
+	printk(KERN_ERR "\n About to add_block_based_translation(): revmap_bio_ctx->page: %p", page_address(page));
+	add_block_based_translation(ctx, page, revmap_bio_ctx);
 	/* refcount will be synced when all the
 	 * translation entries are flushed
 	 * to the disk. We free the page before
@@ -3129,7 +3132,8 @@ int revmap_entries_flushed(void *data)
 	 * these uptodate pages later if necessary on
 	 * shrinker call.
 	 */
-	free_page(revmap_bio_ctx->page);
+	printk(KERN_ERR "\n revmap_bio_ctx->page: %p", page_address(page));
+	__free_pages(page, 0);
 	spin_lock(&ctx->rev_flush_lock);
 	atomic_dec(&ctx->nr_pending_writes);
 	spin_unlock(&ctx->rev_flush_lock);
@@ -3355,7 +3359,7 @@ void clone_io_done(struct kref *kref)
 	struct nstl_bioctx * nstl_bioctx;
 	struct ctx *ctx;
 
-	//printk(KERN_ERR "I/O done, freeing....! %d", count);
+	printk(KERN_ERR ">>>>>>>>>>>>> I/O done, freeing....! %s", __func__);
 	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
 	ctx = nstl_bioctx->ctx;
 	bio = nstl_bioctx->orig;
@@ -3363,10 +3367,11 @@ void clone_io_done(struct kref *kref)
 		bio_endio(bio);
 
 	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
+	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
 }
 
 
-int clone_write_completed(void *data)
+void clone_write_completed(void *data, async_cookie_t cookie)
 {
 
 	struct nstl_sub_bioctx *subbioctx = NULL;
@@ -3374,6 +3379,8 @@ int clone_write_completed(void *data)
 	struct bio *bio;
 	struct ctx *ctx;
 	int ret;
+	sector_t lba, pba;
+	unsigned int len;
 
 	subbioctx = (struct nstl_sub_bioctx *) data;
 	bioctx = subbioctx->bioctx;
@@ -3383,21 +3390,23 @@ int clone_write_completed(void *data)
 	bio = bioctx->orig;
 	ctx = bioctx->ctx;
 
-	wait_for_completion(&subbioctx->write_done);
+	printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu &write_done: %llu!! \n", __func__, subbioctx->extent.lba, &subbioctx->write_done);
 
-	printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu", __func__, bio->bi_iter.bi_sector);
+	wait_for_completion(&subbioctx->write_done);
+	lba = subbioctx->extent.lba;
+	pba = subbioctx->extent.pba;
+	len = subbioctx->extent.len;
+	kref_put(&bioctx->ref, clone_io_done);
+
 	write_lock(&ctx->metadata_update_lock);
 	/*-------------------------------*/
-	ret = stl_update_range(ctx, &ctx->extent_tbl_root, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-	ret = stl_update_range(ctx, &ctx->rev_tbl_root, subbioctx->extent.pba, subbioctx->extent.lba, subbioctx->extent.len);
+	ret = stl_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
+	ret = stl_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
+	add_revmap_entries(ctx, lba, pba, len);
 	/*-------------------------------*/
-	add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
 	write_unlock(&ctx->metadata_update_lock);
+	printk(KERN_ERR "\n (%s): lba: %llu, pba: %llu, len: %lu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
-	kref_put(&bioctx->ref, clone_io_done);
-	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
-	return 0;
 }
 
 
@@ -3416,8 +3425,6 @@ static void nstl_clone_endio(struct bio * clone)
 	struct nstl_sub_bioctx *subbioctx = NULL;
 	struct nstl_bioctx *bioctx = NULL;
 	struct bio *bio = NULL;
-	struct ctx * ctx = NULL;
-	u64 wf;
 
 	subbioctx = (struct nstl_sub_bioctx *) clone->bi_private;
 	if (!subbioctx) {
@@ -3429,88 +3436,14 @@ static void nstl_clone_endio(struct bio * clone)
 		panic("bioctx is NULL!");
 	}
 	bio = bioctx->orig;
-	ctx = bioctx->ctx;
 
-	/* If a single segment of the bio fails, the bio should be
-	 * recorded with this status. No translation entry
-	 * for the entire original bio should be maintained
-	 *
-	 * TODO: should we keep trying till the write succeed?
-	 * Maybe to another zone, maybe invoke the shrinker if
-	 * memory is low etc.
-	 */
-
-	if (clone->bi_status != BLK_STS_OK) {
-		printk(KERN_ERR "\n write end io status not OK");
-		/* we don't keep partial bio translation map entries.
-		 * The write either succeeds atomically or does not at
-		 * all
-		 */
-		remove_partial_entries(ctx, bio);
-		/* Remove the partial STL entry as well */
-		/* If this is a SMR zone, then a sector write failure
-		 * causes all further I/O in that zone to fail.
-		 * Hence we can no longer write to this zone
-		 */
-
-		switch(clone->bi_status) {
-			case BLK_STS_IOERR:
-				printk(KERN_ERR "\n IO error while writing to disk! Attempting writing somewhere else!");
-				if(!nstl_zone_seq(ctx, clone->bi_iter.bi_sector))
-					mark_zone_erroneous(ctx, clone->bi_iter.bi_sector);
-			/* If this zone is sequential, then we do not have
-			 * to do anything. There will be a gap in this
-			 * segment. But thats about it.
-			 */
-				/*TODO: try writing the data elsewhere and
-				 * complete the write
-				 */
-				wf = ctx->app_write_frontier;
-				subbioctx->extent.pba = wf;
-				clone->bi_iter.bi_sector = wf; /* we use the save write frontier */
-				generic_make_request(clone);
-				return;
-			case BLK_STS_AGAIN:
-				/* You need to try only a few number of times.
-				 * TODO: keep count, or else you will loop on
-				 * this.
-				 */
-				subbioctx->retry++;
-				if (subbioctx->retry < 5) {
-					generic_make_request(clone);
-					return;
-				}
-				break;
-
-			case BLK_STS_NOSPC:
-			/* our meta information does not match that of
-			 * the disk's state. We dont know what to do.
-			 */
-				panic("No space on disk! Mismanaged meta data");
-			case BLK_STS_RESOURCE:
-			/* TODO: memory is low. Can you try rewriting? */
-				panic("Low memory, cannot function!");
-				break;
-			default:
-				panic("Unknown IO error! better handling needed!");
-				break;
-
-		}
-		
-		if (bio->bi_status == BLK_STS_OK) {
-			bio->bi_status = clone->bi_status;
-		}
+	if (bio->bi_status == BLK_STS_OK) {
+		bio->bi_status = clone->bi_status;
 	}
-	/* We add the translation entry only when we know
-	 * that the write has made it to the disk
-	 */
-	if(clone->bi_status == BLK_STS_OK) {
-		printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
-		printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu", __func__, bio->bi_iter.bi_sector);
-	}
+	printk(KERN_ERR "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
+
 	complete(&subbioctx->write_done);
 	bio_put(clone);
-	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
 	return;
 }
 
@@ -3546,6 +3479,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 	struct blk_plug plug;
 	sector_t wf;
 	struct stl_ckpt *ckpt;
+	async_cookie_t cookie;
 
 	if (is_disk_full(ctx)) {
 		bio->bi_status = BLK_STS_NOSPC;
@@ -3652,6 +3586,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
 		init_completion(&subbio_ctx->write_done);
+		printk(KERN_ERR "\n (%s) lba: %llu, &write_done: %llu", __func__, lba, &subbio_ctx->write_done);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
@@ -3660,9 +3595,8 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		split->bi_private = subbio_ctx;
 		split->bi_end_io = nstl_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
-		printk(KERN_ERR "\n %s wf: %llu bio->bi_iter.bi_sector: %llu", __func__, wf, bio->bi_iter.bi_sector);
-		kthread_run(clone_write_completed, subbio_ctx, "clone_write_completion"); 
 		generic_make_request(split);
+		cookie = async_schedule(clone_write_completed, subbio_ctx);
 	} while (split != clone);
 
 	/* We might need padding when the original request is not block
@@ -3693,9 +3627,6 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		generic_make_request(pad);
 	}
 	blk_finish_plug(&plug);
-	/* We call this, because initial value is 1, every inc is
-	 * offset by the dec in the bio_endio call
-	 */
 	kref_put(&bioctx->ref, clone_io_done);
 	atomic_inc(&ctx->nr_writes);
 	return 0;

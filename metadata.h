@@ -111,7 +111,6 @@ struct nstl_sub_bioctx {
 	struct extent_entry extent;
 	struct nstl_bioctx * bioctx;
 	u8 magic;
-	u8 retry;
 	struct completion write_done;
 };
 
