@@ -60,7 +60,8 @@ struct revmap_meta_inmem {
 	struct page *page;
 	struct kref kref;
 	sector_t pba; 		/* bio->bi_iter.bi_sector cannot be relied on in endio call */
-	u8 magic;
+	struct completion io_done;
+	int retrial;
 };
 
 struct ref_list

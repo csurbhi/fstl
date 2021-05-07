@@ -3104,57 +3104,69 @@ void wait_on_refcount(struct ctx *ctx, refcount_t *ref)
  * TODO: Error handling metadata flushing
  *
  */
-void revmap_entries_flushed(struct bio *bio)
+int revmap_entries_flushed(void *data)
 {
 	struct ctx * ctx;
-	struct revmap_meta_inmem *revmap_bio_ctx;
 	sector_t pba;
+	struct revmap_meta_inmem *revmap_bio_ctx = (struct revmap_meta_inmem *)data;
 
-	revmap_bio_ctx = bio->bi_private;
+	wait_for_completion(&revmap_bio_ctx->io_done);
+
 	pba = revmap_bio_ctx->pba;
 	ctx = revmap_bio_ctx->ctx;
-	printk(KERN_ERR "\n revmap_entries flushed at pba: %llu bio->bi_status: %d", pba, bio->bi_status);
+	printk(KERN_ERR "\n revmap_entries flushed at pba: %llu ", pba);
+
+	printk(KERN_ERR "\n About to add_block_based_translation(): revmap_bio_ctx->page: %p", page_address(revmap_bio_ctx->page));
+	add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx);
+	/* refcount will be synced when all the
+	 * translation entries are flushed
+	 * to the disk. We free the page before
+	 * since the entries in that page are already
+	 * copied.
+	 *
+	 * TODO: Instead of freeing the pages, we can
+	 * mark page->status uptodate. We can free all
+	 * these uptodate pages later if necessary on
+	 * shrinker call.
+	 */
+	free_page(revmap_bio_ctx->page);
+	spin_lock(&ctx->rev_flush_lock);
+	atomic_dec(&ctx->nr_pending_writes);
+	spin_unlock(&ctx->rev_flush_lock);
+	//printk(KERN_ERR "\n ctx->nr_pending_writes-- done. Val: %d \n. Waking up waiters", atomic_read(&ctx->nr_pending_writes));
+	/* Wakeup waiters waiting on the block barrier
+	 * */
+	wake_up(&ctx->rev_blk_flushq);
+	/* By now add_block_based_translations would have
+	 * incremented the reference atleast once!
+	 */
+	spin_lock(&ctx->tm_ref_lock);
+	kref_put(&revmap_bio_ctx->kref, revmap_block_release);
+	spin_unlock(&ctx->tm_ref_lock);
+	return 0;
+}
+
+void revmap_blk_flushed(struct bio *bio)
+{
+	struct ctx * ctx;
+	sector_t pba;
+	struct revmap_meta_inmem *revmap_bio_ctx;
+
+	revmap_bio_ctx = bio->bi_private;
 
 	switch(bio->bi_status) {
 		case BLK_STS_AGAIN:
-			/* TODO: retry a limited number of times.
-			 * Maintain a retrial count in
-			 * bio->bi_private
-			 * Right now, simply falling through.
-			 */
+			revmap_bio_ctx->retrial++;
+			if (revmap_bio_ctx->retrial < 3) {
+				submit_bio(bio);
+				return;
+			}
+			// else
+			panic("Cannot flush revmap entries! ");
 		case BLK_STS_OK:
-			//printk(KERN_ERR "\n Adding block based translation!");
-			printk(KERN_ERR "\n About to add_block_based_translation(): revmap_bio_ctx->page: %p", page_address(revmap_bio_ctx->page));
-			add_block_based_translation(ctx, revmap_bio_ctx->page, revmap_bio_ctx);
-			/* refcount will be synced when all the
-			 * translation entries are flushed
-			 * to the disk. We free the page before
-			 * since the entries in that page are already
-			 * copied.
-			 *
-			 * TODO: Instead of freeing the pages, we can
-			 * mark page->status uptodate. We can free all
-			 * these uptodate pages later if necessary on
-			 * shrinker call.
-			 */
-			bio_free_pages(bio);
-			/*bio_alloc done, hence bio_put() */
+			complete(&revmap_bio_ctx->io_done);
 			bio_put(bio);
-			spin_lock(&ctx->rev_flush_lock);
-			atomic_dec(&ctx->nr_pending_writes);
-			spin_unlock(&ctx->rev_flush_lock);
-			//printk(KERN_ERR "\n ctx->nr_pending_writes-- done. Val: %d \n. Waking up waiters", atomic_read(&ctx->nr_pending_writes));
-			/* Wakeup waiters waiting on the block barrier
-			 * */
-			wake_up(&ctx->rev_blk_flushq);
-			/* By now add_block_based_translations would have
-			 * incremented the reference atleast once!
-			 */
-			spin_lock(&ctx->tm_ref_lock);
-			kref_put(&revmap_bio_ctx->kref, revmap_block_release);
-			spin_unlock(&ctx->tm_ref_lock);
-			printk(KERN_ERR "\n Inside revmap_entries_flushed():: waiting on refcount! \n");
-						break;
+			break;
 		default:
 			/* TODO: do something better?
 			 * remove all the entries from the in memory 
@@ -3162,7 +3174,6 @@ void revmap_entries_flushed(struct bio *bio)
 			remove_partial_entries();
 			 */
 			printk(KERN_ERR "\n revmap_entries_flushed ERROR!! \n");
-			wake_up(&ctx->rev_blk_flushq);
 			panic("revmap block write error, needs better handling!");
 			break;
 	}
@@ -3193,6 +3204,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	}
 	kref_init(&revmap_bio_ctx->kref);
 	kref_get(&revmap_bio_ctx->kref);
+	init_completion(&revmap_bio_ctx->io_done);
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
@@ -3209,9 +3221,9 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	printk(KERN_ERR "\n revmap_bio_ctx->page: %p", page_address(page));
 
 	revmap_bio_ctx->ctx = ctx;
-	revmap_bio_ctx->magic = REVMAP_PRIV_MAGIC;
 	revmap_bio_ctx->page = page;
 	revmap_bio_ctx->pba = ctx->revmap_pba;
+	revmap_bio_ctx->retrial = 0;
 	bio->bi_iter.bi_sector = ctx->revmap_pba;
 	printk(KERN_ERR "Checking if revmap blk at pba:%llu is available for writing! ctx->revmap_pba: %llu", bio->bi_iter.bi_sector, ctx->revmap_pba);
 	wait_on_revmap_block_availability(ctx, bio->bi_iter.bi_sector);
@@ -3232,8 +3244,8 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	if (ctx->revmap_pba == ctx->sb->tm_pba) {
 		ctx->revmap_pba = ctx->sb->revmap_pba;
 	}
-	bio->bi_end_io = revmap_entries_flushed;
 	bio->bi_private = revmap_bio_ctx;
+	bio->bi_end_io = revmap_blk_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	spin_lock(&ctx->rev_flush_lock);
@@ -3242,6 +3254,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	/*------------------------------------------*/
 	spin_unlock(&ctx->rev_flush_lock);
 	printk(KERN_ERR "\n flushing revmap at pba: %llu", bio->bi_iter.bi_sector);
+	kthread_run(revmap_entries_flushed, revmap_bio_ctx, "revmap_entries_flushed");
 	generic_make_request(bio);
 	return 0;
 }
