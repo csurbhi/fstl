@@ -459,7 +459,7 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 	ckpt->nr_invalid_zones = 0;
 	ckpt->cur_frontier_pba = get_current_frontier(sb);
 	ckpt->cur_gc_frontier_pba = get_current_gc_frontier(sb);
-	ckpt->nr_free_zones = sb->zone_count_main - 1; //1 for the current frontier
+	ckpt->nr_free_zones = sb->zone_count_main - 2; //1 for the current frontier and gc frontier
 	ckpt->elapsed_time = 0;
 	ckpt->clean = 1;  /* 1 indicates clean datastructures */
 	ckpt->crc = 0;

@@ -49,7 +49,6 @@ struct metadata_read_ctx {
 
 struct tm_page_write_ctx {
 	struct ctx *ctx;
-	refcount_t ref;
 	struct tm_page *tm_page;
 };
 
@@ -59,7 +58,6 @@ struct revmap_meta_inmem {
 	struct ctx * ctx;
 	struct page *page;
 	struct kref kref;
-	sector_t pba; 		/* bio->bi_iter.bi_sector cannot be relied on in endio call */
 	struct completion io_done;
 	int retrial;
 };
@@ -74,7 +72,7 @@ struct tm_page {
 	struct rb_node rb;
 	sector_t blknr;
 	struct page *page;
-	struct list_head reflist;
+	struct ref_list reflist;
 };
 
 struct sit_page_write_ctx {
