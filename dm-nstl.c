@@ -1634,9 +1634,9 @@ void ckpt_flushed(struct bio *bio)
 	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
-		wake_up(&ctx->ckptq);
 	}
 	spin_unlock(&ctx->ckpt_lock);
+	wake_up(&ctx->ckptq);
 
 	if (BLK_STS_OK != bio->bi_status) {
 		/* TODO: Do something more to handle the errors */
@@ -1677,12 +1677,12 @@ void flush_revmap_bitmap(struct ctx *ctx)
 	printk(KERN_ERR "\n flushing revmap bitmap at pba: %u", ctx->sb->revmap_bm_pba);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
+	printk(KERN_ERR "\n About to aquire ckpt_lock!, revmap_bm pba: %llu", pba);
 	spin_lock(&ctx->ckpt_lock);
-	printk(KERN_ERR "\n ckpt_lock aquired!, revmap_bm pba: %llu", pba);
 	if(ctx->flag_ckpt)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock(&ctx->ckpt_lock);
-	printk(KERN_ERR "\n ckpt_lock released!");
+	printk(KERN_ERR "\n ckpt_lock released!\n");
 	generic_make_request(bio);
 	printk(KERN_ERR "\n %s bio submitted!", __func__);
 	return;
@@ -2442,9 +2442,9 @@ void write_tmbl_complete(struct bio *bio)
 		refnode = list_entry(temp, struct ref_list, list);
 		spin_lock(&ctx->tm_ref_lock);
 		revmap_bio_ctx = refnode->revmap_bio_ctx;
+		spin_unlock(&ctx->tm_ref_lock);
 		kref_put(&revmap_bio_ctx->kref, revmap_block_release);
 		printk(KERN_ERR "\n %s %d revmap_bio_ctx->kref -- ", __func__, revmap_bio_ctx->revmap_pba);
-		spin_unlock(&ctx->tm_ref_lock);
 		kmem_cache_free(ctx->reflist_cache, refnode);
 	}
 
@@ -2480,9 +2480,9 @@ void write_tmbl_complete(struct bio *bio)
 	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
-		wake_up(&ctx->ckptq);
 	}
 	spin_unlock(&ctx->ckpt_lock);
+	wake_up(&ctx->ckptq);
 
 }
 
@@ -2555,7 +2555,9 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	spin_unlock(&ctx->ckpt_lock);
 printk(KERN_ERR "\n %s bio->bi_sector: %llu bio->bi_size: %u page:%p", __func__, bio->bi_iter.bi_sector, bio->bi_iter.bi_size, page_address(page));
 printk(KERN_ERR "\n %s max_pba: %llu", ctx->max_pba);
-	generic_make_request(bio);
+	bio->bi_status = BLK_STS_OK;
+	write_tmbl_complete(bio);
+	//generic_make_request(bio);
 }
 
 
@@ -2593,9 +2595,9 @@ void flush_translation_blocks(struct ctx *ctx)
 	atomic_set(&ctx->ckpt_ref, 2);
 	spin_unlock(&ctx->ckpt_lock);
 
-	blk_start_plug(&plug);
+	//blk_start_plug(&plug);
 	flush_tm_nodes(node, ctx);
-	blk_finish_plug(&plug);	
+	//blk_finish_plug(&plug);	
 	atomic_dec(&ctx->ckpt_ref);
 	wait_for_ckpt_completion(ctx);
 	printk(KERN_ERR "\n %s done!!", __func__);
@@ -2655,9 +2657,9 @@ void write_sitbl_complete(struct bio *bio)
 	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
-		wake_up(&ctx->ckptq);
 	}
 	spin_unlock(&ctx->ckpt_lock);
+	wake_up(&ctx->ckptq);
 
 	if (bio->bi_status != BLK_STS_OK) {
 		/*TODO: Perhaps retry!! or do something more
@@ -2967,9 +2969,9 @@ void revmap_bitmap_flushed(struct bio *bio)
 	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
-		wake_up(&ctx->ckptq);
 	}
 	spin_unlock(&ctx->ckpt_lock);
+	wake_up(&ctx->ckptq);
 	switch(bio->bi_status) {
 		case BLK_STS_OK:
 			/* bio_alloc, hence bio_put */
@@ -3145,9 +3147,10 @@ int revmap_entries_flushed(void *data)
 	 * incremented the reference atleast once!
 	 */
 	printk(KERN_ERR "\n waiting for translation maps to be flushed to disk!");
-	spin_lock(&ctx->tm_ref_lock);
+	/* no need to take tm_ref_lock as this function will be called
+	 * only once; when the value turns 0
+	 */
 	kref_put(&revmap_bio_ctx->kref, revmap_block_release);
-	spin_unlock(&ctx->tm_ref_lock);
 	return 0;
 }
 
@@ -3364,11 +3367,11 @@ void write_done(struct kref *kref)
 	struct nstl_bioctx * nstl_bioctx;
 	struct ctx *ctx;
 
-	printk(KERN_ERR ">>>>>>>>>>>>> I/O done, freeing....! %s \n", __func__);
 	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
 	bio = nstl_bioctx->orig;
 	bio_endio(bio);
 
+	printk(KERN_ERR ">>>>>>>>>>>>> I/O done, freeing....! %s \n", __func__);
 	ctx = nstl_bioctx->ctx;
 	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
 	//kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
@@ -3379,7 +3382,6 @@ void sub_write_done(void *data, async_cookie_t cookie)
 {
 
 	struct nstl_sub_bioctx *subbioctx = NULL;
-	struct nstl_bioctx *bioctx = NULL;
 	struct ctx *ctx;
 	int ret;
 	sector_t lba, pba;
@@ -3389,13 +3391,12 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	//printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu &write_done: %llu!! \n", __func__, subbioctx->extent.lba, &subbioctx->write_done);
 	wait_for_completion(&subbioctx->write_done);
 
-	bioctx = subbioctx->bioctx;
-	ctx = bioctx->ctx;
+	ctx = subbioctx->bioctx->ctx;
+	kref_put(&subbioctx->bioctx->ref, write_done);
 
 	lba = subbioctx->extent.lba;
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
-	kref_put(&bioctx->ref, write_done);
 
 	write_lock(&ctx->metadata_update_lock);
 	/*------------------------------- */
@@ -3404,7 +3405,7 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	ret = stl_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	write_unlock(&ctx->metadata_update_lock);
-	printk(KERN_ERR "\n (%s): lba: %llu, pba: %llu, len: %lu \n", __func__, lba, pba, len);
+	printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %lu \n", __func__, lba, pba, len);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
@@ -3422,17 +3423,15 @@ void sub_write_done(void *data, async_cookie_t cookie)
 static void nstl_clone_endio(struct bio * clone)
 {
 	struct nstl_sub_bioctx *subbioctx = NULL;
-	struct nstl_bioctx *bioctx = NULL;
 	struct bio *bio = NULL;
 
 	subbioctx = (struct nstl_sub_bioctx *) clone->bi_private;
-	bioctx = subbioctx->bioctx;
-	bio = bioctx->orig;
+	bio = subbioctx->bioctx->orig;
 
 	if (bio->bi_status == BLK_STS_OK) {
 		bio->bi_status = clone->bi_status;
 	}
-	//printk(KERN_ERR "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
+	printk(KERN_ERR "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
 	complete(&subbioctx->write_done);
 	bio_put(clone);
 	return;
@@ -4013,9 +4012,10 @@ int read_revmap(struct ctx *ctx)
 		flush_translation_blocks(ctx);
 		up(&ctx->flush_lock);
 	}
-	spin_lock(&ctx->tm_ref_lock);
+	/* no need to take tm_ref_lock as this function will be called
+	 * only once; when the value turns 0
+	 */
 	kref_put(&revmap_bio_ctx->kref, revmap_block_release);
-	spin_unlock(&ctx->tm_ref_lock);
 	return 0;
 }
 
@@ -4798,6 +4798,7 @@ static void stl_dtr(struct dm_target *dm_target)
 	/* At this point we are sure that the revmap
 	 * entries have made it to the disk
 	 */
+	printk(KERN_ERR "\n %s about to flush translation blocks!");
 	flush_translation_blocks(ctx);
 	do_checkpoint(ctx);
 	//printk(KERN_ERR "\n checkpoint done!");
