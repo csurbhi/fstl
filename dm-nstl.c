@@ -2831,8 +2831,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba, struct revmap_met
 		return new_tmpage;
 	}
 
-	printk(KERN_ERR "\n refnode created! \n");
-	printk(KERN_ERR "\n Allocating 'new' from tm_page_cache! \n");
+	printk(KERN_ERR "\n refnode created! Allocating 'new' from tm_page_cache! \n");
 	new_tmpage = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
 	if (!new_tmpage) {
 		kmem_cache_free(ctx->reflist_cache, refnode);
@@ -2847,7 +2846,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba, struct revmap_met
 		kmem_cache_free(ctx->tm_page_cache, new_tmpage);
 		return NULL;
 	}
-	printk(KERN_ERR "\n tm node->page: %p", page_address(new_tmpage->page));
+	printk(KERN_ERR "\n %s tm node->page: %p", __func__, page_address(new_tmpage->page));
 	new_tmpage->blknr = blknr;
 	/* This is a new page, cannot be dirty, dont flush from a
 	 * parallel thread! */
