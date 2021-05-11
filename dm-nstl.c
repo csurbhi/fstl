@@ -1051,7 +1051,16 @@ void stl_is_ioidle(struct kref *kref)
 	atomic_set(&ctx->ioidle, 1);
 	printk(KERN_ERR "\n Stl is io idle!");
 	/* Add the initialized timer to the global list */
+	/* TODO: We start the timer only when there is some work to do.
+	 * We dont want GC to be invoked for no reason!
+	 * When there is little to do, disable the timer.
+	 * When an I/O is invoked, disable the timer if its enabled.
+	 * so if work to do and  ioidle, then enable the timer.
+	 * when no work to do disable the timer.
+	 * when read/write invoked, if timer_enabled: disable_timer.
+	 */
 	/*
+	kref_init(kref);
 	ctx->timer.function = invoke_gc;
 	ctx->timer.data = (unsigned long) ctx;
 	ctx->timer.expired = TIME_IDLE_JIFFIES;
@@ -2587,10 +2596,9 @@ void flush_translation_blocks(struct ctx *ctx)
 	blk_start_plug(&plug);
 	flush_tm_nodes(node, ctx);
 	blk_finish_plug(&plug);	
-	sync_blockdev(ctx->dev->bdev);
 	atomic_dec(&ctx->ckpt_ref);
 	wait_for_ckpt_completion(ctx);
-	printk(KERN_ERR "\n TM MAP READ done!!");
+	printk(KERN_ERR "\n %s done!!", __func__);
 }
 
 void flush_count_tm_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
@@ -3110,8 +3118,12 @@ int revmap_entries_flushed(void *data)
 	printk(KERN_ERR "\n revmap_entries flushed at pba: %llu ", pba);
 
 	page = revmap_bio_ctx->page;
-	printk(KERN_ERR "\n About to add_block_based_translation(): revmap_bio_ctx->page: %p", page_address(page));
+	printk(KERN_ERR "\n %s About to add_block_based_translation(): revmap_bio_ctx->page: %p", __func__, page_address(page));
 	add_block_based_translation(ctx, page, revmap_bio_ctx);
+	spin_lock(&ctx->rev_flush_lock);
+	atomic_dec(&ctx->nr_pending_writes);
+	spin_unlock(&ctx->rev_flush_lock);
+
 	/* refcount will be synced when all the
 	 * translation entries are flushed
 	 * to the disk. We free the page before
@@ -3123,11 +3135,8 @@ int revmap_entries_flushed(void *data)
 	 * these uptodate pages later if necessary on
 	 * shrinker call.
 	 */
-	printk(KERN_ERR "\n revmap_bio_ctx->page: %p", page_address(page));
+	printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
 	__free_pages(page, 0);
-	spin_lock(&ctx->rev_flush_lock);
-	atomic_dec(&ctx->nr_pending_writes);
-	spin_unlock(&ctx->rev_flush_lock);
 	//printk(KERN_ERR "\n ctx->nr_pending_writes-- done. Val: %d \n. Waking up waiters", atomic_read(&ctx->nr_pending_writes));
 	/* Wakeup waiters waiting on the block barrier
 	 * */
@@ -3349,58 +3358,53 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
  * We need to go back to the older values.
  * But right now, we have not saved them.
  */
-void clone_io_done(struct kref *kref)
+void write_done(struct kref *kref)
 {
 	struct bio *bio;
 	struct nstl_bioctx * nstl_bioctx;
 	struct ctx *ctx;
 
-	printk(KERN_ERR ">>>>>>>>>>>>> I/O done, freeing....! %s", __func__);
+	printk(KERN_ERR ">>>>>>>>>>>>> I/O done, freeing....! %s \n", __func__);
 	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
-	ctx = nstl_bioctx->ctx;
 	bio = nstl_bioctx->orig;
 	bio_endio(bio);
 
+	ctx = nstl_bioctx->ctx;
 	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
-	kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
+	//kref_put(&ctx->ongoing_iocount, stl_is_ioidle);
 }
 
 
-void clone_write_completed(void *data, async_cookie_t cookie)
+void sub_write_done(void *data, async_cookie_t cookie)
 {
 
 	struct nstl_sub_bioctx *subbioctx = NULL;
 	struct nstl_bioctx *bioctx = NULL;
-	struct bio *bio;
 	struct ctx *ctx;
 	int ret;
 	sector_t lba, pba;
 	unsigned int len;
 
 	subbioctx = (struct nstl_sub_bioctx *) data;
+	//printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu &write_done: %llu!! \n", __func__, subbioctx->extent.lba, &subbioctx->write_done);
+	wait_for_completion(&subbioctx->write_done);
+
 	bioctx = subbioctx->bioctx;
-	if(!bioctx) {
-		panic("bioctx is NULL!");
-	}
-	bio = bioctx->orig;
 	ctx = bioctx->ctx;
 
-	printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu &write_done: %llu!! \n", __func__, subbioctx->extent.lba, &subbioctx->write_done);
-
-	wait_for_completion(&subbioctx->write_done);
 	lba = subbioctx->extent.lba;
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
-	kref_put(&bioctx->ref, clone_io_done);
+	kref_put(&bioctx->ref, write_done);
 
 	write_lock(&ctx->metadata_update_lock);
 	/*------------------------------- */
+	add_revmap_entries(ctx, lba, pba, len);
 	ret = stl_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
 	ret = stl_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
-	add_revmap_entries(ctx, lba, pba, len);
 	/*-------------------------------*/
 	write_unlock(&ctx->metadata_update_lock);
-	printk(KERN_ERR "\n (%s): lba: %llu, pba: %llu, len: %lu", __func__, lba, pba, len);
+	printk(KERN_ERR "\n (%s): lba: %llu, pba: %llu, len: %lu \n", __func__, lba, pba, len);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
@@ -3422,21 +3426,13 @@ static void nstl_clone_endio(struct bio * clone)
 	struct bio *bio = NULL;
 
 	subbioctx = (struct nstl_sub_bioctx *) clone->bi_private;
-	if (!subbioctx) {
-		panic("subbioctx is NULL !");
-	}
-
 	bioctx = subbioctx->bioctx;
-	if(!bioctx) {
-		panic("bioctx is NULL!");
-	}
 	bio = bioctx->orig;
 
 	if (bio->bi_status == BLK_STS_OK) {
 		bio->bi_status = clone->bi_status;
 	}
-	printk(KERN_ERR "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
-
+	//printk(KERN_ERR "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
 	complete(&subbioctx->write_done);
 	bio_put(clone);
 	return;
@@ -3590,7 +3586,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		split->bi_end_io = nstl_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
 		generic_make_request(split);
-		cookie = async_schedule(clone_write_completed, subbio_ctx);
+		cookie = async_schedule(sub_write_done, subbio_ctx);
 	} while (split != clone);
 
 	/* We might need padding when the original request is not block
@@ -3621,7 +3617,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		generic_make_request(pad);
 	}
 	blk_finish_plug(&plug);
-	kref_put(&bioctx->ref, clone_io_done);
+	kref_put(&bioctx->ref, write_done);
 	atomic_inc(&ctx->nr_writes);
 	return 0;
 
@@ -4799,14 +4795,10 @@ static void stl_dtr(struct dm_target *dm_target)
 	sync_blockdev(ctx->dev->bdev);
 	printk(KERN_ERR "\n Inside dtr! About to call flush_revmap_entries()");
 	flush_revmap_entries(ctx);
-	printk(KERN_ERR "\n rev map entries flushed!");
-	sync_blockdev(ctx->dev->bdev);
 	/* At this point we are sure that the revmap
 	 * entries have made it to the disk
 	 */
 	flush_translation_blocks(ctx);
-	printk(KERN_ERR "\n translation blocks flushed!");
-
 	do_checkpoint(ctx);
 	//printk(KERN_ERR "\n checkpoint done!");
 	/* If we are here, then there was no crash while writing out
@@ -4905,12 +4897,14 @@ static int stl_map(struct dm_target *dm_target, struct bio *bio)
 		case REQ_OP_WRITE:
 			ret = nstl_write_io(ctx, bio);
 			break;
+		/*
 		case REQ_OP_ZONE_RESET:
 			ret = nstl_zone_reset(ctx, bio);
 			break;
 		case REQ_OP_ZONE_RESET_ALL:
 			ret = nstl_zone_reset_all(ctx, bio);
 			break;
+		*/
 		default:
 			break;
 	}
