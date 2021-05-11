@@ -3135,6 +3135,7 @@ int revmap_entries_flushed(void *data)
 	/* By now add_block_based_translations would have
 	 * incremented the reference atleast once!
 	 */
+	printk(KERN_ERR "\n waiting for translation maps to be flushed to disk!");
 	spin_lock(&ctx->tm_ref_lock);
 	kref_put(&revmap_bio_ctx->kref, revmap_block_release);
 	spin_unlock(&ctx->tm_ref_lock);
@@ -3254,10 +3255,11 @@ void flush_revmap_entries(struct ctx *ctx)
 	if (!page)
 		return;
 
-	//printk(KERN_ERR "ctx->revmap_page: %p", page_address(ctx->revmap_page));
 	flush_revmap_block_disk(ctx, page);
+	printk(KERN_ERR "%s waiting on block barrier ", __func__);
 	/* We wait for translation entries to be added! */
 	wait_on_block_barrier(ctx);
+	printk(KERN_ERR "%s revmap entries are on disk, wait is over!", __func__);
 }
 
 
