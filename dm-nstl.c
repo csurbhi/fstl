@@ -2444,7 +2444,8 @@ void write_tmbl_complete(struct bio *bio)
 		 * or else you will loose the translation entries.
 		 * write them some place else!
 		 */
-		panic("Could not read the translation entry block");
+		printk(KERN_ERR "\n %s bi_status: %d \n", bio->bi_status);
+		panic("Could not write the translation entry block");
 	}
 
 	printk(KERN_ERR "\n %s done! 1. ", __func__);
@@ -2505,6 +2506,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 		return;
 	}
 	/*--------------------------------------*/
+	ClearPageDirty(page);
 	spin_unlock(&ctx->tm_flush_lock);
 
 	bio = bio_alloc(GFP_KERNEL, 1);
@@ -2535,11 +2537,6 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_private = tm_page_write_ctx;
 	bio->bi_end_io = write_tmbl_complete;
-	spin_lock(&ctx->tm_flush_lock);
-	/*-----------------------------------------------*/
-	ClearPageDirty(page);
-	/*-----------------------------------------------*/
-	spin_unlock(&ctx->tm_flush_lock);
 	spin_lock(&ctx->ckpt_lock);
 	/* The next code is related to synchronizing at dtr() time.
 	 */
@@ -2547,7 +2544,8 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 		atomic_inc(&ctx->ckpt_ref);
 	}
 	spin_unlock(&ctx->ckpt_lock);
-printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu bio->bi_iter.bi_size: %u page:%p", __func__, bio->bi_iter.bi_sector, bio->bi_iter.bi_size, page_address(page));
+printk(KERN_ERR "\n %s bio->bi_sector: %llu bio->bi_size: %u page:%p", __func__, bio->bi_iter.bi_sector, bio->bi_iter.bi_size, page_address(page));
+printk(KERN_ERR "\n %s max_pba: %llu", ctx->max_pba);
 	generic_make_request(bio);
 }
 
