@@ -464,11 +464,8 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 		*
 		* Note that stl_update_range is called asynchronously
 		* and so may not be called sequentially!
-		*
-		* In theory this merge can cause a merge with more
-		* nodes on the left! But we dont take care of this
-		* situation right now. We can always go through the
-		* entire tree to merge the nodes!
+		* 
+		* Merge on the left!
 		*/
 		if (lba + len == e->lba) {
 			if (pba + len == e->pba) {
@@ -488,6 +485,14 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 				 * the overlapping entries.
 				 */
 				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
+				prev = stl_rb_prev(e);
+				if ((prev->lba + prev->len == e->lba) && 
+			            (prev->pba + prev->len == prev->pba)) {
+					prev->len = prev->len + e->len;
+					stl_rb_remove(ctx, root, e);
+					mempool_free(e, ctx->extent_pool);
+				}
+
 				break;
 			}
 			/* else we cannot merge as physically
@@ -496,6 +501,8 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 			node = node->rb_left;
 			continue;
 		}
+
+		/* Merging on the right */
 
 		if (lba == e->lba + e->len) {
 			if (pba == e->pba + e->len) {
@@ -511,6 +518,13 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 				 * the overlapping entries.
 				 */
 				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
+				next = stl_rb_next(e);
+				if ((next->lba == e->lba + e->len) && 
+			            (next->pba == e->pba + e->len)) {
+					e->len = e->len + next->len;
+					stl_rb_remove(ctx, root, next);
+					mempool_free(next, ctx->extent_pool);
+				}
 				break;
 			}
 			/* else we cannot merge as physically
