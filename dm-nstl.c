@@ -4379,7 +4379,7 @@ int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime
 
 	BUG_ON(nrblks == 0);
 	write_lock(&ctx->sit_rb_lock);
-	printk(KERN_ERR "\s %s zonenr: %d nrblks: %u, mtime: %llu, GC_GREEDY \n", __func__, zonenr, nrblks, mtime);
+	printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu, GC_GREEDY \n", __func__, zonenr, nrblks, mtime);
 	cb_cost = get_cost(ctx, nrblks, mtime, GC_GREEDY);
 	/* Go to the bottom of the tree */
 	while (*link) {
@@ -4392,13 +4392,17 @@ int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime
 				e->cb_cost = cb_cost;
 				e->nrblks = nrblks;
 				sit_rb_insert(ctx, root, e);
+				write_unlock(&ctx->sit_rb_lock);
 				return 0;
 			}
-			link = &(*link)->rb_left;
+			if (zonenr > e->zonenr)
+				link = &(*link)->rb_right;
+			else
+				link = &(*link)->rb_left;
 			continue;
 
 		}
-		if (new->cb_cost < e->cb_cost) {
+		if (cb_cost < e->cb_cost) {
 			link = &(*link)->rb_left;
 		} else {
 			link = &(*link)->rb_right;
@@ -4406,8 +4410,10 @@ int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime
 	}
 	/* We are essentially adding a new node here */
 	new = kmem_cache_alloc(ctx->sit_extent_cache, GFP_KERNEL);
-	if (!new)
+	if (!new) {
+		write_unlock(&ctx->sit_rb_lock);
 		return -ENOMEM;
+	}
 
 	RB_CLEAR_NODE(&new->rb);
 	new->zonenr = zonenr;
