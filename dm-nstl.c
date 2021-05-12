@@ -313,6 +313,124 @@ static struct extent *stl_rb_next(struct extent *e)
 	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
 }
 
+static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
+{
+	struct extent *e = NULL, *split = NULL;
+	struct extent *tmp = NULL;
+	struct rb_node *node = root->rb_node;  /* top of the tree */
+	int diff = 0;
+
+	BUG_ON(len == 0);
+	while (node) {
+		e = rb_entry(node, struct extent, rb);
+		/* No overlap */
+		if (lba + len < e->lba) {
+			node = node->rb_left;
+			continue;
+		}
+		if (lba > e->lba + e->len) {
+			node = node->rb_right;
+			continue;
+		}
+		/* new overlaps with e
+		 * new: ++++
+		 * e: --
+		 */
+
+		/*  Case 1: Exact length, complete overwrite.
+		 *
+		 * Replace the old node: same lba but different pba
+		 * and same length
+		 *
+		 * 	++++++++
+		 * 	--------
+		 */
+
+		if ((lba == e->lba) && (len = e->len)) {
+			/* we already merged the node, so this
+			 * overlapping node is extra!
+			 */
+			stl_rb_remove(ctx, root, e);
+			mempool_free(e, ctx->extent_pool);
+			break;
+		}
+
+		/* 
+		 * Case 2: Overwrites an existing extent partially;
+		 * covers only the right portion of an extent.
+		 * (++ merged on the right side)
+		 *
+		 * 		+++++++++++
+		 * ---------------
+		 *
+		 */
+		if ((lba > e->lba) && (lba < e->lba + e->len)) {
+			diff = (e->lba + e->len) - lba;
+			e->len = e->len - diff;
+			/* we don't add any new node as that new node
+			 * was merged with the neighboring node
+			 */
+			break;
+		}
+
+		/* 
+		 * Case 4: Overwrite many extents completely
+		 *	++++++++++++++++++++
+		 *	  ----- ------  --------
+		 *
+		 * Could also be exact same: 
+		 * 	+++++
+		 * 	-----
+		 * But this case is optimized in case 1.
+		 * We need to remove all such e
+		 * the last e can have case 1
+		 *
+		 * here we compare left ends and right ends of 
+		 * new and existing node e
+		 *
+		 * +++ could have been merged on either the left or
+		 * right side.
+		 */
+		while ((e!=NULL) && (lba <= e->lba) && ((lba + len) >= (e->lba + e->len))) {
+			tmp = stl_rb_next(e);
+			stl_rb_remove(ctx, root, e);
+			mempool_free(e, ctx->extent_pool);
+			e = tmp;
+		}
+		if (!e || (e->lba > lba + len))  {
+			break;
+		}
+		/* else fall down to the next case for the last
+		 * component that overwrites an extent partially
+		 */
+
+		/* 
+		 * Case 5: 
+		 * Partially overwrite an extent
+		 *
+		 * (++ merged on the left side)
+		 *
+		 * ++++++++++
+		 * 	-------------- OR
+		 *
+		 * Left end matches!
+		 * +++++++
+		 * --------------
+		 *
+		 */
+		if ((lba <= e->lba) && (lba + len > e->lba)) {
+			diff = lba + len - e->lba;
+			e->lba = e->lba + diff;
+			e->len = e->len - diff;
+			e->pba = e->pba + diff;
+			break;
+		}
+	}
+	return 0;
+}
+
+
+
 /* Update mapping. Removes any total overlaps, edits any partial
  * overlaps, adds new extent to map.
  */
@@ -354,11 +472,22 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 		*/
 		if (lba + len == e->lba) {
 			if (pba + len == e->pba) {
+				printk(KERN_ERR "\n New node merged! ");
 				stl_rb_remove(ctx, root, e);
 				e->len += len;
 				e->lba = lba;
 				e->pba = pba;
-				stl_rb_insert(ctx, root, new);
+				stl_rb_insert(ctx, root, e);
+				mempool_free(new, ctx->extent_pool);
+				/* You merged this new overwrite;
+				 * however, it could have been
+				 * overlapping extent and not merged
+				 * before because the pbas were
+				 * different. You may end up having a
+				 * corrupt tree if you don't delete
+				 * the overlapping entries.
+				 */
+				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
 				break;
 			}
 			/* else we cannot merge as physically
@@ -373,6 +502,15 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 				e->len = e->len + len;
 				printk(KERN_ERR "\n New node merged! ");
 				mempool_free(new, ctx->extent_pool);
+				/* You merged this new overwrite;
+				 * however, it could have been
+				 * overlapping extent and not merged
+				 * before because the pbas were
+				 * different. You may end up having a
+				 * corrupt tree if you don't delete
+				 * the overlapping entries.
+				 */
+				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
 				break;
 			}
 			/* else we cannot merge as physically
@@ -386,11 +524,31 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 		 * e: --
 		 */
 
+		/*  Case 1: Exact length, complete overwrite.
+		 *
+		 * Replace the old node: same lba but different pba
+		 * and same length
+		 *
+		 * 	++++++++
+		 * 	--------
+		 */
+
+		if ((lba == e->lba) && (len = e->len)) {
+			/*  Since the lba/key doesnt change we dont
+			 *  have to do anything to rebalance the tree
+			 */
+			e->pba = pba;
+			mempool_free(new, ctx->extent_pool);
+			break;
+		}
+
 		/* 
-		 * Case 1:
+		 * Case 2: Overwrites an existing extent partially;
+		 * covers only the right portion of an extent.
 		 *
 		 * 		+++++++++++
 		 * ---------------
+		 *
 		 */
 		if ((lba > e->lba) && (lba < e->lba + e->len)) {
 			diff = (e->lba + e->len) - lba;
@@ -399,13 +557,14 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 			break;
 		}
 
-
 		 /*
-		 * Case2: complete overlap
+		 * Case 3: overwrite a part of the existing extent
 		 * 	++++++++++
-		 * -----------------------
+		 * ----------------------- 
 		 *
+		 *  No end matches!!
 		 */
+
 		if ((lba > e->lba)  && (lba + len < e->lba + e->len)) {
 			split = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 			if (!split) {
@@ -426,13 +585,14 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 
 
 		/* 
-		 * Case 3:
+		 * Case 4: Overwrite many extents completely
 		 *	++++++++++++++++++++
 		 *	  ----- ------  --------
 		 *
 		 * Could also be exact same: 
 		 * 	+++++
 		 * 	-----
+		 * But this case is optimized in case 1.
 		 * We need to remove all such e
 		 * the last e can have case 1
 		 *
@@ -442,22 +602,29 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 		while ((e!=NULL) && (lba <= e->lba) && ((lba + len) >= (e->lba + e->len))) {
 			tmp = stl_rb_next(e);
 			stl_rb_remove(ctx, root, e);
+			mempool_free(e, ctx->extent_pool);
 			e = tmp;
 		}
-		if (!e) {
+		if (!e || (e->lba > lba + len))  {
 			stl_rb_insert(ctx, root, new);
 			break;
 		}
 		/* else fall down to the next case for the last
-		 * component that partially overlaps*/
+		 * component that overwrites an extent partially
+		 */
 
 		/* 
-		 * Case 4: 
-		 *
+		 * Case 5: 
+		 * Partially overwrite an extent
 		 * ++++++++++
-		 * 	--------------
+		 * 	-------------- OR
+		 *
+		 * Left end matches!
+		 * +++++++
+		 * --------------
+		 *
 		 */
-		if ((lba < e->lba) && (lba + len > e->lba)) {
+		if ((lba <= e->lba) && (lba + len > e->lba)) {
 			diff = lba + len - e->lba;
 			e->lba = e->lba + diff;
 			e->len = e->len - diff;
@@ -471,6 +638,7 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 		stl_rb_insert(ctx, root, new);
 		printk( "\n %s Inserted (lba: %u pba: %u len: %d) ", __func__, new->lba, new->pba, new->len);
 	}
+	//merge_more_nodes(ctx, root, lba, pba, len);
 	return 0;
 }
 
@@ -2379,19 +2547,25 @@ void remove_tm_entry_kv_store(struct ctx *ctx, u64 lba)
 }
 
 
+/* Called under a spin lock. Don't put any functions that
+ * sleep
+ */
 void remove_tm_blk_kv_store(struct ctx *ctx, u64 blknr)
 {
 	struct rb_node *parent = NULL;
 	struct rb_root *rb_root = &ctx->tm_rb_root;
 	struct tm_page *new;
 
+	cant_sleep();
+
 	down_interruptible(&ctx->tm_kv_store_lock);
 	/*----------------------------------------------*/
 	new = search_tm_kv_store(ctx, blknr, &parent);
-	if (!new)
+	if (!new) {
+		up(&ctx->tm_kv_store_lock);
 		return;
-	rb_erase(&new->rb, rb_root);
-	atomic_dec(&ctx->nr_tm_pages);
+	}
+
 	/*----------------------------------------------*/
 	up(&ctx->tm_kv_store_lock);
 	kmem_cache_free(ctx->tm_page_cache, new);
@@ -2478,26 +2652,26 @@ void write_tmbl_complete(struct bio *bio)
 	}
 
 	printk(KERN_ERR "\n %s done! 1. ", __func__);
-	spin_lock(&ctx->tm_flush_lock);
 	/*-----------------------------------------------*/
 	/* If the page was locked, then since the page was submitted,
 	 * write has been attempted
-	 */
+	 */	
+	spin_lock(&ctx->tm_flush_lock);
 	if (!PageDirty(page)) {
-		blknr = bio->bi_iter.bi_sector - ctx->sb->tm_pba;
 		/* remove the page from RB tree and reduce the total
 		 * count, through the remove_tm_blk_kv_store()
 		 */
+		blknr = bio->bi_iter.bi_sector - ctx->sb->tm_pba;
 		remove_tm_blk_kv_store(ctx, blknr);
 		put_page(page);
 		bio_free_pages(bio);
-	} 
+	}
 	spin_unlock(&ctx->tm_flush_lock);
 	atomic_dec(&ctx->tm_flush_count);
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
-	printk(KERN_ERR "\n %s done!!!", __func__);
 	spin_lock(&ctx->ckpt_lock);
+	printk(KERN_ERR "\n %s done!!!", __func__);
 	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
 	}
@@ -2524,6 +2698,8 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	page = tm_page->page;
 	if (!page)
 		return;
+
+	printk(KERN_ERR "\n Inside %s \n", __func__);
 
 	/* Only flush if the page needs flushing */
 
