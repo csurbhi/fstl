@@ -313,6 +313,12 @@ static struct extent *stl_rb_next(struct extent *e)
 	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
 }
 
+static struct extent *stl_rb_prev(struct extent *e)
+{
+	struct rb_node *node = rb_prev(&e->rb);
+	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
+}
+
 static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
 {
 	struct extent *e = NULL, *split = NULL;
@@ -436,7 +442,7 @@ static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root,
  */
 static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
 {
-	struct extent *e = NULL, *new = NULL, *split = NULL;
+	struct extent *e = NULL, *new = NULL, *split = NULL, *next=NULL, *prev=NULL;
 	struct extent *tmp = NULL;
 	struct rb_node *node = root->rb_node;  /* top of the tree */
 	int diff = 0;
@@ -477,6 +483,8 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 				stl_rb_insert(ctx, root, e);
 				mempool_free(new, ctx->extent_pool);
 				prev = stl_rb_prev(e);
+				if (!prev)
+					break;
 				/* No overlap! */
 				if (prev->lba + prev->len < e->lba)
 					break;
@@ -513,6 +521,8 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 				mempool_free(new, ctx->extent_pool);
 				next = stl_rb_next(e);
 				/* No overlap with next extent */
+				if (!next)
+					break;
 				if (next->lba > e->lba + e->len)
 					break;
 				if (next->lba == e->lba + e->len) {
