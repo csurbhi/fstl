@@ -341,13 +341,33 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 			node = node->rb_right;
 			continue;
 		}
-		/* no overlap, but sequential 
-		 * Note: This case will never occur on the left node
-		 * as pba is physically increasing. You will never get
-		 * a pba that is smaller than an existing pba
-		 * This is also the reason why we will not see more
-		 * cascading merges as a result of this merge.
-		 */
+		/* no overlap, but sequential node; MERGE this new
+		* node with existing node!
+		*
+		* Note that stl_update_range is called asynchronously
+		* and so may not be called sequentially!
+		*
+		* In theory this merge can cause a merge with more
+		* nodes on the left! But we dont take care of this
+		* situation right now. We can always go through the
+		* entire tree to merge the nodes!
+		*/
+		if (lba + len == e->lba) {
+			if (pba + len == e->pba) {
+				stl_rb_remove(ctx, root, e);
+				e->len += len;
+				e->lba = lba;
+				e->pba = pba;
+				stl_rb_insert(ctx, root, new);
+				break;
+			}
+			/* else we cannot merge as physically
+			* discontiguous
+			*/
+			node = node->rb_left;
+			continue;
+		}
+
 		if (lba == e->lba + e->len) {
 			if (pba == e->pba + e->len) {
 				e->len = e->len + len;
@@ -4818,8 +4838,8 @@ static void stl_dtr(struct dm_target *dm_target)
 	/* timer based gc invocation for later
 	 * del_timer_sync(&ctx->timer_list);
 	 */
-	//destroy_caches(ctx);
-	//printk(KERN_ERR "\n caches destroyed! \n");
+	destroy_caches(ctx);
+	printk(KERN_ERR "\n caches destroyed! \n");
 	//stl_gc_thread_stop(ctx);
 	//printk(KERN_ERR "\n gc thread stopped! \n");
 	bioset_exit(ctx->bs);
