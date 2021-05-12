@@ -476,23 +476,25 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 				e->pba = pba;
 				stl_rb_insert(ctx, root, e);
 				mempool_free(new, ctx->extent_pool);
-				/* You merged this new overwrite;
-				 * however, it could have been
-				 * overlapping extent and not merged
-				 * before because the pbas were
-				 * different. You may end up having a
-				 * corrupt tree if you don't delete
-				 * the overlapping entries.
+				prev = stl_rb_prev(e);
+				/* No overlap! */
+				if (prev->lba + prev->len < e->lba)
+					break;
+				/* Merge previous node too */
+				if (prev->lba + prev->len == e->lba) {
+					if (prev->pba + prev->len == prev->pba) {
+						prev->len = prev->len + e->len;
+						stl_rb_remove(ctx, root, e);
+						mempool_free(e, ctx->extent_pool);
+						break;
+					}
+					/* no overlap case */
+					break;
+				} 
+			        /* The new lba is merged, but the next
+				 * extent[s] overlap[s] with LBA, PBA, len
 				 */
 				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
-				prev = stl_rb_prev(e);
-				if ((prev->lba + prev->len == e->lba) && 
-			            (prev->pba + prev->len == prev->pba)) {
-					prev->len = prev->len + e->len;
-					stl_rb_remove(ctx, root, e);
-					mempool_free(e, ctx->extent_pool);
-				}
-
 				break;
 			}
 			/* else we cannot merge as physically
@@ -509,22 +511,24 @@ static int stl_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba,
 				e->len = e->len + len;
 				printk(KERN_ERR "\n New node merged! ");
 				mempool_free(new, ctx->extent_pool);
-				/* You merged this new overwrite;
-				 * however, it could have been
-				 * overlapping extent and not merged
-				 * before because the pbas were
-				 * different. You may end up having a
-				 * corrupt tree if you don't delete
-				 * the overlapping entries.
-				 */
-				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
 				next = stl_rb_next(e);
-				if ((next->lba == e->lba + e->len) && 
-			            (next->pba == e->pba + e->len)) {
+				/* No overlap with next extent */
+				if (next->lba > e->lba + e->len)
+					break;
+				if (next->lba == e->lba + e->len) {
+			            if (next->pba == e->pba + e->len) {
 					e->len = e->len + next->len;
 					stl_rb_remove(ctx, root, next);
 					mempool_free(next, ctx->extent_pool);
+					break;
+				    }
+				    /* no overlap */
+				    break;
 				}
+			        /* The new lba is merged, but the next
+				 * extent[s] overlap[s] with LBA, PBA, len
+				 */
+				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
 				break;
 			}
 			/* else we cannot merge as physically
