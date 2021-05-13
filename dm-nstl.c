@@ -1569,6 +1569,7 @@ struct sit_page * search_sit_blk(struct ctx *ctx, sector_t blknr)
 }
 
 
+struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba);
 
 /*
  * When a segentry says that all blocks are full,
@@ -1586,28 +1587,23 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 
 	down_interruptible(&ctx->sit_kv_store_lock);
 	/*-----------------------------------------------*/
-	sit_page = search_sit_kv_store(ctx, pba, &parent);
+	sit_page = add_sit_page_kv_store(ctx, pba);
+	if (!sit_page) {
+		/* TODO: do something, low memory */
+		panic("Low memory, couldnt allocate sit entry");
+	}
 	/*-----------------------------------------------*/
 	up(&ctx->sit_kv_store_lock);
-	if (!sit_page) {
-		sit_page = add_sit_entry_kv_store(ctx, pba);
-		if (!sit_page) {
-		/* TODO: do something, low memory */
-			panic("Low memory, couldnt allocate sit entry");
-		}
-	}
 
 	spin_lock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
-	get_page(sit_page->page);
+	SetPageDirty(sit_page->page);
 	ptr = (struct stl_seg_entry *)sit_page->page;
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
 	ptr->vblocks = BLOCKS_IN_ZONE;
 	ptr->mtime = 0;
-	SetPageDirty(sit_page->page);
-	put_page(sit_page->page);
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
 
@@ -1961,6 +1957,8 @@ void flush_sit_node_page(struct ctx * ctx, struct rb_node *);
 
 void flush_sit_nodes(struct ctx *ctx, struct rb_node *node)
 {	
+	if (!node)
+		return;
 	flush_sit_node_page(ctx, node);
 	if (node->rb_left)
 		flush_sit_nodes(ctx, node->rb_left);
@@ -2184,7 +2182,7 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks);
  * add it to our RB tree that we use for searching.
  *
  */
-struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
+struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 {
 	sector_t sit_blknr;
 	u64 zonenr = get_zone_nr(ctx, pba);
@@ -2194,8 +2192,6 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 	struct sit_page *new;
 	struct page *page;
 
-	down_interruptible(&ctx->sit_kv_store_lock);
-	/*--------------------------------------------*/
 	new = search_sit_kv_store(ctx, pba, &parent);
 	if (new)
 		return new;
@@ -2205,9 +2201,7 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 		return NULL;
 
 	RB_CLEAR_NODE(&new->rb);
-
 	printk(KERN_ERR " %s zonenr: %lld ", __func__, zonenr);
-
 	sit_blknr = zonenr / SIT_ENTRIES_BLK;
 	printk(KERN_ERR " %s sit_blknr: %lld sit_pba: %u", __func__, sit_blknr, ctx->sb->sit_pba);
 	page = read_block(ctx, sit_blknr, ctx->sb->sit_pba, 1);
@@ -2215,19 +2209,8 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 		kmem_cache_free(ctx->sit_page_cache, new);
 		return NULL;
 	}
-
-	/* We put the page when the page gets written to the disk 
-	 * We increment the reference so that the page is not freed
-	 * under us!
-	 */
-	get_page(page);
-	/* We dont need to lock the page as the reference is not added
-	 * for any other thread to access it yet
-	 */
-	ClearPageDirty(page);
 	new->blknr = sit_blknr;
 	new->page = page;
-
 	if (parent) {
 		/* Add this page to a RB tree based KV store.
 		 * Key is: blknr for this corresponding block
@@ -2262,9 +2245,7 @@ struct sit_page * add_sit_entry_kv_store(struct ctx * ctx, sector_t pba)
 			flush_sit(ctx);
 			up(&ctx->flush_lock);
 		}
-	} else {
-	/*--------------------------------------------*/
-		up(&ctx->sit_kv_store_lock);
+		down_interruptible(&ctx->flush_lock);
 	}
 	return new;
 }
@@ -2287,24 +2268,20 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	struct stl_seg_entry *ptr;
 	sector_t zonenr;
 	int index;
-	struct rb_node *parent = NULL;
 
 	down_interruptible(&ctx->sit_kv_store_lock);
 	/*--------------------------------------------*/
-	sit_page = search_sit_kv_store(ctx, pba, &parent);
+	sit_page= add_sit_page_kv_store(ctx, pba);
+	if (!sit_page) {
+	/* TODO: do something, low memory */
+		panic("Low memory, could not allocate sit_entry");
+	}
 	/*--------------------------------------------*/
 	up(&ctx->sit_kv_store_lock);
-	if (!sit_page) {
-		sit_page= add_sit_entry_kv_store(ctx, pba);
-		if (!sit_page) {
-		/* TODO: do something, low memory */
-			panic("Low memory, could not allocate sit_entry");
-		}
-	}
 
 	spin_lock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
-	get_page(sit_page->page);
+	SetPageDirty(sit_page->page);
 	ptr = (struct stl_seg_entry *) page_address(sit_page->page);
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
@@ -2315,8 +2292,6 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		mark_zone_free(ctx , zonenr);
 		spin_unlock(&ctx->lock);
 	}
-	SetPageDirty(sit_page->page);
-	put_page(sit_page->page);
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
 	update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
@@ -2330,23 +2305,19 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 {
 	struct sit_page *sit_page;
 	struct stl_seg_entry *ptr;
-	struct rb_node *parent = NULL;
 	sector_t zonenr;
 	int index;
 
 	down_interruptible(&ctx->sit_kv_store_lock);
-	sit_page = search_sit_kv_store(ctx, pba, &parent);
-	up(&ctx->sit_kv_store_lock);
+	sit_page = add_sit_page_kv_store(ctx, pba);
 	if (!sit_page) {
-		sit_page = add_sit_entry_kv_store(ctx, pba);
-		if (!sit_page) {
 		/* TODO: do something, low memory */
-			panic("Low memory, could not allocate sit_entry");
-		}
+		panic("Low memory, could not allocate sit_entry");
 	}
+	up(&ctx->sit_kv_store_lock);
 	spin_lock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
-	get_page(sit_page->page);
+	SetPageDirty(sit_page->page);
 	ptr = (struct stl_seg_entry *) page_address(sit_page->page);
 	zonenr = get_zone_nr(ctx, pba);
 	printk(KERN_ERR "\n %s: pba: %llu zonenr: %llu", __func__, pba, zonenr);
@@ -2358,8 +2329,6 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 		spin_unlock(&ctx->lock);
 	}
 	ptr->vblocks = ptr->vblocks + 1;
-	SetPageDirty(sit_page->page);
-	put_page(sit_page->page);
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
 }
@@ -2372,23 +2341,18 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 {
 	struct sit_page *sit_page;
 	struct stl_seg_entry *ptr;
-	struct rb_node *parent = NULL;
 	sector_t zonenr;
 	int index;
 
 	down_interruptible(&ctx->sit_kv_store_lock);
-	sit_page = search_sit_kv_store(ctx, pba, &parent);
-	up(&ctx->sit_kv_store_lock);
-	if (unlikely(!sit_page)) {
-		sit_page = add_sit_entry_kv_store(ctx, pba);
-		if (!sit_page) {
+	sit_page = add_sit_page_kv_store(ctx, pba);
+	if (!sit_page) {
 		/* TODO: do something, low memory */
-			panic("Low memory, could not allocate sit_entry");
-		}
+		panic("Low memory, could not allocate sit_entry");
 	}
+	up(&ctx->sit_kv_store_lock);
 	spin_lock(&ctx->sit_flush_lock);
 	/*------------------------------------------*/
-	get_page(sit_page->page);
 	SetPageDirty(sit_page->page);
 	ptr = (struct stl_seg_entry*) page_address(sit_page->page);
 	zonenr = get_zone_nr(ctx, pba);
@@ -2397,7 +2361,6 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	ptr->mtime = get_elapsed_time(ctx);
 	if (ctx->max_mtime < ptr->mtime)
 		ctx->max_mtime = ptr->mtime;
-	put_page(sit_page->page);
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
 	update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
@@ -2419,7 +2382,6 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 {
 	struct tm_entry * ptr;
 	int i, index;
-	struct rb_node *parent = NULL;
 	struct tm_page *tm_page;
 
 	ptr = (struct tm_entry *) page_address(page);
@@ -2433,7 +2395,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	for (i=0; i<len/8; i++) {
 		spin_lock(&ctx->tm_flush_lock);
 	/*-----------------------------------------------*/
-		get_page(page);
+		SetPageDirty(page);
 		if (ptr->lba != 0) {
 			/* decrement vblocks for the segment that has
 			 * the stale block
@@ -2451,24 +2413,19 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 		lba = lba + NR_SECTORS_IN_BLK;
 		pba = pba + NR_SECTORS_IN_BLK;
 		ptr = ptr + 1;
-		SetPageDirty(page);
-		put_page(page);
 	/*-----------------------------------------------*/
 		spin_unlock(&ctx->tm_flush_lock);
 		index = index + 1;
 		if (TM_ENTRIES_BLK == index) {
 			down_interruptible(&ctx->tm_kv_store_lock);
 	/*-----------------------------------------------*/
-			tm_page = search_tm_kv_store(ctx, lba, &parent);
+			tm_page = add_tm_page_kv_store(ctx, lba, revmap_bio_ctx);
 			if (!tm_page) {
-				tm_page = add_tm_page_kv_store(ctx, lba, revmap_bio_ctx);
-				if (!tm_page) {
-					up(&ctx->tm_kv_store_lock);
-					/* TODO: try freeing some
-					 * pages here
-					 */
-					panic("Low memory, while adding tm entry ");
-				}
+				up(&ctx->tm_kv_store_lock);
+				/* TODO: try freeing some
+				* pages here
+				*/
+				panic("Low memory, while adding tm entry ");
 			}
 	/*-----------------------------------------------*/
 			up(&ctx->tm_kv_store_lock);
@@ -2524,7 +2481,7 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks)
 	bio_put(bio);
 	return page;
 }
-
+//
 /*
  * If a match is found, then returns the matching
  * entry 
@@ -2681,17 +2638,18 @@ void write_tmbl_complete(struct bio *bio)
 
 	printk(KERN_ERR "\n %s done! 1. ", __func__);
 	/*-----------------------------------------------*/
+
+	/* remove the page from RB tree and reduce the total
+	 * count, through the remove_tm_blk_kv_store()
+	 */
+	blknr = bio->bi_iter.bi_sector - ctx->sb->tm_pba;
+
 	/* If the page was locked, then since the page was submitted,
 	 * write has been attempted
 	 */	
 	spin_lock(&ctx->tm_flush_lock);
 	if (!PageDirty(page)) {
-		/* remove the page from RB tree and reduce the total
-		 * count, through the remove_tm_blk_kv_store()
-		 */
-		blknr = bio->bi_iter.bi_sector - ctx->sb->tm_pba;
 		remove_tm_blk_kv_store(ctx, blknr);
-		put_page(page);
 		bio_free_pages(bio);
 	}
 	spin_unlock(&ctx->tm_flush_lock);
@@ -2787,6 +2745,8 @@ printk(KERN_ERR "\n %s max_pba: %llu", ctx->max_pba);
 
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 {	
+	if (!node)
+		return;
 	flush_tm_node_page(ctx, node);
 	if (node->rb_left)
 		flush_tm_nodes(node->rb_left, ctx);
@@ -2878,11 +2838,13 @@ void write_sitbl_complete(struct bio *bio)
 	sit_ctx = (struct sit_page_write_ctx *) bio->bi_private;
 	ctx = sit_ctx->ctx;
 	page = sit_ctx->page;
+
 	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
 	}
 	spin_unlock(&ctx->ckpt_lock);
+
 	wake_up(&ctx->ckptq);
 
 	if (bio->bi_status != BLK_STS_OK) {
@@ -2890,27 +2852,28 @@ void write_sitbl_complete(struct bio *bio)
 		 * or else you will loose the translation entries.
 		 * write them some place else!
 		 */
-		printk(KERN_DEBUG "\n Could not read the translation entry block");
+		printk(KERN_DEBUG "\n Could not write the SIT page to disk! ");
 		return;
 	}
-	spin_lock(&ctx->sit_flush_lock);
-	/*-------------------------------------*/
 	/* We have stored relative blk address, whereas disk supports
 	 * sector addressing
 	 * TODO: store the sector address directly 
 	 */
 	blknr = (bio->bi_iter.bi_sector - ctx->sb->sit_pba) / NR_SECTORS_IN_BLK;
-	if (!PageDirty(page)) {
+
+	spin_lock(&ctx->sit_flush_lock);
+	/*-------------------------------------*/
+		if (!PageDirty(page)) {
 		/* For memory conservation we do this freeing of pages
 		 * TODO: we could free them only if our memory usage
 		 * is above a certain point
 		 */
 		remove_sit_blk_kv_store(ctx, blknr);
-		put_page(page);
 		bio_free_pages(bio);
 	}
 	/*-------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
+
 	atomic_dec(&ctx->sit_flush_count);
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
@@ -2924,21 +2887,26 @@ void write_sitbl_complete(struct bio *bio)
 void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 {
 	struct page *page; 
-	struct sit_page *node_ent;
+	struct sit_page *sit_page;
 	u64 pba;
 	struct bio * bio;
 	struct sit_page_write_ctx *sit_ctx;
 
 	/* Do not flush if the page is not dirty */
 
-	node_ent = rb_entry(node, struct sit_page, rb);
-	page = node_ent->page;
+	sit_page = rb_entry(node, struct sit_page, rb);
+	if (!sit_page) {
+		printk(KERN_ERR "\n sit_page is NULL!");
+		return;
+	}
+	page = sit_page->page;
 	if (!page)
 		return;
 
 	spin_lock(&ctx->sit_flush_lock);
 	if (unlikely(!PageDirty(page))) {
 		spin_unlock(&ctx->sit_flush_lock);
+		printk(KERN_ERR "\n sit_page is not dirty!");
 		return;
 	}
 	spin_unlock(&ctx->sit_flush_lock);
@@ -2956,7 +2924,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	}
 	
 		/* Sector addressing */
-	pba = (node_ent->blknr * NR_SECTORS_IN_BLK) + ctx->sb->sit_pba;
+	pba = (sit_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->sit_pba;
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
