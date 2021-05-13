@@ -2650,7 +2650,7 @@ void write_tmbl_complete(struct bio *bio)
 	 * write has been attempted
 	 */	
 	spin_lock(&ctx->tm_flush_lock);
-	if (!PageDirty(page)) {
+	if (!test_bit(PG_dirty, &page->flags)) {
 		remove_tm_blk_kv_store(ctx, blknr);
 		bio_free_pages(bio);
 	}
@@ -2693,14 +2693,14 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 
 	spin_lock(&ctx->tm_flush_lock);
 	/*--------------------------------------*/
-	if (test_bit(PG_dirty, &page->flags)) {
+	if (!test_bit(PG_dirty, &page->flags)) {
 		spin_unlock(&ctx->tm_flush_lock);
 		printk(KERN_ERR "\n TM Page is not dirty!");
 		return;
 	}
 	/*--------------------------------------*/
-	clear_bit(PG_dirty, &page->flags);
 	spin_unlock(&ctx->tm_flush_lock);
+	clear_bit(PG_dirty, &page->flags);
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
@@ -2762,7 +2762,7 @@ void flush_translation_blocks(struct ctx *ctx)
 {
 	struct rb_root *root = &ctx->tm_rb_root;
 	struct rb_node *node = NULL;
-	struct blk_plug plug;
+	//struct blk_plug plug;
 
 	node = root->rb_node;
 	if (!node) {
@@ -2865,7 +2865,7 @@ void write_sitbl_complete(struct bio *bio)
 
 	spin_lock(&ctx->sit_flush_lock);
 	/*-------------------------------------*/
-		if (!PageDirty(page)) {
+	if (!test_bit(PG_dirty, &page->flags)) {
 		/* For memory conservation we do this freeing of pages
 		 * TODO: we could free them only if our memory usage
 		 * is above a certain point
@@ -2905,8 +2905,9 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	if (!page)
 		return;
 
+	printk(KERN_ERR "\n %s 0.", __func__);
 	spin_lock(&ctx->sit_flush_lock);
-	if (unlikely(!PageDirty(page))) {
+	if (!test_bit(PG_dirty, &page->flags)) {
 		spin_unlock(&ctx->sit_flush_lock);
 		printk(KERN_ERR "\n sit_page is not dirty!");
 		return;
@@ -2919,6 +2920,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 		return;
 	}
 
+	printk(KERN_ERR "\n %s 1.", __func__);
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		kmem_cache_free(ctx->sit_ctx_cache, sit_ctx);
@@ -2944,11 +2946,10 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock(&ctx->ckpt_lock);
 	sit_ctx->page = page;
-	spin_lock(&ctx->sit_flush_lock);
+	printk(KERN_ERR "\n %s 2", __func__);
 	/*--------------------------------------------*/
 	clear_bit(PG_dirty, &page->flags);
 	/*-------------------------*/
-	spin_unlock(&ctx->sit_flush_lock);
 	generic_make_request(bio);
 }
 
