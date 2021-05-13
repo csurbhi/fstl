@@ -2659,13 +2659,12 @@ void write_tmbl_complete(struct bio *bio)
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
 	spin_lock(&ctx->ckpt_lock);
-	printk(KERN_ERR "\n %s done!!!", __func__);
 	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
 	}
 	spin_unlock(&ctx->ckpt_lock);
 	wake_up(&ctx->ckptq);
-
+	printk(KERN_ERR "\n %s done!!!", __func__);
 }
 
 /* We don't wait for the bios to complete 
@@ -2723,22 +2722,24 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
 		kmem_cache_free(ctx->tm_page_write_cache, tm_page_write_ctx);
+		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
 		return;
 	}
-	printk(KERN_ERR "\n Inside %s 3 flushing tm block at pba: %llu page: %p", __func__, pba, page_address(page));
+	printk(KERN_ERR "\n Inside %s 3 flushing tm block at pba: %llu page: %p \n", __func__, pba, page_address(page));
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
+	printk(KERN_ERR "\n Inside %s \n 3.5 \n", __func__);
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_private = tm_page_write_ctx;
 	bio->bi_end_io = write_tmbl_complete;
-	printk(KERN_ERR "\n Inside %s \n 4", __func__);
-	spin_lock(&ctx->ckpt_lock);
+	printk(KERN_ERR "\n Inside %s \n 4 \n", __func__);
+	//spin_lock(&ctx->ckpt_lock);
 	/* The next code is related to synchronizing at dtr() time.
 	 */
 	if(ctx->flag_ckpt) {
 		atomic_inc(&ctx->ckpt_ref);
 	}
-	spin_unlock(&ctx->ckpt_lock);
+	//spin_unlock(&ctx->ckpt_lock);
 printk(KERN_ERR "\n %s bio->bi_sector: %llu bio->bi_size: %u page:%p", __func__, bio->bi_iter.bi_sector, bio->bi_iter.bi_size, page_address(page));
 printk(KERN_ERR "\n %s max_pba: %llu", ctx->max_pba);
 	bio->bi_status = BLK_STS_OK;
@@ -2749,8 +2750,10 @@ printk(KERN_ERR "\n %s max_pba: %llu", ctx->max_pba);
 
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 {	
-	if (!node)
+	if (!node) {
+		printk("No tm node found! returning!");
 		return;
+	}
 	flush_tm_node_page(ctx, node);
 	if (node->rb_left)
 		flush_tm_nodes(node->rb_left, ctx);
