@@ -2678,6 +2678,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	struct bio * bio;
 	struct tm_page_write_ctx *tm_page_write_ctx;
 
+	printk(KERN_ERR "\n Inside %s 0.0 \n", __func__);
 	tm_page = rb_entry(node, struct tm_page, rb);
 	if (!tm_page)
 		return;
@@ -2749,7 +2750,8 @@ printk(KERN_ERR "\n %s max_pba: %llu", ctx->max_pba);
 
 
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
-{	
+{
+	printk(KERN_ERR "\n Inside %s \n", __func__);	
 	if (!node) {
 		printk("No tm node found! returning!");
 		return;
