@@ -2687,7 +2687,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	if (!page)
 		return;
 
-	printk(KERN_ERR "\n Inside %s \n", __func__);
+	printk(KERN_ERR "\n Inside %s 0 \n", __func__);
 
 	/* Only flush if the page needs flushing */
 
@@ -2702,6 +2702,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	spin_unlock(&ctx->tm_flush_lock);
 	clear_bit(PG_dirty, &page->flags);
 
+	printk(KERN_ERR "\n Inside %s 1 \n", __func__);
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		return;
@@ -2715,21 +2716,22 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	tm_page_write_ctx->tm_page = tm_page;
        	tm_page_write_ctx->ctx = ctx;
 
+	printk(KERN_ERR "\n Inside %s 2 \n", __func__);
 	/* Sector addressing, LBA is the address of the sector */
 	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
-	page = tm_page->page;
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
 		kmem_cache_free(ctx->tm_page_write_cache, tm_page_write_ctx);
 		return;
 	}
-	//printk(KERN_ERR "\n flushing tm block at pba: %llu page: %p", pba, page_address(page));
+	printk(KERN_ERR "\n Inside %s 3 flushing tm block at pba: %llu page: %p", __func__, pba, page_address(page));
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_private = tm_page_write_ctx;
 	bio->bi_end_io = write_tmbl_complete;
+	printk(KERN_ERR "\n Inside %s \n 4", __func__);
 	spin_lock(&ctx->ckpt_lock);
 	/* The next code is related to synchronizing at dtr() time.
 	 */
