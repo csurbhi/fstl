@@ -1597,7 +1597,7 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 
 	spin_lock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
-	SetPageDirty(sit_page->page);
+	set_bit(PG_dirty, &sit_page->page->flags);
 	ptr = (struct stl_seg_entry *)sit_page->page;
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
@@ -2281,7 +2281,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 
 	spin_lock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
-	SetPageDirty(sit_page->page);
+	set_bit(PG_dirty, &sit_page->page->flags);
 	ptr = (struct stl_seg_entry *) page_address(sit_page->page);
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
@@ -2317,7 +2317,7 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 	up(&ctx->sit_kv_store_lock);
 	spin_lock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
-	SetPageDirty(sit_page->page);
+	set_bit(PG_dirty, &sit_page->page->flags);
 	ptr = (struct stl_seg_entry *) page_address(sit_page->page);
 	zonenr = get_zone_nr(ctx, pba);
 	printk(KERN_ERR "\n %s: pba: %llu zonenr: %llu", __func__, pba, zonenr);
@@ -2353,7 +2353,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	up(&ctx->sit_kv_store_lock);
 	spin_lock(&ctx->sit_flush_lock);
 	/*------------------------------------------*/
-	SetPageDirty(sit_page->page);
+	set_bit(PG_dirty, &sit_page->page->flags);
 	ptr = (struct stl_seg_entry*) page_address(sit_page->page);
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
@@ -2384,6 +2384,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	int i, index;
 	struct tm_page *tm_page;
 
+	set_bit(PG_dirty, &page->flags);
 	ptr = (struct tm_entry *) page_address(page);
 	printk(KERN_ERR "\n %s tm_page address: %p lba: %llu, pba:%llu, len: %d", __func__, ptr, lba, pba, len);
 	index = (lba/NR_SECTORS_IN_BLK);
@@ -2395,7 +2396,6 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	for (i=0; i<len/8; i++) {
 		spin_lock(&ctx->tm_flush_lock);
 	/*-----------------------------------------------*/
-		SetPageDirty(page);
 		if (ptr->lba != 0) {
 			/* decrement vblocks for the segment that has
 			 * the stale block
@@ -2415,6 +2415,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 		ptr = ptr + 1;
 	/*-----------------------------------------------*/
 		spin_unlock(&ctx->tm_flush_lock);
+		printk(KERN_ERR "\n %s tm_flush_lock released! ", __func__);
 		index = index + 1;
 		if (TM_ENTRIES_BLK == index) {
 			down_interruptible(&ctx->tm_kv_store_lock);
@@ -2430,6 +2431,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	/*-----------------------------------------------*/
 			up(&ctx->tm_kv_store_lock);
 			page = tm_page->page;
+			set_bit(PG_dirty, &page->flags);
 			ptr = (struct tm_entry *) page_address(page);
 			index = 0;
 		}
@@ -2691,13 +2693,13 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 
 	spin_lock(&ctx->tm_flush_lock);
 	/*--------------------------------------*/
-	if (!PageDirty(page)) {
+	if (test_bit(PG_dirty, &page->flags)) {
 		spin_unlock(&ctx->tm_flush_lock);
 		printk(KERN_ERR "\n TM Page is not dirty!");
 		return;
 	}
 	/*--------------------------------------*/
-	ClearPageDirty(page);
+	clear_bit(PG_dirty, &page->flags);
 	spin_unlock(&ctx->tm_flush_lock);
 
 	bio = bio_alloc(GFP_KERNEL, 1);
@@ -2944,7 +2946,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	sit_ctx->page = page;
 	spin_lock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
-	ClearPageDirty(page);
+	clear_bit(PG_dirty, &page->flags);
 	/*-------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
 	generic_make_request(bio);
@@ -3052,7 +3054,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba, struct revmap_met
 	new_tmpage->blknr = blknr;
 	/* This is a new page, cannot be dirty, dont flush from a
 	 * parallel thread! */
-	ClearPageDirty(new_tmpage->page);
+	clear_bit(PG_dirty, &new_tmpage->page->flags);
 	/* We get a reference to this page, so that it is not freed
 	 * underneath us. We put the reference in the flush tm page
 	 * code, just before freeing it.
@@ -3134,6 +3136,7 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, struct revma
 		ptr = ptr + 1;
 		i++;
 	}
+	printk(KERN_ERR "%s bye!", __func__);
 	return 0;
 }
 
