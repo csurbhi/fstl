@@ -1,0 +1,21 @@
+From cd87d5960b5661e1fc06089579d292d9561e85bd Mon Sep 17 00:00:00 2001
+From: Surbhi Palande <csurbhi@gmail.com>
+Date: Thu, 18 Mar 2021 20:20:39 +0000
+Subject: [PATCH 2/2] Fixed the bug in add_revmap_entries.
+
+Unassigned pointer was being referenced causing a NULL pointer
+exception.
+
+Next bug:
+While copying multiple files on ext2, filesystem gets corrupted.
+This implies some write error! Most likely a translation map
+error. Check the translation map (write frontier), check partial writes,
+check writes when it cannot be accomodated in the current write
+frontier.
+Write a user space program to deal with all of these cases.
+Read the file later.
+mount, write the above files, unmount, mount, read the above files and
+verify the contents are the same, unmount.
+
+Signed-off-by: Surbhi Palande <csurbhi@gmail.com>
+---

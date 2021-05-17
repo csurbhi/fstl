@@ -95,7 +95,6 @@ static struct bio *bio_clone_bioset(struct bio *bio_src, gfp_t gfp_mask,
        bio = bio_alloc_bioset(gfp_mask, bio_segments(bio_src), bs);
        if (!bio)
                return NULL;
-       bio->bi_disk            = bio_src->bi_disk;
        bio->bi_opf             = bio_src->bi_opf;
        bio->bi_write_hint      = bio_src->bi_write_hint;
        bio->bi_iter.bi_sector  = bio_src->bi_iter.bi_sector;
@@ -878,7 +877,7 @@ static void read_gc_extents(struct ctx *ctx)
 	read_all_bios_and_wait(ctx, last_extent);
 }
 
-static int cmp_list_nodes(void *priv, struct list_head *lha, struct list_head *lhb)
+static int cmp_list_nodes(void *priv, const struct list_head *lha, const struct list_head *lhb)
 {
 	struct gc_extents *ga, *gb;
 
@@ -1422,7 +1421,7 @@ static int nstl_read_io(struct ctx *ctx, struct bio *bio)
 			split->bi_iter.bi_sector = pba;
 			bio_set_dev(split, ctx->dev->bdev);
 			//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
-			generic_make_request(split);
+			submit_bio(split);
 		}
 	}
 	printk(KERN_INFO "\n Read end");
@@ -1523,6 +1522,7 @@ struct sit_page * search_sit_kv_store(struct ctx *ctx, sector_t pba, struct rb_n
 
 	u64 zonenr = get_zone_nr(ctx, pba);
 	u64 blknr = zonenr / SIT_ENTRIES_BLK;
+	printk(KERN_ERR "\n %s pba: %llu zonenr: %d blknr: %d", __func__, pba, zonenr, blknr);
 
 	node = rb_root->rb_node;
 	while(node) {
@@ -1852,7 +1852,7 @@ void ckpt_flushed(struct bio *bio)
 
 	if (BLK_STS_OK != bio->bi_status) {
 		/* TODO: Do something more to handle the errors */
-		printk(KERN_DEBUG "\n Could not read the translation entry block");
+		printk(KERN_DEBUG "\n Could not write the checkpoint to disk");
 	}
 	return;
 }
@@ -1886,7 +1886,7 @@ void flush_revmap_bitmap(struct ctx *ctx)
 	bio->bi_private = ctx;
 	bio->bi_end_io = revmap_bitmap_flushed;
 	bio->bi_iter.bi_sector = pba;
-	printk(KERN_ERR "\n flushing revmap bitmap at pba: %u", ctx->sb->revmap_bm_pba);
+	printk(KERN_ERR "\n %s flushing revmap bitmap at pba: %u", __func__, ctx->sb->revmap_bm_pba);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	printk(KERN_ERR "\n About to aquire ckpt_lock!, revmap_bm pba: %llu", pba);
@@ -1895,8 +1895,8 @@ void flush_revmap_bitmap(struct ctx *ctx)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock(&ctx->ckpt_lock);
 	printk(KERN_ERR "\n ckpt_lock released!\n");
-	generic_make_request(bio);
-	printk(KERN_ERR "\n %s bio submitted!", __func__);
+	submit_bio(bio);
+	printk(KERN_ERR "\n %s bio submitted! Bye \n", __func__);
 	return;
 }
 
@@ -1947,7 +1947,7 @@ void flush_checkpoint(struct ctx *ctx)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock(&ctx->ckpt_lock);
 	bio->bi_private = ctx;
-	generic_make_request(bio);
+	submit_bio(bio);
 	return;
 }
 
@@ -1985,9 +1985,9 @@ void flush_sit(struct ctx *ctx)
 	 * together so that they can be 
 	 * written together
 	 */
-	blk_start_plug(&plug);
+	//blk_start_plug(&plug);
 	flush_sit_nodes(ctx, node);
-	blk_finish_plug(&plug);	
+	//blk_finish_plug(&plug);	
 }
 
 void wait_for_ckpt_completion(struct ctx *ctx)
@@ -2042,8 +2042,10 @@ void update_checkpoint(struct ctx *ctx)
 		return;
 	}
 	ckpt = (struct stl_ckpt *) page_address(page);
-	if (ckpt->clean == 1)
+	if (ckpt->clean == 1) {
+		printk(KERN_ERR "\n ckpt has not changed since last flush!");
 		return;
+	}
 	ckpt->user_block_count = ctx->user_block_count;
 	ckpt->version += 1;
 	ckpt->nr_invalid_zones = ctx->nr_invalid_zones;
@@ -2201,14 +2203,14 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 		return NULL;
 
 	RB_CLEAR_NODE(&new->rb);
-	printk(KERN_ERR " %s zonenr: %lld ", __func__, zonenr);
 	sit_blknr = zonenr / SIT_ENTRIES_BLK;
-	printk(KERN_ERR " %s sit_blknr: %lld sit_pba: %u", __func__, sit_blknr, ctx->sb->sit_pba);
+	//printk(KERN_ERR " %s sit_blknr: %lld sit_pba: %u", __func__, sit_blknr, ctx->sb->sit_pba);
 	page = read_block(ctx, sit_blknr, ctx->sb->sit_pba, 1);
 	if (!page) {
 		kmem_cache_free(ctx->sit_page_cache, new);
 		return NULL;
 	}
+	printk(KERN_ERR " %s zonenr: %lld page: %llu ", __func__, zonenr, page_address(page));
 	new->blknr = sit_blknr;
 	new->page = page;
 	if (parent) {
@@ -2216,7 +2218,7 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 		 * Key is: blknr for this corresponding block
 		 */
 		parent_ent = rb_entry(parent, struct sit_page, rb);
-		if (sit_blknr < parent_ent->blknr) {
+		if (new->blknr < parent_ent->blknr) {
 			/* Attach new node to the left of parent */
 			rb_link_node(&new->rb, parent, &parent->rb_left);
 		}
@@ -2247,6 +2249,10 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 		}
 		down_interruptible(&ctx->flush_lock);
 	}
+
+	new = search_sit_kv_store(ctx, pba, &parent);
+	BUG_ON(!new);
+	printk(KERN_ERR "\n %s pba: %llu page_address: %llu", __func__, pba, page_address(new->page));
 	return new;
 }
 
@@ -2286,6 +2292,12 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
+	/* Send the older vblocks, mtime along with the new vblocks,mtime to this
+	 * function. The older vblocks, mtime is used to calculated
+	 * the older cost which is stored in the tree. The newer ones
+	 * on the other hand are used to modify the tree
+	 */
+	//update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
 	ptr->vblocks = ptr->vblocks - 1;
 	if (!ptr->vblocks) {
 		spin_lock(&ctx->lock);
@@ -2294,7 +2306,6 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	}
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
-	update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
 }
 
 static void mark_zone_occupied(struct ctx *, int );
@@ -2358,12 +2369,18 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
+	/* Send the older vblocks, mtime along with the new vblocks,mtime to this
+	 * function. The older vblocks, mtime is used to calculated
+	 * the older cost which is stored in the tree. The newer ones
+	 * on the other hand are used to modify the tree
+	 * Also dont call this function under sit_flush_lock
+	 */
+	//update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
 	ptr->mtime = get_elapsed_time(ctx);
 	if (ctx->max_mtime < ptr->mtime)
 		ctx->max_mtime = ptr->mtime;
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
-	update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
 }
 
 struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node **parent);
@@ -2386,7 +2403,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 
 	set_bit(PG_dirty, &page->flags);
 	ptr = (struct tm_entry *) page_address(page);
-	printk(KERN_ERR "\n %s tm_page address: %p lba: %llu, pba:%llu, len: %d", __func__, ptr, lba, pba, len);
+	//printk(KERN_ERR "\n %s tm_page address: %p lba: %llu, pba:%llu, len: %d", __func__, ptr, lba, pba, len);
 	index = (lba/NR_SECTORS_IN_BLK);
 	ptr = ptr + index;
 
@@ -2415,7 +2432,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 		ptr = ptr + 1;
 	/*-----------------------------------------------*/
 		spin_unlock(&ctx->tm_flush_lock);
-		printk(KERN_ERR "\n %s tm_flush_lock released! ", __func__);
+		//printk(KERN_ERR "\n %s tm_flush_lock released! ", __func__);
 		index = index + 1;
 		if (TM_ENTRIES_BLK == index) {
 			down_interruptible(&ctx->tm_kv_store_lock);
@@ -2615,6 +2632,7 @@ void write_tmbl_complete(struct bio *bio)
 	tm_page = tm_page_write_ctx->tm_page;
 	page = tm_page->page;
 	printk(KERN_ERR "\n %s page:%p", __func__, page_address(page));
+	return;
 
 	/* We notify all those reverse map pages that are stuck on
 	 * these respective refcounts
@@ -2734,18 +2752,18 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_private = tm_page_write_ctx;
 	bio->bi_end_io = write_tmbl_complete;
 	printk(KERN_ERR "\n Inside %s \n 4 \n", __func__);
-	//spin_lock(&ctx->ckpt_lock);
+	spin_lock(&ctx->ckpt_lock);
 	/* The next code is related to synchronizing at dtr() time.
 	 */
 	if(ctx->flag_ckpt) {
 		atomic_inc(&ctx->ckpt_ref);
 	}
-	//spin_unlock(&ctx->ckpt_lock);
-printk(KERN_ERR "\n %s bio->bi_sector: %llu bio->bi_size: %u page:%p", __func__, bio->bi_iter.bi_sector, bio->bi_iter.bi_size, page_address(page));
+	spin_unlock(&ctx->ckpt_lock);
+//printk(KERN_ERR "\n %s bio->bi_sector: %llu bio->bi_size: %u page:%p", __func__, bio->bi_iter.bi_sector, bio->bi_iter.bi_size, page_address(page));
 printk(KERN_ERR "\n %s max_pba: %llu", ctx->max_pba);
 	bio->bi_status = BLK_STS_OK;
 	write_tmbl_complete(bio);
-	//generic_make_request(bio);
+	//submit_bio(bio);
 }
 
 
@@ -2912,7 +2930,8 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	if (!page)
 		return;
 
-	printk(KERN_ERR "\n %s 0.", __func__);
+	printk(KERN_ERR "\n sit page address: %llu ", page_address(page));
+
 	spin_lock(&ctx->sit_flush_lock);
 	if (!test_bit(PG_dirty, &page->flags)) {
 		spin_unlock(&ctx->sit_flush_lock);
@@ -2920,44 +2939,45 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 		return;
 	}
 	spin_unlock(&ctx->sit_flush_lock);
-
 	sit_ctx = kmem_cache_alloc(ctx->sit_ctx_cache, GFP_KERNEL);
 	if (!sit_ctx) {
 		printk(KERN_ERR "\n Low Memory ! ");
 		return;
 	}
 
-	printk(KERN_ERR "\n %s 1.", __func__);
+	printk(KERN_ERR "\n %s 0.", __func__);
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		kmem_cache_free(ctx->sit_ctx_cache, sit_ctx);
 		return;
 	}
 	
-		/* Sector addressing */
-	pba = (sit_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->sit_pba;
+	printk(KERN_ERR "\n %s 1 page: %llu", __func__, page_address(page));
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
 		return;
 	}
+
+	sit_ctx->ctx = ctx;
+	sit_ctx->page = page;
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
+	/* Sector addressing */
+	pba = (sit_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->sit_pba;
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_private = sit_ctx;
 	bio->bi_end_io = write_sitbl_complete;
 	printk(KERN_ERR "\n flush sit node page at lba: %llu", pba);
-	sit_ctx->ctx = ctx;
 	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock(&ctx->ckpt_lock);
-	sit_ctx->page = page;
 	printk(KERN_ERR "\n %s 2", __func__);
 	/*--------------------------------------------*/
 	clear_bit(PG_dirty, &page->flags);
 	/*-------------------------*/
-	generic_make_request(bio);
+	submit_bio(bio);
 }
 
 void flush_count_sit_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
@@ -3015,7 +3035,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba, struct revmap_met
 	struct list_head *temp;
 	struct ref_list *refnode, *tempref;
 
-	printk(KERN_ERR "\n add_tm_page_kv_store: lba: %llu \n", lba);
+	//printk(KERN_ERR "\n add_tm_page_kv_store: lba: %llu \n", lba);
 
 	refnode = kmem_cache_alloc(ctx->reflist_cache, GFP_KERNEL);
 	if (!refnode) {
@@ -3043,7 +3063,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba, struct revmap_met
 		return new_tmpage;
 	}
 
-	printk(KERN_ERR "\n refnode created! Allocating 'new' from tm_page_cache! \n");
+	//printk(KERN_ERR "\n refnode created! Allocating 'new' from tm_page_cache! \n");
 	new_tmpage = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
 	if (!new_tmpage) {
 		kmem_cache_free(ctx->reflist_cache, refnode);
@@ -3058,7 +3078,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba, struct revmap_met
 		kmem_cache_free(ctx->tm_page_cache, new_tmpage);
 		return NULL;
 	}
-	printk(KERN_ERR "\n %s tm node->page: %p", __func__, page_address(new_tmpage->page));
+	printk(KERN_ERR "\n %s refnode created, new allocated, tm node->page: %p", __func__, page_address(new_tmpage->page));
 	new_tmpage->blknr = blknr;
 	/* This is a new page, cannot be dirty, dont flush from a
 	 * parallel thread! */
@@ -3133,7 +3153,7 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, struct revma
 			if (len == 0) {
 				continue;
 			}
-			printk(KERN_ERR "Adding TM entry: ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", lba, pba, len);
+			//printk(KERN_ERR "Adding TM entry: ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", lba, pba, len);
 			down_interruptible(&ctx->tm_kv_store_lock);
 			tm_page = add_tm_page_kv_store(ctx, lba, revmap_bio_ctx);
 			up(&ctx->tm_kv_store_lock);
@@ -3455,7 +3475,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	spin_unlock(&ctx->rev_flush_lock);
 	printk(KERN_ERR "\n flushing revmap at pba: %llu", bio->bi_iter.bi_sector);
 	kthread_run(revmap_entries_flushed, revmap_bio_ctx, "revmap_entries_flushed");
-	generic_make_request(bio);
+	submit_bio(bio);
 	return 0;
 }
 
@@ -3787,7 +3807,7 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		split->bi_private = subbio_ctx;
 		split->bi_end_io = nstl_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
-		generic_make_request(split);
+		submit_bio(split);
 		cookie = async_schedule(sub_write_done, subbio_ctx);
 	} while (split != clone);
 
@@ -3809,14 +3829,14 @@ static int nstl_write_io(struct ctx *ctx, struct bio *bio)
 		/* bio advance will advance the bi_sector and bi_size
 		 */
 		bio_advance(pad, nr_sectors << 9);
-		zero_fill_bio_iter(pad, pad->bi_iter);
+		zero_fill_bio(pad);
 		/* we dont need to take any action when pad completes
 		 * and thus we dont need any endio for pad. Chain it 
 		 * with parent, so that we are notified its completion
 		 * when parent completes.
 		 */
 		bio_chain(pad, clone);
-		generic_make_request(pad);
+		submit_bio(pad);
 	}
 	blk_finish_plug(&plug);
 	kref_put(&bioctx->ref, write_done);
@@ -3907,13 +3927,13 @@ static void do_checkpoint(struct ctx *ctx)
 	up(&ctx->flush_lock);
 	printk(KERN_ERR "\n sit pages flushed!");
 
-	blk_start_plug(&plug);
+	//blk_start_plug(&plug);
 	flush_revmap_bitmap(ctx);
 	printk(KERN_ERR "\n revmap_bitmap flushed!\n");
 	update_checkpoint(ctx);
 	printk(KERN_ERR "\n checkpoint updated! \n");
 	flush_checkpoint(ctx);
-	blk_finish_plug(&plug);
+	//blk_finish_plug(&plug);
 
 	printk(KERN_ERR "\n checkpoint flushed! \n");
 	/* We need to wait for all of this to be over before 
@@ -4351,6 +4371,10 @@ static int get_cost(struct ctx *ctx, u32 nrblks, u64 age, char gc_mode)
  */
 int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime)
 {
+	/* TODO: There is a tree with SIT pages and there is one for
+	 * GC cost. These are separate trees. So use another root.
+	 * Do not mix these trees!
+	 */
 	struct rb_root *root = &ctx->sit_rb_root;
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct sit_extent *e = NULL, *new = NULL;
@@ -4448,8 +4472,10 @@ int read_seg_entries_from_block(struct ctx *ctx, struct stl_seg_entry *entry, un
 				ctx->min_mtime = entry->mtime;
 			if (ctx->max_mtime < entry->mtime)
 				ctx->max_mtime = entry->mtime;
+			/*
 			if (!update_inmem_sit(ctx, *zonenr, entry->vblocks, entry->mtime))
 				panic("Memory error, write a memory shrinker!");
+			*/
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
@@ -5007,8 +5033,8 @@ static void stl_dtr(struct dm_target *dm_target)
 	/* At this point we are sure that the revmap
 	 * entries have made it to the disk
 	 */
-	printk(KERN_ERR "\n %s about to flush translation blocks!");
-	flush_translation_blocks(ctx);
+	//printk(KERN_ERR "\n %s about to flush translation blocks!");
+	//flush_translation_blocks(ctx);
 	do_checkpoint(ctx);
 	//printk(KERN_ERR "\n checkpoint done!");
 	/* If we are here, then there was no crash while writing out
@@ -5065,7 +5091,7 @@ int nstl_zone_reset(struct ctx *ctx, struct bio *bio)
 	 * do_checkpoint();
 	 */
 
-	ret  = blkdev_reset_zones(bdev, sector, nr_sectors, GFP_KERNEL);
+	//ret  = blkdev_reset_zones(bdev, sector, nr_sectors, GFP_KERNEL);
 	if (ret)
 		return ret;
 	

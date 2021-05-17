@@ -1,0 +1,155 @@
+From 4b03486f7d10ce22dac1c5d457ec5b2a117f443e Mon Sep 17 00:00:00 2001
+From: Surbhi Palande <csurbhi@gmail.com>
+Date: Sat, 13 Mar 2021 02:00:26 +0000
+Subject: [PATCH] debug contd
+
+Signed-off-by: Surbhi Palande <csurbhi@gmail.com>
+---
+ dm-nstl.c | 58 +++++++++++++++++++++++++++++++------------------------
+ 1 file changed, 33 insertions(+), 25 deletions(-)
+
+diff --git a/dm-nstl.c b/dm-nstl.c
+index 21a4661..53dcca3 100644
+--- a/dm-nstl.c
++++ b/dm-nstl.c
+@@ -2429,34 +2429,38 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
+ 	struct stl_revmap_entry_sector * ptr = NULL;
+ 	int i, j;
+ 	struct page * page = NULL;
++	static int count;
+ 
+-	spin_lock(&ctx->rev_entries_lock);
+-
++	//spin_lock(&ctx->rev_entries_lock);
++	count++;
++	return;
+ 	i = atomic_read(&ctx->revmap_sector_count);
+ 	j = atomic_read(&ctx->revmap_blk_count);
+-	if (0 == j) {
++	printk(KERN_ERR "\n spin lock aquired! %d i:%d j:%d\n", count, i, j);
++	//if (0 == j) {
+ 		/* we need to make sure the previous block is on the
+ 		 * disk. We cannot overwrite without that.
+ 		 */
+-		page = alloc_page(__GFP_ZERO|GFP_KERNEL);
+-		if (!page) {
++		//page = alloc_page(__GFP_ZERO|GFP_KERNEL);
++		//if (!page) {
+ 			/* TODO: Do something more. For now panicking!
+ 			 */
+-			panic("Low memory, could not allocate page!");
+-		}
+-		ctx->revmap_page = page;
+-		mark_revmap_bit(ctx, ctx->revmap_pba);
+-	}
+-	page = ctx->revmap_page;
+-	ptr = (struct stl_revmap_entry_sector *)page_address(page);
++		//	panic("Low memory, could not allocate page!");
++		//}
++		//ctx->revmap_page = page;
++		//mark_revmap_bit(ctx, ctx->revmap_pba);
++	//}
++	//page = ctx->revmap_page;
++	//ptr = (struct stl_revmap_entry_sector *)page_address(page);
++	/*
+ 	ptr->extents[i].lba = lba;
+     	ptr->extents[i].pba = pba;
+ 	ptr->extents[i].len = nrsectors;
++	*/
+ 	atomic_inc(&ctx->revmap_blk_count);
+ 	atomic_inc(&ctx->revmap_sector_count);
+-
+-	if (i  % NR_EXT_ENTRIES_PER_SEC == 0) {
+-		ptr->crc = calculate_crc(ctx, page);
++	if (i == NR_EXT_ENTRIES_PER_SEC) {
++		//ptr->crc = calculate_crc(ctx, page);
+ 		atomic_set(&ctx->revmap_sector_count, 0);
+ 		if (NR_EXT_ENTRIES_PER_BLK == j) {
+ #ifdef BARRIER_NSTL
+@@ -2465,21 +2469,21 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
+ 			 * sending translation entries for write
+ 			 * sooner than they can be drained.
+ 			 */
+-			wait_on_block_barrier(ctx);
++			//wait_on_block_barrier(ctx);
+ #endif
+ 			/* Flush the entries to the disk */
+-			pba = ptr->extents[NR_EXT_ENTRIES_PER_SEC - 1].pba;
++			//pba = ptr->extents[NR_EXT_ENTRIES_PER_SEC - 1].pba;
+ 			/* TODO: Alternatively, we could flag, that
+ 			 * this is the last pba of the zone
+ 			 * from the caller of this function
+ 			 */
+-			flush_revmap_block_disk(ctx, page, pba);
++			//flush_revmap_block_disk(ctx, page, pba);
+ 			atomic_set(&ctx->revmap_blk_count, 0);
+-		} else {
+-			ptr = ptr + SECTOR_SIZE;
+-		}
++		} /*else {
++			ptr = ptr + 1;
++		}*/
+ 	}
+-	spin_unlock(&ctx->rev_entries_lock);
++	//spin_unlock(&ctx->rev_entries_lock);
+ 	return;
+ }
+ 
+@@ -2495,14 +2499,17 @@ void clone_io_done(struct kref *kref)
+ 	struct bio *clone;
+ 	struct nstl_bioctx * nstl_bioctx;
+ 	static int count;
++	struct ctx *ctx;
+ 
+ 	printk(KERN_ERR "I/O done, freeing....! %d", count);
+ 	nstl_bioctx = container_of(kref, struct nstl_bioctx, ref);
++	ctx = nstl_bioctx->ctx;
+ 	bio = nstl_bioctx->orig;
+ 	clone = nstl_bioctx->clone;
+ 	bio_endio(bio);
+ 	bio_put(clone);
+ 	count++;
++	kmem_cache_free(ctx->bioctx_cache, nstl_bioctx);
+ 	printk(KERN_ERR "freeing done! %d", count);
+ }
+ 
+@@ -2618,9 +2625,10 @@ static void nstl_clone_endio(struct bio * clone)
+ 		printk(KERN_ERR "\n write end io status OK! lba: %llu, pba: %llu, len: %lu", subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+ 		 /*
+ 		 ret = stl_update_range(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
+-		*/
+ 		add_revmap_entries(ctx, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len);
++		*/
+ 	}
++	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+ 	kref_put(&bioctx->ref, clone_io_done);
+ }
+ 
+@@ -3397,6 +3405,8 @@ int read_metadata(struct ctx * ctx)
+ 	put_page(page);
+ 	ctx->sb = sb2;
+ 	ctx->max_pba = ctx->sb->max_pba;
++	ctx->nr_lbas_in_zone = (1 << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
++	ctx->revmap_pba = ctx->sb->revmap_pba;
+ 
+ 	ckpt = get_cur_checkpoint(ctx);
+ 	if (NULL == ckpt) {
+@@ -3411,7 +3421,6 @@ int read_metadata(struct ctx * ctx)
+ 		return ret;
+ 	}
+ 	ctx->ckpt->clean = 0;
+-	ctx->revmap_pba = ctx->sb->revmap_pba;
+ 	printk(KERN_INFO "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
+ 	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
+ 
+@@ -3450,7 +3459,6 @@ int read_metadata(struct ctx * ctx)
+ 	if (sb1->zone_count_main % BITS_IN_BYTE > 0)
+ 		ctx->bitmap_bytes += 1;
+ 	ctx->nr_freezones = 0;
+-	ctx->nr_lbas_in_zone = (1 << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
+ 	read_seg_info_table(ctx);
+ 	printk(KERN_INFO "\n read segment entries, free bitmap created! \n");
+ 	if (ctx->nr_freezones != ckpt->nr_free_zones) { 
+-- 
+2.20.1
+
