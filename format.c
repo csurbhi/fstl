@@ -78,7 +78,7 @@ __le32 get_zone_count()
  * just for the data area. So we end up allocating slightly
  * more space than is strictly necessary.
  */
-__le64 get_nr_blks(struct stl_sb *sb)
+__le64 get_nr_blks(struct lsdm_sb *sb)
 {
 	unsigned long nr_blks = (sb->zone_count << (sb->log_zone_size - sb->log_block_size));
 	return nr_blks;
@@ -91,7 +91,7 @@ __le64 get_nr_blks(struct stl_sb *sb)
  * blocks. One block has 48 entries.
  */
 
-__le32 get_revmap_blk_count(struct stl_sb *sb)
+__le32 get_revmap_blk_count(struct lsdm_sb *sb)
 {
 	unsigned nr_rm_entries = 2 << (sb->log_zone_size - sb->log_block_size);
 	unsigned nr_rm_entries_per_blk = NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK;
@@ -109,7 +109,7 @@ __le32 get_revmap_blk_count(struct stl_sb *sb)
  * This accounts for the blks in the main area and excludes the blocks
  * for the metadata. Hence we do NOT call get_nr_blks()
  */
-__le32 get_tm_blk_count(struct stl_sb *sb)
+__le32 get_tm_blk_count(struct lsdm_sb *sb)
 {
 	u64 nr_tm_entries = (sb->zone_count_main << (sb->log_zone_size - sb->log_block_size));
 	u32 nr_tm_entries_per_blk = BLOCK_SIZE / sizeof(struct tm_entry);
@@ -120,7 +120,7 @@ __le32 get_tm_blk_count(struct stl_sb *sb)
 }
 
 
-__le32 get_revmap_bm_blk_count(struct stl_sb *sb)
+__le32 get_revmap_bm_blk_count(struct lsdm_sb *sb)
 {
 	unsigned nr_revmap_blks = sb->blk_count_revmap;
 	unsigned nr_bytes = nr_revmap_blks / BITS_IN_BYTE;
@@ -136,12 +136,12 @@ __le32 get_revmap_bm_blk_count(struct stl_sb *sb)
 }
 
 
-__le32 get_nr_zones(struct stl_sb *sb)
+__le32 get_nr_zones(struct lsdm_sb *sb)
 {
 	return sb->zone_count;
 }
 
-__le32 get_sit_blk_count(struct stl_sb *sb)
+__le32 get_sit_blk_count(struct lsdm_sb *sb)
 {
 	unsigned int one_sit_sz = 80; /* in bytes */
 	unsigned int nr_sits_in_blk = BLK_SZ / one_sit_sz;
@@ -156,7 +156,7 @@ __le32 get_sit_blk_count(struct stl_sb *sb)
 /* We write all the metadata blks sequentially in the CMR zones
  * that can be rewritten in place
  */
-__le32 get_metadata_zone_count(struct stl_sb *sb)
+__le32 get_metadata_zone_count(struct lsdm_sb *sb)
 {
 	/* we add the 2 for the superblock */
 	unsigned int metadata_blk_count = NR_BLKS_SB + sb->blk_count_revmap + sb->blk_count_ckpt + sb->blk_count_revmap_bm + sb->blk_count_tm + sb->blk_count_sit;
@@ -170,7 +170,7 @@ __le32 get_metadata_zone_count(struct stl_sb *sb)
 /* we consider the main area to have the 
  * reserved zones
  */
-__le32 get_main_zone_count(struct stl_sb *sb)
+__le32 get_main_zone_count(struct lsdm_sb *sb)
 {
 	__le32 main_zone_count = 0;
 	/* we are not subtracting reserved zones from here */
@@ -204,42 +204,42 @@ __le64 get_revmap_pba()
 	return (NR_BLKS_SB * NR_SECTORS_IN_BLK);
 }
 
-__le64 get_tm_pba(struct stl_sb *sb)
+__le64 get_tm_pba(struct lsdm_sb *sb)
 {
 	u64 tm_pba = sb->revmap_pba + ( sb->blk_count_revmap * NR_SECTORS_IN_BLK);
 	return tm_pba;
 }
 
-__le64 get_revmap_bm_pba(struct stl_sb *sb)
+__le64 get_revmap_bm_pba(struct lsdm_sb *sb)
 {
 	u64 revmap_bm_pba = sb->tm_pba + (sb->blk_count_tm * NR_SECTORS_IN_BLK);
 	return revmap_bm_pba;
 }
 
-__le64 get_ckpt1_pba(struct stl_sb *sb)
+__le64 get_ckpt1_pba(struct lsdm_sb *sb)
 {
 	u64 cp1_pba  = sb->revmap_bm_pba + (sb->blk_count_revmap_bm * NR_SECTORS_IN_BLK);
 	return cp1_pba;
 }
 
 
-__le64 get_sit_pba(struct stl_sb *sb)
+__le64 get_sit_pba(struct lsdm_sb *sb)
 {
 	return sb->ckpt2_pba + NR_SECTORS_IN_BLK;
 }
 
-__le64 get_zone0_pba(struct stl_sb *sb)
+__le64 get_zone0_pba(struct lsdm_sb *sb)
 {
 	return sb->sit_pba + (sb->blk_count_sit * NR_SECTORS_IN_BLK);
 }
 
 void read_sb(int fd, unsigned long sectornr)
 {
-	struct stl_sb *sb;
+	struct lsdm_sb *sb;
 	int ret = 0;
 	unsigned long long offset = sectornr * 512;
 
-	sb = (struct stl_sb *)malloc(BLK_SZ);
+	sb = (struct lsdm_sb *)malloc(BLK_SZ);
 	if (!sb)
 		exit(-1);
 	memset(sb, 0, BLK_SZ);
@@ -273,7 +273,7 @@ void read_sb(int fd, unsigned long sectornr)
 	free(sb);
 }
 
-__le64 get_max_pba(struct stl_sb *sb)
+__le64 get_max_pba(struct lsdm_sb *sb)
 {
 	return sb->zone_count * (1 << (sb->log_zone_size - sb->log_sector_size));
 
@@ -320,7 +320,7 @@ void write_revmap_bitmap(int fd, sector_t revmap_bm_pba, unsigned nr_blks)
 	write_zeroed_blks(fd, revmap_bm_pba, nr_blks);
 }
 
-unsigned long long get_current_frontier(struct stl_sb *sb)
+unsigned long long get_current_frontier(struct lsdm_sb *sb)
 {
 	unsigned long sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
 	unsigned long sit_end_blk_nr = sit_end_pba / NR_SECTORS_IN_BLK;
@@ -338,7 +338,7 @@ unsigned long long get_current_frontier(struct stl_sb *sb)
 	return (sit_zone_nr + 1) * (1 << (sb->log_zone_size - sb->log_sector_size));
 }
 
-unsigned long long get_current_gc_frontier(struct stl_sb *sb)
+unsigned long long get_current_gc_frontier(struct lsdm_sb *sb)
 {
 	int zonenr = get_zone_count();
 
@@ -347,12 +347,12 @@ unsigned long long get_current_gc_frontier(struct stl_sb *sb)
 }
 
 
-struct stl_sb * write_sb(int fd, unsigned long sb_pba)
+struct lsdm_sb * write_sb(int fd, unsigned long sb_pba)
 {
-	struct stl_sb *sb;
+	struct lsdm_sb *sb;
 	int ret = 0;
 
-	sb = (struct stl_sb *)malloc(BLK_SZ);
+	sb = (struct lsdm_sb *)malloc(BLK_SZ);
 	if (!sb)
 		exit(-1);
 	memset(sb, 0, BLK_SZ);
@@ -362,7 +362,7 @@ struct stl_sb * write_sb(int fd, unsigned long sb_pba)
 	sb->log_sector_size = 9;
 	sb->log_block_size = 12;
 	sb->log_zone_size = 28;
-	sb->checksum_offset = offsetof(struct stl_sb, crc);
+	sb->checksum_offset = offsetof(struct lsdm_sb, crc);
 	sb->zone_count = get_zone_count(sb);
 	printf("\n sb->zone_count: %d", sb->zone_count);
     	sb->zone_count_reserved = get_reserved_zone_count(sb);
@@ -421,7 +421,7 @@ void set_bitmap(char *bitmap, unsigned int nrzones, char ch)
 
 
 
-unsigned long long get_user_block_count(struct stl_sb *sb)
+unsigned long long get_user_block_count(struct lsdm_sb *sb)
 {
 	unsigned long sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
 	unsigned long sit_zone_nr = sit_end_pba >> sb->log_zone_size;
@@ -429,7 +429,7 @@ unsigned long long get_user_block_count(struct stl_sb *sb)
 
 }
 
-void prepare_cur_seg_entry(struct stl_seg_entry *entry)
+void prepare_cur_seg_entry(struct lsdm_seg_entry *entry)
 {
 	/* Initially no block has any valid data */
 	entry->vblocks = 0;
@@ -437,18 +437,18 @@ void prepare_cur_seg_entry(struct stl_seg_entry *entry)
 }
 
 
-void prepare_prev_seg_entry(struct stl_seg_entry *entry)
+void prepare_prev_seg_entry(struct lsdm_seg_entry *entry)
 {
 	entry->vblocks = 0;
 	entry->mtime = 0;
 }
 
-void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
+void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 {
-	struct stl_ckpt *ckpt;
+	struct lsdm_ckpt *ckpt;
 	unsigned int bitmap_sz = sb->zone_count / BITS_IN_BYTE;
 
-	ckpt = (struct stl_ckpt *)malloc(BLK_SZ);
+	ckpt = (struct lsdm_ckpt *)malloc(BLK_SZ);
 	if(!ckpt)
 		exit(-1);
 
@@ -472,14 +472,14 @@ void write_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 	free(ckpt);
 }
 
-void read_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
+void read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 {
-	struct stl_ckpt *ckpt;
+	struct lsdm_ckpt *ckpt;
 	unsigned int bitmap_sz = sb->zone_count / BITS_IN_BYTE;
 	unsigned long offset = ckpt_pba * 512;
 	int ret;
 
-	ckpt = (struct stl_ckpt *)malloc(BLK_SZ);
+	ckpt = (struct lsdm_ckpt *)malloc(BLK_SZ);
 	if(!ckpt)
 		exit(-1);
 
@@ -498,8 +498,8 @@ void read_ckpt(int fd, struct stl_sb * sb, unsigned long ckpt_pba)
 
 void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_pba)
 {
-	struct stl_seg_entry seg_entry;
-	unsigned entries_in_blk = BLK_SZ / sizeof(struct stl_seg_entry);
+	struct lsdm_seg_entry seg_entry;
+	unsigned entries_in_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
 	unsigned int nr_sit_blks = (nr_seg_entries)/entries_in_blk;
 	unsigned int i, ret;
 	if (nr_seg_entries % entries_in_blk > 0)
@@ -525,8 +525,8 @@ void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_
 	printf("\n preparing buf! ");
 	i = 0;
 	while (i < entries_in_blk) {
-		memcpy(buf + size, &seg_entry, sizeof(struct stl_seg_entry));
-		size = size +  sizeof(struct stl_seg_entry);
+		memcpy(buf + size, &seg_entry, sizeof(struct lsdm_seg_entry));
+		size = size +  sizeof(struct lsdm_seg_entry);
 		i = i + 1;
 	}
 	printf("\n Buf prepared");
@@ -552,7 +552,7 @@ void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_
 int main()
 {
 	unsigned int pba = 0;
-	struct stl_sb *sb1, *sb2;
+	struct lsdm_sb *sb1, *sb2;
 	char cmd[256];
 	unsigned long nrblks;
 	unsigned int ret = 0;
@@ -562,7 +562,7 @@ int main()
 
 	sb1 = write_sb(fd, 0);
 	printf("\n Superblock written at pba: %d", pba);
-	printf("\n sizeof sb: %ld", sizeof(struct stl_sb));
+	printf("\n sizeof sb: %ld", sizeof(struct lsdm_sb));
 	sb2 = write_sb(fd, 8);
 	read_sb(fd, 0);
 	read_sb(fd, 8);
@@ -586,14 +586,14 @@ int main()
 	read_ckpt(fd, sb1, sb1->ckpt1_pba);
 	free(sb1);
 	close(fd);
-	/* 0 volume_size: 39321600  nstl  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
+	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 524288;
 	unsigned long data_zones = 28000;
 	char * tgtname = "TL1";
 	//volume_size = data_zones * zone_lbas;
 	unsigned long volume_size = 39321600;
 	unsigned long data_end = 41418752;
-	sprintf(cmd, "/sbin/dmsetup create TL1 --table '0 %ld nstl %s %s %ld %ld'",
+	sprintf(cmd, "/sbin/dmsetup create TL1 --table '0 %ld lsdm %s %s %ld %ld'",
             volume_size, blkdev, tgtname, zone_lbas, 
 	    data_end);
 	printf("\n cmd: %s", cmd);

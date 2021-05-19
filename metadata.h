@@ -1,7 +1,6 @@
 #include <linux/types.h>
 #include <linux/refcount.h>
 #include <linux/wait.h>
-#include "nstl-u.h"
 #include "format_metadata.h"
 
 /*
@@ -86,7 +85,7 @@ struct sit_page {
 	struct page *page;
 };
 
-struct nstl_bioctx {
+struct lsdm_bioctx {
 	struct kref ref;
 	struct bio * orig;
 	struct ctx *ctx;
@@ -105,9 +104,9 @@ struct extent_entry {
 	size_t len;
 };
 
-struct nstl_sub_bioctx {
+struct lsdm_sub_bioctx {
 	struct extent_entry extent;
-	struct nstl_bioctx * bioctx;
+	struct lsdm_bioctx * bioctx;
 	u8 magic;
 	struct completion write_done;
 };
@@ -154,7 +153,7 @@ struct cur_zone_info {
 
 #define MAX_PATH_LEN 256
 
-struct stl_dev_info {
+struct lsdm_dev_info {
         struct block_device *bdev;
         char path[MAX_PATH_LEN];
         unsigned int total_zones;
@@ -170,9 +169,9 @@ struct stl_dev_info {
 #define MAX_TIME 5
 
 
-struct stl_gc_thread {
-	struct task_struct *stl_gc_task;
-	wait_queue_head_t stl_gc_wait_queue;
+struct lsdm_gc_thread {
+	struct task_struct *lsdm_gc_task;
+	wait_queue_head_t lsdm_gc_wait_queue;
 	/* for gc sleep time */
 	unsigned int urgent_sleep_time;
 	unsigned int min_sleep_time;
@@ -229,11 +228,11 @@ struct ctx {
 
 	char              nodename[32];
   
-	struct stl_gc_thread *gc_th;
+	struct lsdm_gc_thread *gc_th;
 	struct page 	*sb_page;
-	struct stl_sb 	*sb;
+	struct lsdm_sb 	*sb;
 	struct page 	*ckpt_page;
-	struct stl_ckpt *ckpt;
+	struct lsdm_ckpt *ckpt;
 	char *freezone_bitmap;
 	int 	nr_freezones;
 	char *gc_zone_bitmap;

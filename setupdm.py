@@ -18,5 +18,5 @@ data_end = volume_size
 print "data_end: " + str(data_end)
 print '0 %d nstl %s %s %d %d' % (volume_size, blkdev, tgtname, zone_lbas, data_end)
 subprocess.call(['/sbin/dmsetup', 'create', tgtname, '--table',
-                 '0 %d nstl %s %s %d %d' % (volume_size, blkdev, tgtname, 
+                 '0 %d lsdm %s %s %d %d' % (volume_size, blkdev, tgtname, 
                                             zone_lbas, data_end)])

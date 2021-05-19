@@ -1,7 +1,7 @@
 CONFIG_MODULE_SIG=n
 
-module := nstl
-obj-m := dm-$(module).o
+module := lsdm
+obj-m := $(module).o
 
 KDIR := /lib/modules/$(shell uname -r)/build
 #KDIR := /lib/modules/4.10.0-42-generic/build

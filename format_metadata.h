@@ -101,10 +101,10 @@ typedef u64 sector_t;
 __u8 valid_map[VBLK_MAP_SIZE];
  */
 
-#define SIT_ENTRIES_BLK 	BLK_SIZE/sizeof(struct stl_seg_entry)
+#define SIT_ENTRIES_BLK 	BLK_SIZE/sizeof(struct lsdm_seg_entry)
 #define TM_ENTRIES_BLK 		BLK_SIZE/sizeof(struct tm_entry)
 
-struct stl_seg_entry {
+struct lsdm_seg_entry {
 	__le32 vblocks;
 	__le64 mtime;
 	/* We do not store any valid map here
@@ -117,7 +117,7 @@ struct stl_seg_entry {
 
 /* In the worst case, we spend 80 bytes per block. There are 65536
  * such blocks. So we need 65536 such entries */
-struct stl_revmap_extent {
+struct lsdm_revmap_extent {
 	__le64 lba;
 	__le64 pba;
 	__le16 len; /* At a maximum there are 65536 blocks in a zone */
@@ -132,27 +132,27 @@ struct stl_revmap_extent {
  */
 
 #define BLK_SIZE			4096
-//#define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct stl_revmap_extent)
+//#define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct lsdm_revmap_extent)
 #define NR_EXT_ENTRIES_PER_SEC		6
 //#define NR_EXT_ENTRIES_PER_BLK 		NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK
 #define NR_EXT_ENTRIES_PER_BLK 		48
 #define MAX_EXTENTS_PER_ZONE		65536
-struct stl_revmap_entry_sector{
-	struct stl_revmap_extent extents[NR_EXT_ENTRIES_PER_SEC];
+struct lsdm_revmap_entry_sector{
+	struct lsdm_revmap_extent extents[NR_EXT_ENTRIES_PER_SEC];
 	__le32 crc;	/* We use 31 bits to indicate the crc and LSB bit maintains 0/1 for
 			   identifying if the sector belongs to this iteration or next
 			  */
  }__attribute__((packed));
 
 /* first sector */
-struct stl_revmap_metadata {
+struct lsdm_revmap_metadata {
 	__le32 zone_nr_0;
 	__le32 zone_nr_1;
 	unsigned char version:1;  /* flips between 1 and 0 and is maintained in the crc */
 	unsigned char padding[0]; /* padding for the sector */
 }__attribute__((packed));
 
-struct stl_ckpt {
+struct lsdm_ckpt {
 	uint32_t magic;
 	__le64 version;
 	__le64 user_block_count;
@@ -166,19 +166,19 @@ struct stl_ckpt {
 	unsigned char padding[0]; /* write all this in the padding */
 } __attribute__((packed));
 
-struct stl_revmap_bitmaps {
+struct lsdm_revmap_bitmaps {
 	unsigned char bitmap0[16384];
 	unsigned char bitmap1[16384];
 } __attribute__((packed));
 
-struct stl_sit_cache {
+struct lsdm_sit_cache {
 
 }__attribute__((packed));
 
 
 #define STL_SB_SIZE 4096
 
-struct stl_sb {
+struct lsdm_sb {
 	__le32 magic;			/* Magic Number */
 	__le32 version;			/* Superblock version */
 	__le32 log_sector_size;		/* log2 sector size in bytes */
