@@ -403,7 +403,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		*/
 		if (lba + len == e->lba) {
 			if (pba + len == e->pba) {
-				printk(KERN_ERR "\n New node merged! ");
+				//printk(KERN_ERR "\n New node merged! ");
 				lsdm_rb_remove(ctx, root, e);
 				e->len += len;
 				e->lba = lba;
@@ -445,7 +445,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		if (lba == e->lba + e->len) {
 			if (pba == e->pba + e->len) {
 				e->len = e->len + len;
-				printk(KERN_ERR "\n New node merged! ");
+				//printk(KERN_ERR "\n New node merged! ");
 				mempool_free(new, ctx->extent_pool);
 				next = lsdm_rb_next(e);
 				/* No overlap with next extent */
@@ -592,7 +592,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	if (!node) {
 		/* new node has to be added */
 		lsdm_rb_insert(ctx, root, new);
-		printk( "\n %s Inserted (lba: %u pba: %u len: %d) ", __func__, new->lba, new->pba, new->len);
+		//printk( "\n %s Inserted (lba: %u pba: %u len: %d) ", __func__, new->lba, new->pba, new->len);
 	}
 	//merge_more_nodes(ctx, root, lba, pba, len);
 	return 0;
@@ -3543,7 +3543,7 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	//ret = lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	write_unlock(&ctx->metadata_update_lock);
-	printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %lu \n", __func__, lba, pba, len);
+	//printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %lu \n", __func__, lba, pba, len);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
@@ -3569,7 +3569,7 @@ static void lsdm_clone_endio(struct bio * clone)
 	if (bio->bi_status == BLK_STS_OK) {
 		bio->bi_status = clone->bi_status;
 	}
-	printk(KERN_ERR "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
+	//printk(KERN_ERR "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
 	complete(&subbioctx->write_done);
 	bio_put(clone);
 	return;
@@ -3621,7 +3621,7 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
 	nr_sectors = bio_sectors(bio);
-	printk(KERN_INFO "\n ******* Inside map_write_io, requesting lba: %llu sectors: %d", bio->bi_iter.bi_sector, nr_sectors);
+	//printk(KERN_INFO "\n ******* Inside map_write_io, requesting lba: %llu sectors: %d", bio->bi_iter.bi_sector, nr_sectors);
 	if (unlikely(nr_sectors <= 0)) {
 		printk(KERN_ERR "\n Less than 0 sectors (%d) requested!, nbios: %u", nr_sectors, nbios);
 		bio->bi_status = BLK_STS_OK;
@@ -3713,7 +3713,7 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
 		init_completion(&subbio_ctx->write_done);
-		printk(KERN_ERR "\n (%s) lba: %llu, &write_done: %llu", __func__, lba, &subbio_ctx->write_done);
+		//printk(KERN_ERR "\n (%s) lba: %llu, &write_done: %llu", __func__, lba, &subbio_ctx->write_done);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */

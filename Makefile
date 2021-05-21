@@ -1,17 +1,16 @@
-CONFIG_MODULE_SIG=n
+CONFIG_MODULE_SIG=y
 
 module := lsdm
 obj-m := $(module).o
 
 KDIR := /lib/modules/$(shell uname -r)/build
-#KDIR := /lib/modules/4.10.0-42-generic/build
-
-
 PWD := $(shell pwd)
-CFLAGS_dm-$(module).o += -DDEBUG -g
+MY_CFLAGS += -g -DDEBUG
+ccflags-y += ${MY_CFLAGS}
+CC += ${MY_CFLAGS}
 
 all:
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(PWD) modules EXTRA_CFLAGS="$(MY_CFLAGS)"
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean

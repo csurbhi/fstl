@@ -1,4 +1,4 @@
-sudo insmod dm-nstl.ko
+sudo insmod lsdm.ko
 sudo ./format | tee ./format_output
 sudo python setupdm.py
 sudo dd if=../scripts/0001-debug-contd.patch of=/dev/dm-0 
