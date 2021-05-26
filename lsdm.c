@@ -3392,62 +3392,65 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	int i = 0, j = 0, k=0, l=0, found = 0;
 	struct page * page = NULL;
 
-	//spin_lock(&ctx->rev_entries_lock);
-	spin_lock(&ctx->rev_flush_lock);
+	down(&ctx->rev_entries_lock);
 
 	/* Merge entries by increasing the length if there lies a
 	 * matching entry in the revmap page
 	 */
 	i = atomic_read(&ctx->revmap_sector_count);
 	j = atomic_read(&ctx->revmap_blk_count);
-	for(k=0; k<i; k++) {
-		if (found)
-			break;
-		for (l=0; l<j; l++) {
-			if(ptr[k].extents[l].lba == lba) {
-				if(ptr[k].extents[l].len == nrsectors) {
-					/* replace pba */
-					ptr[k].extents[l].pba = pba;
-					found = 1;
-					break;
-				}
-			
-			} else if (ptr[k].extents[l].lba + ptr[k].extents[l].len == lba) {
-				/* merge if pba allows merging */
-				if (ptr[k].extents[l].pba + ptr[k].extents[l].len == pba) {
-					ptr[k].extents[l].len += nrsectors;
-					found = 1;
-					break;
-				}
-			} else if (lba + nrsectors == ptr[k].extents[l].lba) {
-				/* merge if pba allows merging */
-				if (pba + nrsectors == ptr[k].extents[l].pba) {
-					ptr[k].extents[l].pba = pba;
-					ptr[k].extents[l].len += nrsectors;
-					found = 1;
-					break;
+	if (j > 0) {
+		ptr = (struct lsdm_revmap_entry_sector *)page_address(page);
+		for(k=0; k<j; k++) {
+			if (found)
+				break;
+			/* SECTOR ENTRIES */
+			for (l=0; l<i; l++) {
+				if(ptr[k].extents[l].lba == lba) {
+					if(ptr[k].extents[l].len == nrsectors) {
+						/* replace pba */
+						ptr[k].extents[l].pba = pba;
+						found = 1;
+						break;
+					}
+				
+				} else if (ptr[k].extents[l].lba + ptr[k].extents[l].len == lba) {
+					/* merge if pba allows merging */
+					if (ptr[k].extents[l].pba + ptr[k].extents[l].len == pba) {
+						ptr[k].extents[l].len += nrsectors;
+						found = 1;
+						break;
+					}
+				} else if (lba + nrsectors == ptr[k].extents[l].lba) {
+					/* merge if pba allows merging */
+					if (pba + nrsectors == ptr[k].extents[l].pba) {
+						ptr[k].extents[l].pba = pba;
+						ptr[k].extents[l].len += nrsectors;
+						found = 1;
+						break;
+					}
 				}
 			}
 		}
+		if (found) {
+			up(&ctx->rev_entries_lock);
+			return;
+		}
 	}
-	if (found) {
-		spin_unlock(&ctx->rev_flush_lock);
-		return;
-	}
-	/*--------------------------------------------------*/
+
 	atomic_inc(&ctx->revmap_blk_count);
 	atomic_inc(&ctx->revmap_sector_count);
 	if (NR_EXT_ENTRIES_PER_SEC == (i+1)) {
 		atomic_set(&ctx->revmap_sector_count, 0);
 		if (NR_EXT_ENTRIES_PER_BLK == (j+1)) {
 			atomic_set(&ctx->revmap_blk_count, 0);
-	/*--------------------------------------------------*/
-			spin_unlock(&ctx->rev_flush_lock);
+			up(&ctx->rev_entries_lock);
 			//printk(KERN_ERR "\n Waiting on block barrier! \n");
 			page = ctx->revmap_page;
 			BUG_ON(page == NULL);
 			flush_revmap_block_disk(ctx, page);
 			wait_on_block_barrier(ctx);
+			down(&ctx->rev_entries_lock);
 			/* Adjust the revmap_pba for the next block 
 			* Addressing is based on 512bytes sector.
 			*/
@@ -3460,14 +3463,8 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 				ctx->revmap_pba = ctx->sb->revmap_pba;
 			}
 		}
-		else {
-			spin_unlock(&ctx->rev_flush_lock);
-		}
-
-	} else {
-		/*--------------------------------------------------*/
-		spin_unlock(&ctx->rev_flush_lock);
 	}
+
 	//printk(KERN_ERR "\n spin lock aquired! i:%d j:%d\n", i, j);
 	/* blk count before incrementing */
 	if (0 == j) {
@@ -3490,12 +3487,12 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 		ptr->crc = 0;
 	}
 
-	ptr->extents[i].lba = lba;
-    	ptr->extents[i].pba = pba;
-	ptr->extents[i].len = nrsectors;
+	ptr[j].extents[i].lba = lba;
+    	ptr[j].extents[i].pba = pba;
+	ptr[j].extents[i].len = nrsectors;
 	//printk(KERN_ERR "\n revmap entry added! i+1: %d, j+1:%d \n", i+1, j+1);
-	printk(KERN_ERR "\n revmap entry added! ptr: %p i: %d, j:%d lba: %llu pba: %llu len: %d \n", ptr, i, j, lba, pba, nrsectors);
-	//spin_unlock(&ctx->rev_entries_lock);
+	printk(KERN_ERR "\n revmap entry added! ptr: %p i: %d, j:%d lba: %llu pba: %llu len: %d \n", &ptr[j], i, j, lba, pba, nrsectors);
+	up(&ctx->rev_entries_lock);
 	return;
 }
 
@@ -4775,10 +4772,10 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	sema_init(&ctx->sit_kv_store_lock, 1);
 	sema_init(&ctx->tm_kv_store_lock, 1);
 	sema_init(&ctx->flush_lock, 1);
+	sema_init(&ctx->rev_entries_lock, 1);
 
 	spin_lock_init(&ctx->lock);
 	spin_lock_init(&ctx->tm_ref_lock);
-	spin_lock_init(&ctx->rev_entries_lock);
 	spin_lock_init(&ctx->tm_flush_lock);
 	spin_lock_init(&ctx->sit_flush_lock);
 	spin_lock_init(&ctx->rev_flush_lock);
@@ -4942,7 +4939,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	flush_translation_blocks(ctx);
 	wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
 	up(&ctx->flush_lock);
-	do_checkpoint(ctx);
+	//do_checkpoint(ctx);
 	//printk(KERN_ERR "\n checkpoint done!");
 	/* If we are here, then there was no crash while writing out
 	 * the disk metadata

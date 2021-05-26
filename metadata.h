@@ -260,7 +260,6 @@ struct ctx {
 	struct kmem_cache *app_read_ctx_cache;
 	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_ref_lock;
-	spinlock_t rev_entries_lock; 	/* protects pending_writes, revmap_[sector/blk]_count */
 	spinlock_t sit_flush_lock;
 	spinlock_t tm_flush_lock;
 	spinlock_t rev_flush_lock;
@@ -278,6 +277,7 @@ struct ctx {
 	struct semaphore gc_lock;
 	struct semaphore sit_kv_store_lock;
 	struct semaphore tm_kv_store_lock;
+	struct semaphore rev_entries_lock; 	/* protects revmap_[sector/blk]_count */
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
 	 * non contiguous pages in memory
 	 */
