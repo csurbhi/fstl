@@ -1,1 +1,2 @@
-/nfs/scripts/sign-file sha512 /nfs/certs/signing_key.pem  /nfs/certs/signing_key.x509 lsdm.ko
+sudo ~/nfs_mount
+sudo /nfs/scripts/sign-file sha512 /nfs/certs/signing_key.pem  /nfs/certs/signing_key.x509 lsdm.ko

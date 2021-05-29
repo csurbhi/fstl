@@ -245,8 +245,8 @@ struct ctx {
 	unsigned int flag_ckpt;
 	atomic_t nr_writes;
        	atomic_t nr_failed_writes;
-       	atomic_t revmap_sector_count;
-       	atomic_t revmap_blk_count;
+       	atomic_t revmap_sector_nr;
+       	atomic_t revmap_entry_nr;
 	struct kmem_cache * bioctx_cache;
 	struct kmem_cache * subbio_ctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
