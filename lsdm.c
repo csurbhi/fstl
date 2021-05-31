@@ -63,12 +63,6 @@ static struct kmem_cache * extents_slab;
 #define IN_CLEANING 1
 #define STALLED_WRITE 2
 
-static void extent_get(struct extent *e, int count, int flag)
-{
-	atomic_add(count, &e->total_refs);
-	atomic_add(count, &e->refs[flag]);
-}
-
 static void extent_init(struct extent *e, sector_t lba, sector_t pba, unsigned len)
 {
 	memset(e, 0, sizeof(*e));
@@ -271,10 +265,9 @@ static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root,
 		if ((lba == e->lba) && (len = e->len)) {
 			/* we already merged the node, so this
 			 * overlapping node is extra!
+			 * It should not be here!
 			 */
-			lsdm_rb_remove(ctx, root, e);
-			mempool_free(e, ctx->extent_pool);
-			break;
+			BUG();
 		}
 
 		/* 
@@ -282,17 +275,23 @@ static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root,
 		 * covers only the right portion of an extent.
 		 * (++ merged on the right side)
 		 *
-		 * 		+++++++++++
-		 * ---------------
-		 *
+		 * 		+++++++++++++++++++
+		 * ---------------   -----    -----------
 		 */
 		if ((lba > e->lba) && (lba < e->lba + e->len)) {
 			diff = (e->lba + e->len) - lba;
 			e->len = e->len - diff;
 			/* we don't add any new node as that new node
 			 * was merged with the neighboring node
+			 * but now we check if the newly added node
+			 * needed other overlapping node removal or
+			 * splitting as shown in the asci image in
+			 * this case.
 			 */
-			break;
+			e = lsdm_rb_next(e);
+			/*  process the next overlapping segments!
+			 */
+			continue;
 		}
 
 		/* 
@@ -372,11 +371,10 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		return -ENOMEM;
 	}
 	extent_init(new, lba, pba, len);
-	extent_get(new, 1, IN_MAP);
 	while (node) {
 		i++;
 		if (i > 150) {
-			trace_printk("\n stuck in while loop!!");
+			printk(KERN_ERR "\n stuck in while loop!!");
 			return -1;
 		}
 
@@ -431,7 +429,14 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 				break;
 			}
 			/* else we cannot merge as physically
-			* discontiguous
+			* discontiguous. But we are here because no
+			* other overlapping 'e' was found with 'n'
+			* ++++++
+			*       ---------
+			* (Right end of new node matches with left end
+			* of existing node, but PBA does not match)
+			* We go to the left to see if there are smaller LBAs
+			* that overlap with this one.
 			*/
 			node = node->rb_left;
 			continue;
@@ -450,6 +455,10 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 					break;
 				if (next->lba > e->lba + e->len)
 					break;
+				/* The new extent is merged with e,
+				 * but the next extent can also now be
+				 * merged. So merge
+				 */
 				if (next->lba == e->lba + e->len) {
 			            if (next->pba == e->pba + e->len) {
 					e->len = e->len + next->len;
@@ -495,23 +504,8 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			break;
 		}
 
-		/* 
-		 * Case 2: Overwrites an existing extent partially;
-		 * covers only the right portion of an extent.
-		 *
-		 * 		+++++++++++
-		 * ---------------
-		 *
-		 */
-		if ((lba > e->lba) && (lba < e->lba + e->len)) {
-			diff = (e->lba + e->len) - lba;
-			e->len = e->len - diff;
-			lsdm_rb_insert(ctx, root, new);
-			break;
-		}
-
 		 /*
-		 * Case 3: overwrite a part of the existing extent
+		 * Case 2: overwrite a part of the existing extent
 		 * 	++++++++++
 		 * ----------------------- 
 		 *
@@ -531,9 +525,27 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			e->len = diff;
 			lsdm_rb_insert(ctx, root, new);
 			extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
-			extent_get(split, 1, IN_MAP);
 			lsdm_rb_insert(ctx, root, split);
 			break;
+		}
+
+
+		/* 
+		 * Case 3: Overwrites an existing extent partially;
+		 * covers only the right portion of an existing extent (e1)
+		 *
+		 * 		+++++++++++++++++++++
+		 * ---------------   --------    -----------
+		 *  e1			e2	e3
+		 *
+		 */
+		if ((lba > e->lba) && (lba < e->lba + e->len)) {
+			diff = (e->lba + e->len) - lba;
+			e->len = e->len - diff;
+			e = lsdm_rb_next(e);
+			/*  process the next overlapping segments!
+			 */
+			continue;
 		}
 
 
@@ -589,7 +601,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	if (!node) {
 		/* new node has to be added */
 		lsdm_rb_insert(ctx, root, new);
-		//printk( "\n %s Inserted (lba: %u pba: %u len: %d) ", __func__, new->lba, new->pba, new->len);
+		trace_printk( "\n %s Inserted (lba: %u pba: %u len: %d) ", __func__, new->lba, new->pba, new->len);
 	}
 	trace_printk("\n Exiting %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	return 0;
@@ -3556,8 +3568,8 @@ void sub_write_done(void *data, async_cookie_t cookie)
 
 	write_lock(&ctx->metadata_update_lock);
 	/*------------------------------- */
-	add_revmap_entries(ctx, lba, pba, len);
-	//lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
+	//add_revmap_entries(ctx, lba, pba, len);
+	lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
 	//ret = lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	write_unlock(&ctx->metadata_update_lock);
