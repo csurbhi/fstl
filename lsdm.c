@@ -265,9 +265,10 @@ static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root,
 		if ((lba == e->lba) && (len = e->len)) {
 			/* we already merged the node, so this
 			 * overlapping node is extra!
-			 * It should not be here!
 			 */
-			BUG();
+			lsdm_rb_remove(ctx, root, e);
+			mempool_free(e, ctx->extent_pool);
+			break;
 		}
 
 		/* 
@@ -365,7 +366,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 
 	BUG_ON(len == 0);
 
-	trace_printk("\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
+	printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 	if (unlikely(!new)) {
 		return -ENOMEM;
@@ -603,7 +604,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		lsdm_rb_insert(ctx, root, new);
 		trace_printk( "\n %s Inserted (lba: %u pba: %u len: %d) ", __func__, new->lba, new->pba, new->len);
 	}
-	trace_printk("\n Exiting %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
+	printk(KERN_ERR "\n Exiting %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	return 0;
 }
 /*
