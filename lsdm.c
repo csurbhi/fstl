@@ -144,9 +144,9 @@ static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba)
 {
 	struct extent *e = NULL;
 
-	read_lock(&ctx->metadata_update_lock); 
+	down_read(&ctx->metadata_update_lock); 
 	e = _lsdm_rb_geq(&ctx->extent_tbl_root, lba);
-	read_unlock(&ctx->metadata_update_lock); 
+	up_read(&ctx->metadata_update_lock); 
 
 	return e;
 }
@@ -369,6 +369,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 	if (unlikely(!new)) {
+		BUG();
 		return -ENOMEM;
 	}
 	extent_init(new, lba, pba, len);
@@ -592,9 +593,11 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		 */
 		if ((lba <= e->lba) && (lba + len > e->lba)) {
 			diff = lba + len - e->lba;
+			lsdm_rb_remove(ctx, root, e);
 			e->lba = e->lba + diff;
 			e->len = e->len - diff;
 			e->pba = e->pba + diff;
+			lsdm_rb_insert(ctx, root, e);
 			lsdm_rb_insert(ctx, root, new);
 			break;
 		}
@@ -988,7 +991,7 @@ static int lsdm_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, in
 	 */
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
-		write_lock(&ctx->metadata_update_lock);
+		down_write(&ctx->metadata_update_lock);
 		e = revmap_rb_search_geq(ctx, pba);
 		/* entire extrents is lost by interim overwrites */
 		if (e->pba > gc_extent->e.pba + gc_extent->e.len) {
@@ -1048,7 +1051,7 @@ static int lsdm_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, in
 			/* write error! disk is in a read mode! we
 			 * cannot perform any further GC
 			 */
-			write_unlock(&ctx->metadata_update_lock);
+			up_write(&ctx->metadata_update_lock);
 			goto done;
 		}
 		ret = lsdm_update_range(ctx, &ctx->extent_tbl_root, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
@@ -1058,7 +1061,7 @@ static int lsdm_gc(struct ctx *ctx, unsigned int zone_to_clean, char gc_flag, in
 		list_head = &temp_ptr->list;
 		list_del(&gc_extent->list);
 		kmem_cache_free(ctx->gc_extents_cache, gc_extent);
-		write_unlock(&ctx->metadata_update_lock);
+		up_write(&ctx->metadata_update_lock);
 	}
 	do_checkpoint(ctx);
 	/* Complete the GC and then sync the block device */
@@ -3567,14 +3570,14 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
 
-	write_lock(&ctx->metadata_update_lock);
+	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
 	//add_revmap_entries(ctx, lba, pba, len);
 	lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
 	//ret = lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
-	write_unlock(&ctx->metadata_update_lock);
-	trace_printk("\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
+	up_write(&ctx->metadata_update_lock);
+	printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
@@ -4010,10 +4013,10 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned i
 		//trace_printk("\n entry->pba: %llu \n", entry->pba);
 		/* TODO: right now everything should be zeroed out */
 		//panic("Why are there any already mapped extents?");
-		write_lock(&ctx->metadata_update_lock);
+		down_write(&ctx->metadata_update_lock);
 		lsdm_update_range(ctx, &ctx->extent_tbl_root, entry->lba, entry->pba, NR_SECTORS_IN_BLK);
 		lsdm_update_range(ctx, &ctx->rev_tbl_root, entry->pba, entry->lba, NR_SECTORS_IN_BLK);
-		write_unlock(&ctx->metadata_update_lock);
+		up_write(&ctx->metadata_update_lock);
 		entry = entry + 1;
 	}
 	return 0;
@@ -4099,10 +4102,10 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, struct r
 		for (j=0; j < NR_EXT_ENTRIES_PER_SEC; j++) {
 			if (extent[j].pba == 0)
 				continue;
-			write_lock(&ctx->metadata_update_lock);
+			down_write(&ctx->metadata_update_lock);
 			lsdm_update_range(ctx, &ctx->extent_tbl_root, extent[j].lba, extent[j].pba, extent[j].len);
 			lsdm_update_range(ctx, &ctx->rev_tbl_root, extent[j].pba, extent[j].lba, extent[j].len);
-			write_unlock(&ctx->metadata_update_lock);
+			up_write(&ctx->metadata_update_lock);
 		}
 		entry_sector = entry_sector + 1;
 		i++;
@@ -4831,7 +4834,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	ctx->mounted_time = ktime_get_real_seconds();
 	ctx->extent_tbl_root = RB_ROOT;
 	ctx->rev_tbl_root = RB_ROOT;
-	rwlock_init(&ctx->metadata_update_lock);
+	init_rwsem(&ctx->metadata_update_lock);
 
 	ctx->tm_rb_root = RB_ROOT;
 

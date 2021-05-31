@@ -208,7 +208,7 @@ struct ctx {
 	struct rb_root	  rev_tbl_root; /* in memory reverse extent map */
 	struct rb_root    tm_rb_root;	          /* map RB tree */
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
-	rwlock_t          metadata_update_lock;
+	struct rw_semaphore metadata_update_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
 	int		  n_sit_extents;
