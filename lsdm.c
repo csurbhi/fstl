@@ -375,7 +375,11 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			if(e->pba + e->len == pba) {
 				e->len += len;
 				mempool_free(new, ctx->extent_pool);
+				break;
 			}
+			// else
+			lsdm_rb_insert(ctx, root, new);
+			break;
 		}
 
 		/* Case 6
@@ -392,8 +396,12 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 				e->pba = pba;
 				e->len = len;
 				lsdm_rb_insert(ctx, root, e);
+				mempool_free(new, ctx->extent_pool);
 				break;
 			}
+			// else
+			lsdm_rb_insert(ctx, root, new);
+			break;
 		}
 		/* If you are here then you haven't covered some
 		 * case!
