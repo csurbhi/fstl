@@ -229,11 +229,10 @@ static struct extent *lsdm_rb_prev(struct extent *e)
 	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
 }
 
-static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
+static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root, struct rb_node *node, sector_t lba, sector_t pba, size_t len)
 {
 	struct extent *e = NULL;
 	struct extent *tmp = NULL;
-	struct rb_node *node = root->rb_node;  /* top of the tree */
 	int diff = 0;
 
 	BUG_ON(len == 0);
@@ -241,11 +240,11 @@ static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root,
 		e = rb_entry(node, struct extent, rb);
 		/* No overlap */
 		if (lba + len < e->lba) {
-			node = node->rb_left;
+			node = rb_prev(&e->rb);
 			continue;
 		}
 		if (lba > e->lba + e->len) {
-			node = node->rb_right;
+			node = rb_next(&e->rb);
 			continue;
 		}
 		/* new overlaps with e
@@ -292,7 +291,6 @@ static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root,
 			e = lsdm_rb_next(e);
 			/*  process the next overlapping segments!
 			 */
-			continue;
 		}
 
 		/* 
@@ -347,6 +345,7 @@ static int split_delete_overlapping_nodes(struct ctx *ctx, struct rb_root *root,
 			e->pba = e->pba + diff;
 			break;
 		}
+		printk(KERN_ERR "\n %s What case is this???? ", __func__);
 	}
 	return 0;
 }
@@ -364,7 +363,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	int diff = 0;
 	int i = 0;
 
-	BUG_ON(len == 0);
+	//BUG_ON(len == 0);
 
 	printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
@@ -377,17 +376,17 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		i++;
 		if (i > 150) {
 			printk(KERN_ERR "\n stuck in while loop!!");
-			return -1;
+			BUG();
 		}
 
 		e = rb_entry(node, struct extent, rb);
 		/* No overlap */
 		if (lba + len < e->lba) {
-			node = node->rb_left;
+			node = rb_prev(&e->rb);
 			continue;
 		}
 		if (lba > e->lba + e->len) {
-			node = node->rb_right;
+			node = rb_next(&e->rb);
 			continue;
 		}
 		/* no overlap, but sequential node; MERGE this new
@@ -427,7 +426,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			        /* The new lba is merged, but the next
 				 * extent[s] overlap[s] with LBA, PBA, len
 				 */
-				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
+				split_delete_overlapping_nodes(ctx, root, node->rb_left, lba, pba, len);
 				break;
 			}
 			/* else we cannot merge as physically
@@ -474,7 +473,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			        /* The new lba is merged, but the next
 				 * extent[s] overlap[s] with LBA, PBA, len
 				 */
-				split_delete_overlapping_nodes(ctx, root, lba, pba, len);
+				split_delete_overlapping_nodes(ctx, root, node->rb_right, lba, pba, len);
 				break;
 			}
 			/* else we cannot merge as physically
@@ -547,7 +546,6 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			e = lsdm_rb_next(e);
 			/*  process the next overlapping segments!
 			 */
-			continue;
 		}
 
 
@@ -601,6 +599,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			lsdm_rb_insert(ctx, root, new);
 			break;
 		}
+		printk(KERN_ERR "\n %s What case is this???? ", __func__);
 	}
 	if (!node) {
 		/* new node has to be added */
@@ -2361,7 +2360,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	/* Assuming len is in terms of sectors 
 	 * We convert sectors to blocks
 	 */
-	for (i=0; i<len/8; i++) {
+	for (i=0; i<len/NR_SECTORS_IN_BLK; i++) {
 		spin_lock(&ctx->tm_flush_lock);
 	/*-----------------------------------------------*/
 		if (ptr->lba != 0) {
@@ -3564,17 +3563,16 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	wait_for_completion(&subbioctx->write_done);
 
 	ctx = subbioctx->bioctx->ctx;
-	kref_put(&subbioctx->bioctx->ref, write_done);
-
 	lba = subbioctx->extent.lba;
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
+	kref_put(&subbioctx->bioctx->ref, write_done);
 
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
 	//add_revmap_entries(ctx, lba, pba, len);
 	lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
-	//ret = lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
+	//lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
 	printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
@@ -5049,17 +5047,15 @@ static int ls_dm_dev_map_io(struct dm_target *dm_target, struct bio *bio)
 	struct ctx *ctx;
 	int ret = 0;
        
-	if (!dm_target)
-		return 0;
-
-	if (!bio) {
+	if (unlikely(!dm_target)) {
 		dump_stack();
-		return -EINVAL;
+		return 0;
 	}
 
 	ctx = dm_target->private;
 
 	if(unlikely(bio == NULL)) {
+		dump_stack();
 		return 0;
 	}
 
