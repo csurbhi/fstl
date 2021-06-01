@@ -229,13 +229,42 @@ static struct extent *lsdm_rb_prev(struct extent *e)
 	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
 }
 
+/* Check if we can be merged with the left or the right node */
+static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
+{
+	struct extent *prev, *next;
+
+	prev = lsdm_rb_prev(e);
+	next = lsdm_rb_next(e);
+	if (prev) {
+		if(prev->lba + prev->len == e->lba) {
+			if (prev->pba + prev->len == e->pba) {
+				prev->len += e->len;
+				mempool_free(e, ctx->extent_pool);
+				e = prev;
+			}
+		}
+	}
+	if (next) {
+		if (next->lba == e->lba + e->len) {
+			if (next->pba == e->pba + e->len) {
+				e->len += next->len;
+				lsdm_rb_remove(ctx, root, next);
+				mempool_free(next, ctx->extent_pool);
+			}
+		}
+	}
+}
+
+
+
 
 /* Update mapping. Removes any total overlaps, edits any partial
  * overlaps, adds new extent to map.
  */
 static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
 {
-	struct extent *e = NULL, *new = NULL, *split = NULL, *next=NULL, *prev=NULL;
+	struct extent *e = NULL, *new = NULL, *split = NULL;
 	struct extent *tmp = NULL;
 	struct rb_node *node = root->rb_node;  /* top of the tree */
 	int diff = 0;
@@ -337,6 +366,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		}
 		if (!e || (e->lba > lba + len))  {
 			lsdm_rb_insert(ctx, root, new);
+			merge(ctx, root, new);
 			break;
 		}
 		/* else fall down to the next case for the last
@@ -362,6 +392,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			e->pba = e->pba + diff;
 			lsdm_rb_insert(ctx, root, new);
 			lsdm_rb_insert(ctx, root, e);
+			merge(ctx, root, new);
 			break;
 		}
 
@@ -379,6 +410,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			}
 			// else
 			lsdm_rb_insert(ctx, root, new);
+			merge(ctx, root, new);
 			break;
 		}
 
@@ -401,6 +433,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			}
 			// else
 			lsdm_rb_insert(ctx, root, new);
+			merge(ctx, root, new);
 			break;
 		}
 		/* If you are here then you haven't covered some
@@ -411,9 +444,9 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	if (!node) {
 		/* new node has to be added */
 		lsdm_rb_insert(ctx, root, new);
-		trace_printk( "\n %s Inserted (lba: %u pba: %u len: %d) ", __func__, new->lba, new->pba, new->len);
+		trace_printk( "\n %s Inserted (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
 	}
-	printk(KERN_ERR "\n Exiting %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
+	printk(KERN_ERR "\n Exiting %s lba: %llu, pba: %llu, len:%lu ", __func__, lba, pba, len);
 	return 0;
 }
 /*
