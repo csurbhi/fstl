@@ -234,12 +234,18 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 {
 	struct extent *prev, *next;
 
+	if (!e)
+		BUG();
+
+	return;
+
 	prev = lsdm_rb_prev(e);
 	next = lsdm_rb_next(e);
 	if (prev) {
 		if(prev->lba + prev->len == e->lba) {
 			if (prev->pba + prev->len == e->pba) {
 				prev->len += e->len;
+				lsdm_rb_remove(ctx, root, e);
 				mempool_free(e, ctx->extent_pool);
 				e = prev;
 			}
@@ -274,6 +280,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 	if (unlikely(!new)) {
+		printk(KERN_ERR "\n Could not allocate memory!");
 		BUG();
 		return -ENOMEM;
 	}
@@ -334,8 +341,6 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			diff = (e->lba + e->len) - lba;
 			e->len = e->len - diff;
 			e = lsdm_rb_next(e);
-			if (!e)
-				break;
 			/*  
 			 *  process the next overlapping segments!
 			 *  Fall through to the next case.
@@ -390,8 +395,8 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			e->lba = e->lba + diff;
 			e->len = e->len - diff;
 			e->pba = e->pba + diff;
-			lsdm_rb_insert(ctx, root, new);
 			lsdm_rb_insert(ctx, root, e);
+			lsdm_rb_insert(ctx, root, new);
 			merge(ctx, root, new);
 			break;
 		}
