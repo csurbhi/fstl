@@ -151,31 +151,6 @@ static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba)
 	return e;
 }
 
-
-int _lsdm_verbose;
-static void lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
-{
-	struct rb_node **link = &root->rb_node, *parent = NULL;
-	struct extent *e = NULL;
-
-	RB_CLEAR_NODE(&new->rb);
-
-	/* Go to the bottom of the tree */
-	while (*link) {
-		parent = *link;
-		e = container_of(parent, struct extent, rb);
-		if (new->lba < e->lba) {
-			link = &(*link)->rb_left;
-		} else {
-			link = &(*link)->rb_right;
-		}
-	}
-	/* Put the new node there */
-	rb_link_node(&new->rb, parent, link);
-	rb_insert_color(&new->rb, root);
-	ctx->n_extents++;
-}
-
 static struct extent * revmap_rb_search_geq(struct ctx *ctx, sector_t pba)
 {
 	struct rb_root *root = &ctx->rev_tbl_root;
@@ -248,6 +223,7 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 				lsdm_rb_remove(ctx, root, e);
 				mempool_free(e, ctx->extent_pool);
 				e = prev;
+				ctx->n_extents--;
 			}
 		}
 	}
@@ -257,11 +233,41 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 				e->len += next->len;
 				lsdm_rb_remove(ctx, root, next);
 				mempool_free(next, ctx->extent_pool);
+				ctx->n_extents--;
 			}
 		}
 	}
+	ctx->n_extents++;
 }
 
+int _lsdm_verbose;
+static void lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
+{
+	struct rb_node **link = &root->rb_node, *parent = NULL;
+	struct extent *e = NULL;
+
+	RB_CLEAR_NODE(&new->rb);
+
+	/* Go to the bottom of the tree */
+	while (*link) {
+		parent = *link;
+		e = rb_entry(parent, struct extent, rb);
+		if ((new->lba + new->len) <= e->lba) {
+			link = &(*link)->rb_left;
+		} else if (new->lba >= (e->lba + e->len)){
+			link = &(*link)->rb_right;
+		} else {
+			printk(KERN_ERR "\n Overlapping node found! ");
+			printk(KERN_ERR "\n e->lba: %d e->pba: %d e->len: %d", e->lba, e->pba, e->len);
+			printk(KERN_ERR "\n new->lba: %d new->pba: %d new->len: %d \n", new->lba, new->pba, new->len);
+			BUG();
+		}
+	}
+	/* Put the new node there */
+	rb_link_node(&new->rb, parent, link);
+	rb_insert_color(&new->rb, root);
+	merge(ctx, root, new);
+}
 
 
 
@@ -270,7 +276,7 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
  */
 static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
 {
-	struct extent *e = NULL, *new = NULL, *split = NULL;
+	struct extent *e = NULL, *new = NULL, *split = NULL, *prev = NULL;
 	struct extent *tmp = NULL;
 	struct rb_node *node = root->rb_node;  /* top of the tree */
 	int diff = 0;
@@ -288,170 +294,141 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	while (node) {
 		e = rb_entry(node, struct extent, rb);
 		/* No overlap */
-		if (lba + len < e->lba) {
+		if (lba + len <= e->lba) {
 			node = node->rb_left;
 			continue;
 		}
-		if (lba > e->lba + e->len) {
+		if (lba >= e->lba + e->len) {
 			node = node->rb_right;
 			continue;
 		}
-		/* new overlaps with e
-		 * new: ++++
-		 * e: --
-		 */
-
-		 /*
-		 * Case 1: overwrite a part of the existing extent
-		 * 	++++++++++
-		 * ----------------------- 
-		 *
-		 *  No end matches!!
-		 */
-
-		if ((lba > e->lba)  && (lba + len < e->lba + e->len)) {
-			split = mempool_alloc(ctx->extent_pool, GFP_NOIO);
-			if (!split) {
-				mempool_free(new, ctx->extent_pool);
-				return -ENOMEM;
-			}
-			diff =  lba - e->lba;
-			/* new should be physically discontiguous
-			 */
-			BUG_ON(e->pba + diff ==  pba);
-			e->len = diff;
-			lsdm_rb_insert(ctx, root, new);
-			extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
-			lsdm_rb_insert(ctx, root, split);
-			break;
-		}
-
-
-		/* 
-		 * Case 2: Overwrites an existing extent partially;
-		 * covers only the right portion of an existing extent (e1)
-		 * Right end of e1 does not match with "+"
-		 *
-		 * 		+++++++++++++++++++++
-		 * ---------------   --------    -----------
-		 *  e1			e2	e3
-		 *
-		 */
-		if ((lba > e->lba) && (lba < e->lba + e->len)) {
-			diff = (e->lba + e->len) - lba;
-			e->len = e->len - diff;
-			e = lsdm_rb_next(e);
-			/*  
-			 *  process the next overlapping segments!
-			 *  Fall through to the next case.
-			 */
-		}
-
-
-		/* 
-		 * Case 3: Overwrite many extents completely
-		 *	++++++++++++++++++++
-		 *	  ----- ------  --------
-		 *
-		 * Could also be exact same: 
-		 * 	+++++
-		 * 	-----
-		 * But this case is optimized in case 1.
-		 * We need to remove all such e
-		 * the last e can have case 1
-		 *
-		 * here we compare left ends and right ends of 
-		 * new and existing node e
-		 */
-		while ((e!=NULL) && (lba <= e->lba) && ((lba + len) >= (e->lba + e->len))) {
-			tmp = lsdm_rb_next(e);
-			lsdm_rb_remove(ctx, root, e);
-			mempool_free(e, ctx->extent_pool);
-			e = tmp;
-		}
-		if (!e || (e->lba > lba + len))  {
-			lsdm_rb_insert(ctx, root, new);
-			merge(ctx, root, new);
-			break;
-		}
-		/* else fall down to the next case for the last
-		 * component that overwrites an extent partially
-		 */
-
-		/* 
-		 * Case 4: 
-		 * Partially overwrite an extent
-		 * ++++++++++
-		 * 	-------------- OR
-		 *
-		 * Left end of + and - matches!
-		 * +++++++
-		 * --------------
-		 *
-		 */
-		if ((lba <= e->lba) && (lba + len > e->lba)) {
-			diff = lba + len - e->lba;
-			lsdm_rb_remove(ctx, root, e);
-			e->lba = e->lba + diff;
-			e->len = e->len - diff;
-			e->pba = e->pba + diff;
-			lsdm_rb_insert(ctx, root, e);
-			lsdm_rb_insert(ctx, root, new);
-			merge(ctx, root, new);
-			break;
-		}
-
-		/* Case 5 
-		 * 	    +++++++++
-		 * ---------
-		 *  Right end of - matches left end of +
-		 *  Merge if the pba matches.
-		 */
-		if (e->lba + e->len == lba) {
-			if(e->pba + e->len == pba) {
-				e->len += len;
-				mempool_free(new, ctx->extent_pool);
-				break;
-			}
-			// else
-			lsdm_rb_insert(ctx, root, new);
-			merge(ctx, root, new);
-			break;
-		}
-
-		/* Case 6
-		 *
-		 * Left end of - matches with right end of +
-		 * +++++++
-		 *        ---------
-		 */
-		if (lba + len == e->lba) {
-			if (pba + len == e->pba) {
-				len += e->len;
-				lsdm_rb_remove(ctx, root, e);
-				e->lba = lba;
-				e->pba = pba;
-				e->len = len;
-				lsdm_rb_insert(ctx, root, e);
-				mempool_free(new, ctx->extent_pool);
-				break;
-			}
-			// else
-			lsdm_rb_insert(ctx, root, new);
-			merge(ctx, root, new);
-			break;
-		}
-		/* If you are here then you haven't covered some
-		 * case!
-		 */
-		BUG();
+		break;
 	}
 	if (!node) {
 		/* new node has to be added */
 		lsdm_rb_insert(ctx, root, new);
-		trace_printk( "\n %s Inserted (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
+		printk( KERN_ERR "\n %s Inserted (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
+		return (0);
 	}
-	printk(KERN_ERR "\n Exiting %s lba: %llu, pba: %llu, len:%lu ", __func__, lba, pba, len);
+	/* new overlaps with e
+	 * new: ++++
+	 * e: --
+	 */
+
+	 /*
+	 * Case 1: overwrite a part of the existing extent
+	 * 	++++++++++
+	 * ----------------------- 
+	 *
+	 *  No end matches!! new overlaps with ONLY ONE extent e
+	 */
+
+	if ((lba > e->lba)  && (lba + len < e->lba + e->len)) {
+		split = mempool_alloc(ctx->extent_pool, GFP_NOIO);
+		if (!split) {
+			mempool_free(new, ctx->extent_pool);
+			return -ENOMEM;
+		}
+		diff =  lba - e->lba;
+		/* new should be physically discontiguous
+		 */
+		BUG_ON(e->pba + diff ==  pba);
+		e->len = diff;
+		lsdm_rb_insert(ctx, root, new);
+		extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
+		lsdm_rb_insert(ctx, root, split);
+		return(0);
+	}
+
+	/* Start from the smallest node that overlaps*/
+	 while(1) {
+		prev = lsdm_rb_prev(e);
+		if (!prev)
+			break;
+		if (prev->lba + prev->len <= lba)
+			break;
+		e = prev;
+	 }
+	/* Now we consider the overlapping "e's" in an order of
+         * increasing LBA
+         */
+
+	/*
+	* Case 2: Overwrites an existing extent partially;
+	* covers only the right portion of an existing extent (e)
+	*      ++++++++
+	* -----------
+	*  e
+	*
+	*
+	*      ++++++++
+	* -------------
+	*
+	* (Right end of e1 and + could match!)
+	*
+	*/
+	if ((lba > e->lba) && ((lba + len) >= (e->lba + e->len)) && (lba < (e->lba + e->len))) {
+		e->len = lba - e->lba;
+		e = lsdm_rb_next(e);
+		/*  
+		 *  process the next overlapping segments!
+		 *  Fall through to the next case.
+		 */
+	}
+
+
+	/* 
+	 * Case 3: Overwrite many extents completely
+	 *	++++++++++++++++++++
+	 *	  ----- ------  --------
+	 *
+	 * Could also be exact same: 
+	 * 	+++++
+	 * 	-----
+	 * We need to remove all such e
+	 *
+	 * here we compare left ends and right ends of 
+	 * new and existing node e
+	 */
+	while ((e!=NULL) && (lba <= e->lba) && ((lba + len) >= (e->lba + e->len))) {
+		tmp = lsdm_rb_next(e);
+		lsdm_rb_remove(ctx, root, e);
+		mempool_free(e, ctx->extent_pool);
+		e = tmp;
+	}
+	if (!e || (e->lba >= lba + len))  {
+		lsdm_rb_insert(ctx, root, new);
+		return(0);
+	}
+	/* else fall down to the next case for the last
+	 * component that overwrites an extent partially
+	 */
+
+	/* 
+	 * Case 4: 
+	 * Partially overwrite an extent
+	 * ++++++++++
+	 * 	-------------- OR
+	 *
+	 * Left end of + and - matches!
+	 * +++++++
+	 * --------------
+	 *
+	 */
+	if ((lba <= e->lba) && (lba + len > e->lba) && (lba + len < e->lba + e->len))  {
+		diff = lba + len - e->lba;
+		lsdm_rb_remove(ctx, root, e);
+		e->lba = e->lba + diff;
+		e->len = e->len - diff;
+		e->pba = e->pba + diff;
+		lsdm_rb_insert(ctx, root, new);
+		lsdm_rb_insert(ctx, root, e);
+		return(0);
+	}
+	/* If you are here then you haven't covered some
+	 * case!
+	 */
+	BUG();
 	return 0;
 }
 /*
