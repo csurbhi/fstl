@@ -204,6 +204,86 @@ static struct extent *lsdm_rb_prev(struct extent *e)
 	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
 }
 
+static int check_node_contents(struct rb_node *node)
+{
+	int ret = 0;
+	struct extent *e, *next, *prev;
+
+	if (!node)
+		return -1;
+
+	e = rb_entry(node, struct extent, rb);
+
+	if (e->lba < 0) {
+		printk(KERN_ERR "\n LBA is <=0, tree corrupt!! \n");
+		return -1;
+	}
+	if (e->pba < 0) {
+		printk(KERN_ERR "\n PBA is <=0, tree corrupt!! \n");
+		return -1;
+	}
+	if (e->len <= 0) {
+		printk(KERN_ERR "\n len is <=0, tree corrupt!! \n");
+		return -1;
+	}
+
+	next = lsdm_rb_next(e);
+	prev = lsdm_rb_prev(e);
+
+	if (next  && next->lba == e->lba) {
+		printk(KERN_ERR "\n LBA corruption (next) ! lba: %lld is present in two nodes!", next->lba);
+		printk(KERN_ERR "\n next->lba: %lld next->pba: %lld next->len: %d", next->lba, next->pba, next->len);
+		return -1;
+	}
+
+	if (next && e->lba + e->len == next->lba) {
+		if (e->pba + e->len == next->pba) {
+			printk(KERN_ERR "\n Nodes not merged! ");
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d", e->lba, e->pba, e->len);
+			printk(KERN_ERR "\n next->lba: %lld next->pba: %lld next->len: %d", next->lba, next->pba, next->len);
+			return -1;
+		}
+	}
+
+	if (prev && prev->lba == e->lba) {
+		printk(KERN_ERR "\n LBA corruption (prev)! lba: %lld is present in two nodes!", prev->lba);
+		return -1;
+	}
+
+	if (prev && prev->lba + prev->len == e->lba) {
+		if (prev->pba + prev->len == e->pba) {
+			printk(KERN_ERR "\n Nodes not merged! ");
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d", e->lba, e->pba, e->len);
+			printk(KERN_ERR "\n prev->lba: %lld prev->pba: %lld prev->len: %d", prev->lba, prev->pba, prev->len);
+			return -1;
+
+		}
+	}
+
+	if(node->rb_left)
+		ret = check_node_contents(node->rb_left);
+
+	if (ret < 0)
+		return ret;
+
+	if (node->rb_right)
+		ret = check_node_contents(node->rb_right);
+
+	return ret;
+
+}
+
+static int lsdm_tree_check(struct rb_root *root)
+{
+	struct rb_node *node = root->rb_node;
+	int ret = 0;
+
+	ret = check_node_contents(node);
+	return ret;
+
+}
+
+
 /* Check if we can be merged with the left or the right node */
 static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 {
@@ -241,10 +321,11 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 }
 
 int _lsdm_verbose;
-static void lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
+static int lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
 {
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct extent *e = NULL;
+	int ret = 0;
 
 	RB_CLEAR_NODE(&new->rb);
 
@@ -258,15 +339,23 @@ static void lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent 
 			link = &(*link)->rb_right;
 		} else {
 			printk(KERN_ERR "\n Overlapping node found! ");
-			printk(KERN_ERR "\n e->lba: %d e->pba: %d e->len: %d", e->lba, e->pba, e->len);
-			printk(KERN_ERR "\n new->lba: %d new->pba: %d new->len: %d \n", new->lba, new->pba, new->len);
-			BUG();
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d", e->lba, e->pba, e->len);
+			printk(KERN_ERR "\n new->lba: %lld new->pba: %lld new->len: %d \n", new->lba, new->pba, new->len);
+			printk(KERN_ERR "\n");
+			printk(KERN_ERR "\n \n");
+			return(-1);
 		}
 	}
 	/* Put the new node there */
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
 	merge(ctx, root, new);
+	ret = lsdm_tree_check(root);
+	if (ret < 0) {
+		printk(KERN_ERR"\n !!!! Corruption while Inserting: lba: %lld pba: %lld len: %d", new->lba, new->pba, new->len);
+		return -1;
+	}
+	return(0);
 }
 
 
@@ -279,7 +368,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	struct extent *e = NULL, *new = NULL, *split = NULL, *prev = NULL;
 	struct extent *tmp = NULL;
 	struct rb_node *node = root->rb_node;  /* top of the tree */
-	int diff = 0;
+	int diff = 0, ret=0;
 
 	//BUG_ON(len == 0);
 
@@ -306,8 +395,14 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	}
 	if (!node) {
 		/* new node has to be added */
-		lsdm_rb_insert(ctx, root, new);
+		ret = lsdm_rb_insert(ctx, root, new);
 		printk( KERN_ERR "\n %s Inserted (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
+		if (ret < 0) {
+			printk(KERN_ERR "\n Corruption in case 8!! ");
+			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
+			printk(KERN_ERR "\n"); 
+			WARN(1, KERN_ERR "\n RBTree corruption!!" );
+		} 
 		return (0);
 	}
 	/* new overlaps with e
@@ -334,9 +429,25 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		 */
 		BUG_ON(e->pba + diff ==  pba);
 		e->len = diff;
-		lsdm_rb_insert(ctx, root, new);
+		ret = lsdm_rb_insert(ctx, root, new);
+		if (ret < 0) {
+			printk(KERN_ERR"\n Corruption in case 1.1, diff: %d !! ", diff);
+			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR"\n"); 
+			WARN(1, KERN_ERR "\n RBTree corruption!!" );
+		} 
+
 		extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
-		lsdm_rb_insert(ctx, root, split);
+		ret = lsdm_rb_insert(ctx, root, split);
+		if (ret < 0) {
+			printk(KERN_ERR"\n Corruption in case 1.2!! diff: %d", diff);
+			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff);
+			printk(KERN_ERR "\n split->lba: %lld split->pba: %lld split->len: %d ", split->lba, split->pba, split->len);
+			printk(KERN_ERR"\n"); 
+			WARN(1, KERN_ERR "\n RBTree corruption!!" );
+		} 
 		return(0);
 	}
 
@@ -397,7 +508,14 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		e = tmp;
 	}
 	if (!e || (e->lba >= lba + len))  {
-		lsdm_rb_insert(ctx, root, new);
+		ret = lsdm_rb_insert(ctx, root, new);
+		if (ret < 0) {
+			printk(KERN_ERR"\n Corruption in case 3!! ");
+			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR"\n"); 
+			WARN(1, KERN_ERR "\n RBTree corruption!!" );
+		}
 		return(0);
 	}
 	/* else fall down to the next case for the last
@@ -421,13 +539,29 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		e->lba = e->lba + diff;
 		e->len = e->len - diff;
 		e->pba = e->pba + diff;
-		lsdm_rb_insert(ctx, root, new);
-		lsdm_rb_insert(ctx, root, e);
+		ret = lsdm_rb_insert(ctx, root, new);
+		if (ret < 0) {
+			printk(KERN_ERR"\n Corruption in case 4.1!! ");
+			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR"\n"); 
+			WARN(1, KERN_ERR "\n RBTree corruption!!" );
+		}
+		ret = lsdm_rb_insert(ctx, root, e);
+		if (ret < 0) {
+			printk(KERN_ERR"\n Corruption in case 4.2!! ");
+			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR"\n"); 
+			WARN(1, KERN_ERR "\n RBTree corruption!!" );
+		}
 		return(0);
 	}
 	/* If you are here then you haven't covered some
 	 * case!
 	 */
+	printk(KERN_ERR "\n You should not be here!! \n");
+	printk(KERN_ERR "\n \n");
 	BUG();
 	return 0;
 }
@@ -1161,7 +1295,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 				 */
 				atomic_set(&ctx->ioidle, 0);
 				split = clone;
-				//printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %d \n", lba, (e->pba + lba - e->lba), overlap);
+				//printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %lld \n", lba, (e->pba + lba - e->lba), overlap);
 				kref_get(&ctx->ongoing_iocount);
 				split->bi_private = read_ctx;
 				split->bi_end_io = lsdm_subread_done;
@@ -3393,8 +3527,8 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
 	//add_revmap_entries(ctx, lba, pba, len);
-	lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
-	//lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
+	//lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
+	lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
 	printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
