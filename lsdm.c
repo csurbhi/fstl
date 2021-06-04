@@ -295,8 +295,10 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 	prev = lsdm_rb_prev(e);
 	next = lsdm_rb_next(e);
 	if (prev) {
+		/*
 		printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d", e->lba, e->pba, e->len);
 		printk(KERN_ERR "\n prev->lba: %lld prev->pba: %lld prev->len: %d \n", prev->lba, prev->pba, prev->len);
+		*/
 		if((prev->lba + prev->len) == e->lba) {
 			if ((prev->pba + prev->len) == e->pba) {
 				prev->len += e->len;
@@ -308,8 +310,10 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 		}
 	}
 	if (next) {
+		/*
 		printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d", e->lba, e->pba, e->len);
 		printk(KERN_ERR "\n next->lba: %lld next->pba: %lld next->len: %d \n", next->lba, next->pba, next->len);
+		*/
 		if (next->lba == (e->lba + e->len)) {
 			if (next->pba == (e->pba + e->len)) {
 				e->len += next->len;
@@ -352,11 +356,12 @@ static int lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
 	merge(ctx, root, new);
+	/*
 	ret = lsdm_tree_check(root);
 	if (ret < 0) {
 		printk(KERN_ERR"\n !!!! Corruption while Inserting: lba: %lld pba: %lld len: %d", new->lba, new->pba, new->len);
 		return -1;
-	}
+	}*/
 	return(0);
 }
 
@@ -374,7 +379,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 
 	//BUG_ON(len == 0);
 
-	printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
+	//printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 	if (unlikely(!new)) {
 		printk(KERN_ERR "\n Could not allocate memory!");
@@ -397,7 +402,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	}
 	if (!node) {
 		/* new node has to be added */
-		printk( KERN_ERR "\n %s Inserting (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
+		//printk( KERN_ERR "\n %s Inserting (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
 		ret = lsdm_rb_insert(ctx, root, new);
 		if (ret < 0) {
 			printk(KERN_ERR "\n Corruption in case 8!! ");
@@ -427,6 +432,8 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			return -ENOMEM;
 		}
 		diff =  lba - e->lba;
+		/* Initialize split before e->len changes!! */
+		extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
 		/* new should be physically discontiguous
 		 */
 		BUG_ON(e->pba + diff ==  pba);
@@ -439,8 +446,10 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			printk(KERN_ERR"\n"); 
 			WARN(1, KERN_ERR "\n RBTree corruption!!" );
 		} 
-
-		extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
+		/*	
+		printk(KERN_ERR "\n lba: %lld, e->lba: %lld ", lba, e->lba);
+		printk(KERN_ERR "\n e->len: %d, diff: %d len: %ld ", e->len, diff, len);
+		*/
 		ret = lsdm_rb_insert(ctx, root, split);
 		if (ret < 0) {
 			printk(KERN_ERR"\n Corruption in case 1.2!! diff: %d", diff);
@@ -3529,11 +3538,11 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
 	//add_revmap_entries(ctx, lba, pba, len);
-	//lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
+	lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
 	lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
-	printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
+	//printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
