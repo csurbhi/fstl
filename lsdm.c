@@ -292,13 +292,13 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 	if (!e)
 		BUG();
 
-	return;
-
 	prev = lsdm_rb_prev(e);
 	next = lsdm_rb_next(e);
 	if (prev) {
-		if(prev->lba + prev->len == e->lba) {
-			if (prev->pba + prev->len == e->pba) {
+		printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d", e->lba, e->pba, e->len);
+		printk(KERN_ERR "\n prev->lba: %lld prev->pba: %lld prev->len: %d \n", prev->lba, prev->pba, prev->len);
+		if((prev->lba + prev->len) == e->lba) {
+			if ((prev->pba + prev->len) == e->pba) {
 				prev->len += e->len;
 				lsdm_rb_remove(ctx, root, e);
 				mempool_free(e, ctx->extent_pool);
@@ -308,8 +308,10 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 		}
 	}
 	if (next) {
-		if (next->lba == e->lba + e->len) {
-			if (next->pba == e->pba + e->len) {
+		printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d", e->lba, e->pba, e->len);
+		printk(KERN_ERR "\n next->lba: %lld next->pba: %lld next->len: %d \n", next->lba, next->pba, next->len);
+		if (next->lba == (e->lba + e->len)) {
+			if (next->pba == (e->pba + e->len)) {
 				e->len += next->len;
 				lsdm_rb_remove(ctx, root, next);
 				mempool_free(next, ctx->extent_pool);
@@ -383,11 +385,11 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	while (node) {
 		e = rb_entry(node, struct extent, rb);
 		/* No overlap */
-		if (lba + len <= e->lba) {
+		if ((lba + len) <= e->lba) {
 			node = node->rb_left;
 			continue;
 		}
-		if (lba >= e->lba + e->len) {
+		if (lba >= (e->lba + e->len)) {
 			node = node->rb_right;
 			continue;
 		}
@@ -395,8 +397,8 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	}
 	if (!node) {
 		/* new node has to be added */
+		printk( KERN_ERR "\n %s Inserting (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
 		ret = lsdm_rb_insert(ctx, root, new);
-		printk( KERN_ERR "\n %s Inserted (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
 		if (ret < 0) {
 			printk(KERN_ERR "\n Corruption in case 8!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
@@ -418,7 +420,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	 *  No end matches!! new overlaps with ONLY ONE extent e
 	 */
 
-	if ((lba > e->lba)  && (lba + len < e->lba + e->len)) {
+	if ((lba > e->lba)  && ((lba + len) < (e->lba + e->len))) {
 		split = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 		if (!split) {
 			mempool_free(new, ctx->extent_pool);
