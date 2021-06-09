@@ -2320,7 +2320,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	set_bit(PG_dirty, &page->flags);
 	ptr = (struct tm_entry *) page_address(page);
 	printk(KERN_ERR "\n %s tm_page address: %p lba: %lu, pba:%lu, len: %ld", __func__, ptr, lba, pba, len);
-	index = (lba/NR_SECTORS_IN_BLK);
+	index = (lba/NR_SECTORS_IN_BLK) %  TM_ENTRIES_BLK;
 	ptr = ptr + index;
 
 	/* Assuming len is in terms of sectors 
@@ -2385,7 +2385,7 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base, int nrblks)
 	struct bio * bio;
 	struct page *page;
 
-	u64 pba = (base + blknr) * NR_SECTORS_IN_BLK;
+	u64 pba = base + (blknr * NR_SECTORS_IN_BLK);
     	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
 	if (!page )
 		return NULL;
@@ -2653,7 +2653,8 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	}
 	/* blknr is the relative blknr within the translation blocks
 	 */
-	pba = tm_page->blknr + ctx->sb->tm_pba;
+	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
+	printk(KERN_ERR "\n Flushing TM at pba: %lu", pba);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_iter.bi_sector = pba;
@@ -2930,14 +2931,22 @@ void flush_count_sit_blocks(struct ctx *ctx, bool flush, int nrscan)
  * lba: from the LBA-PBA pair of a data block.
  * Should be called with
  *
-	(&ctx->tm_kv_store_lock);
+ * LBAs are sector addresses. We expect these LBA to be divisible by 8
+ * perfectly, ie. they are always the address of the first sector in a
+ * block. The LBA of the next block increases by 8.
+ * We expect LBAs to be
+ *
+ *	(&ctx->tm_kv_store_lock);
+ *
+ * Here blknr: is the relative TM block number that holds the entry
+ * against this LBA. 
  */
 struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba, struct revmap_meta_inmem *revmap_bio_ctx)
 {
 	struct rb_root *root = &ctx->tm_rb_root;
 	struct rb_node *parent = NULL;
 	struct tm_page *new_tmpage, *parent_ent;
-	u64 blknr = lba / TM_ENTRIES_BLK;
+	u64 blknr = (lba / NR_SECTORS_IN_BLK) / TM_ENTRIES_BLK;
 	struct list_head *temp;
 	struct ref_list *refnode, *tempref;
 
@@ -3069,7 +3078,7 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, struct revma
 			up(&ctx->tm_kv_store_lock);
 			if (!tm_page)
 				return -ENOMEM;
-			//add_translation_entry(ctx, tm_page->page, lba, pba, len, revmap_bio_ctx);
+			add_translation_entry(ctx, tm_page->page, lba, pba, len, revmap_bio_ctx);
 		}
 		ptr = ptr + 1;
 		i++;
@@ -3226,7 +3235,7 @@ int revmap_entries_flushed(void *data)
 
 	page = revmap_bio_ctx->page;
 	trace_printk("\n %s About to add_block_based_translation(): revmap_bio_ctx->page: %p", __func__, page_address(page));
-	//add_block_based_translation(ctx, page, revmap_bio_ctx);
+	add_block_based_translation(ctx, page, revmap_bio_ctx);
 	
 	/* refcount will be synced when all the
 	 * translation entries are flushed
@@ -3593,6 +3602,9 @@ static void lsdm_clone_endio(struct bio * clone)
 
 
 /*
+ * NOTE: LBA is the address of a sector. We expect the LBAs to be
+ * block aligned ie they are always divisible by 8 or always the 8th
+ * sector.
  * From the specifications:
  * When addressing these drives in LBA mode, all blocks (sectors) are
  * consecutively numbered from 0 to n–1, where n is the number of guaranteed
