@@ -1847,19 +1847,25 @@ void flush_checkpoint(struct ctx *ctx)
 		return;
 	}
 	/* Record the pba for the next ckpt */
-	if (ctx->ckpt_pba == ctx->sb->ckpt1_pba)
+	if (ctx->ckpt_pba == ctx->sb->ckpt1_pba) {
 		ctx->ckpt_pba = ctx->sb->ckpt2_pba;
-	else
+		printk(KERN_ERR "\n Updating the second checkpoint! pba: %lld", ctx->ckpt_pba);
+	}
+	else {
 		ctx->ckpt_pba = ctx->sb->ckpt1_pba;
+		printk(KERN_ERR "\n Updating the first checkpoint! pba: %lld", ctx->ckpt_pba);
+	}
 	pba = ctx->ckpt_pba;
 	bio->bi_end_io = ckpt_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
-	trace_printk("\n flushing checkpoint at pba: %llu", pba);
+	printk(KERN_ERR "\n flushing checkpoint at pba: %llu", pba);
 	bio_set_dev(bio, ctx->dev->bdev);
 	spin_lock(&ctx->ckpt_lock);
+	/*
 	if(ctx->flag_ckpt)
-		//atomic_inc(&ctx->ckpt_ref);
+		atomic_inc(&ctx->ckpt_ref);
+	*/
 	spin_unlock(&ctx->ckpt_lock);
 	bio->bi_private = ctx;
 	submit_bio_wait(bio);
@@ -1964,13 +1970,14 @@ void update_checkpoint(struct ctx *ctx)
 	}
 	ckpt->user_block_count = ctx->user_block_count;
 	ckpt->version += 1;
+	printk(KERN_ERR "\n %s ckpt->user_block_count = %lld version: %d ", __func__, ctx->user_block_count, ckpt->version);
 	ckpt->nr_invalid_zones = ctx->nr_invalid_zones;
 	ckpt->cur_frontier_pba = ctx->app_write_frontier;
 	trace_printk("\n %s, ckpt->cur_frontier_pba: %llu version: %lld", __func__, ckpt->cur_frontier_pba, ckpt->version);
 	ckpt->cur_gc_frontier_pba = ctx->gc_write_frontier;
 	ckpt->nr_free_zones = ctx->nr_freezones;
 	ckpt->elapsed_time = get_elapsed_time(ctx);
-	ckpt->clean = 1;
+	ckpt->clean = 0;
 	return;
 	//ckpt->crc = calculate_crc(ctx, page);
 }
@@ -3816,21 +3823,21 @@ void put_free_zone(struct ctx *ctx, u64 pba)
 struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 {
 	struct block_device *bdev = ctx->dev->bdev;
-	struct buffer_head *bh;
 	struct lsdm_ckpt *ckpt = NULL;
 	sector_t blknr = pba / NR_SECTORS_IN_BLK;
+	struct page *page;
 
-	bh = __bread(bdev, blknr, BLK_SZ);
-	if (!bh)
+	page = read_block(ctx, 0, pba);
+	if (!page)
 		return NULL;
 
-       	ckpt = (struct lsdm_ckpt *)bh->b_data;
+       	ckpt = (struct lsdm_ckpt *) page_address(page);
 	//printk(KERN_INFO "\n ** blknr: %llu, ckpt->magic: %u, ckpt->cur_frontier_pba: %lld", blknr, ckpt->magic, ckpt->cur_frontier_pba);
 	if (ckpt->magic == 0) {
-		put_page(bh->b_page);
+		__free_pages(page, 0);
 		return NULL;
 	}
-	ctx->ckpt_page = bh->b_page;
+	ctx->ckpt_page = page;
 	/* Do not set ctx->nr_freezones; its calculated while reading segment info table
 	 * and then verified against what is recorded in ckpt
 	 */
@@ -3865,7 +3872,7 @@ static void do_checkpoint(struct ctx *ctx)
 	flush_sit(ctx);
 	/*--------------------------------------------*/
 	up(&ctx->flush_lock);
-	//trace_printk("\n sit pages flushed!");
+	printk(KERN_ERR "\n sit pages flushed!");
 
 	//blk_start_plug(&plug);
 	flush_revmap_bitmap(ctx);
@@ -3879,7 +3886,7 @@ static void do_checkpoint(struct ctx *ctx)
 	flush_checkpoint(ctx);
 	//blk_finish_plug(&plug);
 
-	//trace_printk("\n checkpoint flushed! \n");
+	printk(KERN_ERR "\n checkpoint flushed! \n");
 	/* We need to wait for all of this to be over before 
 	 * we proceed
 	 */
@@ -3935,7 +3942,7 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	/* ctx->ckpt_page will be overwritten by the next
 	 * call to read_ckpt
 	 */
-	//printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %u", sb->ckpt2_pba);
+	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %u", sb->ckpt2_pba);
 	ckpt2 = read_checkpoint(ctx, sb->ckpt2_pba);
 	if (!ckpt2) {
 		put_page(page1);
@@ -3944,13 +3951,17 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	//printk(KERN_INFO "\n %s ckpt versions: %lld %lld", __func__, ckpt1->version, ckpt2->version);
 	if (ckpt1->version >= ckpt2->version) {
 		ckpt = ckpt1;
-		put_page(ctx->ckpt_page);
+		__free_pages(ctx->ckpt_page, 0);
 		ctx->ckpt_page = page1;
+		ctx->ckpt_pba == ctx->sb->ckpt2_pba;
+		printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version", ckpt1->version, ckpt2->version);
 	}
 	else {
 		ckpt = ckpt2;
+		ctx->ckpt_pba == ctx->sb->ckpt1_pba;
 		//page2 is rightly set by read_ckpt();
-		put_page(page1);
+		__free_pages(page1, 0);
+		printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version", ckpt1->version, ckpt2->version);
 	}
 	ctx->user_block_count = ckpt->user_block_count;
 	printk(KERN_ERR "\n %s Nr of free blocks: %lld",  __func__, ctx->user_block_count);
