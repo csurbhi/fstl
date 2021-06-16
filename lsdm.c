@@ -1755,11 +1755,11 @@ void revmap_bitmap_flushed(struct bio * bio)
 {
 	struct ctx *ctx = bio->bi_private;
 
-	//spin_lock(&ctx->ckpt_lock);
+	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt) {
-		//atomic_dec(&ctx->ckpt_ref);
+		atomic_dec(&ctx->ckpt_ref);
 	}
-	//spin_unlock(&ctx->ckpt_lock);
+	spin_unlock(&ctx->ckpt_lock);
 	wake_up(&ctx->ckptq);
 	switch(bio->bi_status) {
 		case BLK_STS_OK:
@@ -1772,6 +1772,7 @@ void revmap_bitmap_flushed(struct bio * bio)
 		panic("IO error while flushing revmap block! Handle this better");
 		break;
 	}
+	__free_pages(ctx->revmap_bm, 0);
 	trace_printk("\n %s done!! \n", __func__);
 }
 /*
@@ -1805,13 +1806,7 @@ void flush_revmap_bitmap(struct ctx *ctx)
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_end_io = revmap_bitmap_flushed;
-	//spin_lock(&ctx->ckpt_lock);
-	if(ctx->flag_ckpt) {
-		//atomic_inc(&ctx->ckpt_ref);
-	}
-	//spin_unlock(&ctx->ckpt_lock);
-	revmap_bitmap_flushed(bio);
-	//submit_bio_wait(bio);
+	submit_bio_wait(bio);
 	return;
 }
 
@@ -1859,14 +1854,8 @@ void flush_checkpoint(struct ctx *ctx)
 	bio->bi_end_io = ckpt_flushed;
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
-	printk(KERN_ERR "\n flushing checkpoint at pba: %llu", pba);
+	//printk(KERN_ERR "\n flushing checkpoint at pba: %llu", pba);
 	bio_set_dev(bio, ctx->dev->bdev);
-	spin_lock(&ctx->ckpt_lock);
-	/*
-	if(ctx->flag_ckpt)
-		atomic_inc(&ctx->ckpt_ref);
-	*/
-	spin_unlock(&ctx->ckpt_lock);
 	bio->bi_private = ctx;
 	submit_bio_wait(bio);
 	return;
@@ -1970,7 +1959,7 @@ void update_checkpoint(struct ctx *ctx)
 	}
 	ckpt->user_block_count = ctx->user_block_count;
 	ckpt->version += 1;
-	printk(KERN_ERR "\n %s ckpt->user_block_count = %lld version: %d ", __func__, ctx->user_block_count, ckpt->version);
+	//printk(KERN_ERR "\n %s ckpt->user_block_count = %lld version: %d ", __func__, ctx->user_block_count, ckpt->version);
 	ckpt->nr_invalid_zones = ctx->nr_invalid_zones;
 	ckpt->cur_frontier_pba = ctx->app_write_frontier;
 	trace_printk("\n %s, ckpt->cur_frontier_pba: %llu version: %lld", __func__, ckpt->cur_frontier_pba, ckpt->version);
@@ -2527,7 +2516,7 @@ void revmap_block_release(struct kref *kref)
 	 * waiters call: wait_on_revmap_block_availability()
 	 */
 	wake_up(&ctx->rev_blk_flushq);
-	printk(KERN_ERR "\n %s done!!", __func__);
+	//printk(KERN_ERR "\n %s done!!", __func__);
 }
 
 /*
@@ -2562,7 +2551,7 @@ void write_tmbl_complete(struct bio *bio)
 		revmap_bio_ctx = refnode->revmap_bio_ctx;
 		spin_unlock(&ctx->tm_ref_lock);
 		kref_put(&revmap_bio_ctx->kref, revmap_block_release);
-		printk(KERN_ERR "\n %s tm_page->blknr: %llu, revmap_pba: %llu revmap_bio_ctx->kref -- ", __func__, tm_page->blknr, revmap_bio_ctx->revmap_pba);
+		//printk(KERN_ERR "\n %s tm_page->blknr: %llu, revmap_pba: %llu revmap_bio_ctx->kref -- ", __func__, tm_page->blknr, revmap_bio_ctx->revmap_pba);
 		kmem_cache_free(ctx->reflist_cache, refnode);
 	}
 
@@ -2600,7 +2589,7 @@ void write_tmbl_complete(struct bio *bio)
 	}
 	spin_unlock(&ctx->ckpt_lock);
 	wake_up(&ctx->ckptq);
-	printk(KERN_ERR "\n %s done!!!", __func__);
+	//printk(KERN_ERR "\n %s done!!!", __func__);
 }
 
 /* We don't wait for the bios to complete 
@@ -2660,7 +2649,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	/* blknr is the relative blknr within the translation blocks
 	 */
 	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
-	printk(KERN_ERR "\n %s Flushing TM at pba: %lu", __func__,  pba);
+	printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %lu", __func__,  page_address(page), pba);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_iter.bi_sector = pba;
@@ -2783,7 +2772,6 @@ void write_sitbl_complete(struct bio *bio)
 		atomic_dec(&ctx->ckpt_ref);
 	}
 	spin_unlock(&ctx->ckpt_lock);
-
 	wake_up(&ctx->ckptq);
 
 	if (bio->bi_status != BLK_STS_OK) {
@@ -2792,6 +2780,7 @@ void write_sitbl_complete(struct bio *bio)
 		 * write them some place else!
 		 */
 		printk(KERN_ERR "\n Could not write the SIT page to disk! ");
+		bio_put(bio);
 		return;
 	}
 	/* We have stored relative blk address, whereas disk supports
@@ -2835,7 +2824,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 
 	sit_page = rb_entry(node, struct sit_page, rb);
 	if (!sit_page) {
-		trace_printk("\n sit_page is NULL!");
+		printk(KERN_ERR "\n sit_page is NULL!");
 		return;
 	}
 	page = sit_page->page;
@@ -2847,24 +2836,22 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	spin_lock(&ctx->sit_flush_lock);
 	if (!test_bit(PG_dirty, &page->flags)) {
 		spin_unlock(&ctx->sit_flush_lock);
-		trace_printk("\n sit_page is not dirty!");
+		printk(KERN_ERR "\n sit_page is not dirty!");
 		return;
 	}
 	spin_unlock(&ctx->sit_flush_lock);
 	sit_ctx = kmem_cache_alloc(ctx->sit_ctx_cache, GFP_KERNEL);
 	if (!sit_ctx) {
-		trace_printk("\n Low Memory ! ");
+		printk(KERN_ERR "\n Low Memory ! ");
 		return;
 	}
 
-	trace_printk("\n %s 0.", __func__);
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		kmem_cache_free(ctx->sit_ctx_cache, sit_ctx);
 		return;
 	}
 	
-	trace_printk("\n %s 1 page: %p", __func__, page_address(page));
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
@@ -2880,12 +2867,11 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_private = sit_ctx;
 	bio->bi_end_io = write_sitbl_complete;
-	printk(KERN_ERR "\n flush sit node page at lba: %llu", pba);
+	//printk(KERN_ERR "\n flush sit node page at lba: %llu", pba);
 	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock(&ctx->ckpt_lock);
-	trace_printk("\n %s 2", __func__);
 	/*--------------------------------------------*/
 	clear_bit(PG_dirty, &page->flags);
 	/*-------------------------*/
@@ -3856,7 +3842,6 @@ static void do_checkpoint(struct ctx *ctx)
 	//struct blk_plug plug;
 
 	//trace_printk("Inside %s" , __func__);
-	
 	spin_lock(&ctx->ckpt_lock);
 	/*--------------------------------------------*/
 	ctx->flag_ckpt = 1;
@@ -3882,7 +3867,9 @@ static void do_checkpoint(struct ctx *ctx)
 	/* At this point we know that SIT pages and revmap bitmap has
 	 * found its way on the disk
 	 */
-	//trace_printk("\n checkpoint updated! \n");
+
+	down_interruptible(&ctx->flush_lock);
+	/*--------------------------------------------*/
 	flush_checkpoint(ctx);
 	//blk_finish_plug(&plug);
 
@@ -3954,14 +3941,14 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 		__free_pages(ctx->ckpt_page, 0);
 		ctx->ckpt_page = page1;
 		ctx->ckpt_pba == ctx->sb->ckpt2_pba;
-		printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version", ckpt1->version, ckpt2->version);
+		printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version: %d", ckpt1->version, ckpt2->version);
 	}
 	else {
 		ckpt = ckpt2;
 		ctx->ckpt_pba == ctx->sb->ckpt1_pba;
 		//page2 is rightly set by read_ckpt();
 		__free_pages(page1, 0);
-		printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version", ckpt1->version, ckpt2->version);
+		printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version: %d", ckpt1->version, ckpt2->version);
 	}
 	ctx->user_block_count = ckpt->user_block_count;
 	printk(KERN_ERR "\n %s Nr of free blocks: %lld",  __func__, ctx->user_block_count);
@@ -4071,22 +4058,18 @@ int read_translation_map(struct ctx *ctx)
 
 int read_revmap_bitmap(struct ctx *ctx)
 {
-	struct buffer_head *bh = NULL;
-	unsigned long long pba = ctx->sb->revmap_bm_pba;
 	unsigned long nrblks = ctx->sb->blk_count_revmap_bm;
-	struct block_device *bdev = ctx->dev->bdev;
-	sector_t blknr = pba /NR_SECTORS_IN_BLK;
+	struct page * page;
 
 	if (nrblks != 1) {
 		panic("\n Wrong revmap bitmap calculations!");
 	}
 	
-	bh = __bread(bdev, blknr, BLK_SZ);
-	if (!bh) {
+	ctx->revmap_bm = read_block(ctx, 0, ctx->sb->revmap_bm_pba);
+	if (!ctx->revmap_bm) {
 		/* free the successful bh till now */
 		return -1;
 	}
-	ctx->revmap_bm = bh->b_page;
 	return 0;
 
 }
@@ -4466,7 +4449,6 @@ int read_seg_info_table(struct ctx *ctx)
 	ctx->min_mtime = ULLONG_MAX;
 	ctx->max_mtime = get_elapsed_time(ctx);
 	nrblks = sb->blk_count_sit;
-	printk("\n nr_freezones (1) : %u", ctx->nr_freezones);
 	pba = 0;
 	while (zonenr < sb->zone_count_main) {
 		//trace_printk("\n zonenr: %u", zonenr);
