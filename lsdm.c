@@ -1226,9 +1226,10 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 
 	split = NULL;
 	while(split != clone) {
-		lba = clone->bi_iter.bi_sector;
-		e = lsdm_rb_geq(ctx, lba);
 		nr_sectors = bio_sectors(clone);
+		lba = clone->bi_iter.bi_sector;
+		printk(KERN_ERR "\n %s lba: %llu nr_sectors: %d ", lba, nr_sectors);
+		e = lsdm_rb_geq(ctx, lba);
 
 		/* note that beginning of extent is >= start of bio */
 		/* [----bio-----] [eeeeeee] a
@@ -1280,7 +1281,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		     [---------bio------] */
 			overlap = e->lba + e->len - lba;
-			trace_printk("\n e->lba <= lba  e->lba: %llu lba: %llu overlap: %d \n", e->lba, lba, overlap);
+			printk(KERN_ERR "\n %s e->lba <= lba  e->lba: %llu lba: %llu overlap: %d \n", __func__, e->lba, lba, overlap);
 			if (overlap < nr_sectors) {
 				split = bio_split(clone, overlap, GFP_NOIO, &fs_bio_set);
 				if (!split) {
@@ -1315,7 +1316,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			pba = e->pba + lba - e->lba;
 			split->bi_iter.bi_sector = pba;
 			bio_set_dev(split, ctx->dev->bdev);
-			//printk(KERN_INFO "\n read,  sc->n_reads: %d", sc->n_reads);
+			printk(KERN_INFO "\n %s lba: %llu, pba: %llu ", lba, pba);
 			submit_bio(split);
 		}
 	}
@@ -3639,7 +3640,7 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
 	nr_sectors = bio_sectors(bio);
-	//printk(KERN_ERR "\n ******* Inside map_write_io, requesting lba: %llu sectors: %d", bio->bi_iter.bi_sector, nr_sectors);
+	printk(KERN_ERR "\n ******* Inside map_write_io, requesting lba: %llu sectors: %d", bio->bi_iter.bi_sector, nr_sectors);
 	if (unlikely(nr_sectors <= 0)) {
 		trace_printk("\n Less than 0 sectors (%d) requested!", nr_sectors);
 		bio->bi_status = BLK_STS_OK;
@@ -3676,7 +3677,7 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	 * time bio is split or padded */
 	kref_init(&bioctx->ref);
 
-	trace_printk("\n write frontier: %llu free_sectors_in_wf: %llu", ctx->app_write_frontier, ctx->free_sectors_in_wf);
+	printk(KERN_ERR "\n write frontier: %llu free_sectors_in_wf: %llu", ctx->app_write_frontier, ctx->free_sectors_in_wf);
 
 	blk_start_plug(&plug);
 	
@@ -3731,9 +3732,9 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
 		init_completion(&subbio_ctx->write_done);
-		//trace_printk("\n (%s) lba: %llu, &write_done: %llu", __func__, lba, &subbio_ctx->write_done);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
+		printk(KERN_ERR "\n (%s) lba: %llu, pba: %llu", __func__, lba, wf);
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
 
 		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
@@ -3921,7 +3922,7 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	struct lsdm_ckpt *ckpt1, *ckpt2, *ckpt;
 	struct page *page1;
 
-	printk(KERN_INFO "\n !Reading checkpoint 1 from pba: %u", sb->ckpt1_pba);
+	//printk(KERN_INFO "\n !Reading checkpoint 1 from pba: %u", sb->ckpt1_pba);
 	ckpt1 = read_checkpoint(ctx, sb->ckpt1_pba);
 	if (!ckpt1)
 		return NULL;
@@ -3929,7 +3930,7 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	/* ctx->ckpt_page will be overwritten by the next
 	 * call to read_ckpt
 	 */
-	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %u", sb->ckpt2_pba);
+	//printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %u", sb->ckpt2_pba);
 	ckpt2 = read_checkpoint(ctx, sb->ckpt2_pba);
 	if (!ckpt2) {
 		put_page(page1);
@@ -3941,14 +3942,14 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 		__free_pages(ctx->ckpt_page, 0);
 		ctx->ckpt_page = page1;
 		ctx->ckpt_pba == ctx->sb->ckpt2_pba;
-		printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version: %d", ckpt1->version, ckpt2->version);
+		//printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version: %d", ckpt1->version, ckpt2->version);
 	}
 	else {
 		ckpt = ckpt2;
 		ctx->ckpt_pba == ctx->sb->ckpt1_pba;
 		//page2 is rightly set by read_ckpt();
 		__free_pages(page1, 0);
-		printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version: %d", ckpt1->version, ckpt2->version);
+		//printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version: %d", ckpt1->version, ckpt2->version);
 	}
 	ctx->user_block_count = ckpt->user_block_count;
 	printk(KERN_ERR "\n %s Nr of free blocks: %lld",  __func__, ctx->user_block_count);
@@ -4034,7 +4035,7 @@ int read_translation_map(struct ctx *ctx)
 	int i = 0;
 	struct tm_entry * tm_entry = NULL;
 
-	printk("\n Reading TM entries from: %llu, nrblks: %ld", ctx->sb->tm_pba, nrblks);
+	//printk("\n Reading TM entries from: %llu, nrblks: %ld", ctx->sb->tm_pba, nrblks);
 	
 	ctx->n_extents = 0;
 	pba = 0;
@@ -4474,7 +4475,7 @@ int read_seg_info_table(struct ctx *ctx)
 		__free_pages(sit_page, 0);
 		pba = pba + 1;
 	}
-	printk(KERN_ERR "\n nr_freezones (2) : %u", ctx->nr_freezones);
+	//printk(KERN_ERR "\n nr_freezones (2) : %u", ctx->nr_freezones);
 	return 0;
 }
 
@@ -4492,7 +4493,7 @@ struct lsdm_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 	if (set_blocksize(bdev, BLK_SZ))
 		return NULL;
 
-	printk(KERN_INFO "\n reading sb at pba: %lu", pba);
+	//printk(KERN_INFO "\n reading sb at pba: %lu", pba);
 
 	bh = __bread(bdev, blknr, BLK_SZ);
 	if (!bh)
@@ -4505,7 +4506,7 @@ struct lsdm_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 		return NULL;
 	}
 	//printk(KERN_INFO "\n sb->magic: %u", sb->magic);
-	printk(KERN_INFO "\n sb->max_pba: %d", sb->max_pba);
+	//printk(KERN_INFO "\n sb->max_pba: %d", sb->max_pba);
 	/* We put the page in case of error in the future (put_page)*/
 	ctx->sb_page = bh->b_page;
 	return sb;
@@ -4544,7 +4545,7 @@ int read_metadata(struct ctx * ctx)
 	ctx->max_pba = ctx->sb->max_pba;
 	ctx->nr_lbas_in_zone = (1 << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	ctx->revmap_pba = ctx->sb->revmap_pba;
-	printk("\n ** ctx->revmap_pba (first revmap bm block pba) : %llu", ctx->revmap_pba);
+	//printk("\n ** ctx->revmap_pba (first revmap bm block pba) : %llu", ctx->revmap_pba);
 
 	ckpt = get_cur_checkpoint(ctx);
 	if (NULL == ckpt) {
@@ -4552,22 +4553,22 @@ int read_metadata(struct ctx * ctx)
 		return -1;
 	}	
 	ctx->ckpt = ckpt;
-	printk(KERN_INFO "\n checkpoint read!");
+	//printk(KERN_INFO "\n checkpoint read!");
 	if (!ckpt->clean) {
 		trace_printk("\n Scrubbing metadata after an unclean shutdown...");
 		ret = do_recovery(ctx);
 		return ret;
 	}
-	printk(KERN_ERR "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
-	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
+	//printk(KERN_ERR "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
+	//printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
 
 	ctx->app_write_frontier = ctx->ckpt->cur_frontier_pba;
-	printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
+	//printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
 	ctx->app_wf_end = zone_end(ctx, ctx->app_write_frontier);
-	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->app_wf_end);
-	printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
+	//printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->app_wf_end);
+	//printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
 	ctx->free_sectors_in_wf = ctx->app_wf_end - ctx->app_write_frontier + 1;
-	printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
+	//printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
 
 	ret = read_revmap_bitmap(ctx);
 	if (ret) {
