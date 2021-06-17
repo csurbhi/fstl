@@ -3,16 +3,16 @@
 sudo insmod lsdm.ko
 sudo ./format | tee ./format_output
 sudo python setupdm.py
-for i in {1..4}
+for i in {1..1}
 do
 	sudo dd if=scripts/0001-debug-contd.patch of=/dev/dm-0 
 done
-#sudo dd if=/dev/dm-0 of=/tmp/test1.patch bs=4096 count=2
-#diff /tmp/test1.patch scripts/0001-debug-contd.patch
-#sudo dmsetup remove TL0
-#sudo rmmod lsdm
+sudo dd if=/dev/dm-0 of=/tmp/test1.patch bs=4096 count=2
+diff /tmp/test1.patch scripts/0001-debug-contd.patch
+sudo dmsetup remove TL0
 #sudo rm /tmp/test1.patch
 #sudo python setupdm.py
 #sudo dd if=/dev/dm-0 of=/tmp/test1.patch count=1 bs=5115
 #diff /tmp/test1.patch scripts/0001-debug-contd.patch
-#sudo rmmod dm_nstl
+#sudo dmsetup remove TL0
+sudo rmmod lsdm 
