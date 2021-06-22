@@ -1178,16 +1178,20 @@ void lsdm_is_ioidle(struct kref *kref)
 	*/
 }
 
-void lsdm_subread_done(struct bio *bio)
+void lsdm_subread_done(struct bio *clone)
 {
-	struct app_read_ctx *read_ctx = bio->bi_private;
+	struct app_read_ctx *read_ctx = clone->bi_private;
 	struct ctx *ctx = read_ctx->ctx;
+	struct bio * bio = read_ctx->bio;
 
-	bio_endio(read_ctx->bio);
-	kref_put(&ctx->ongoing_iocount, lsdm_is_ioidle);
+	bio = read_ctx->bio;
+
+	bio_endio(bio);
+	//kref_put(&ctx->ongoing_iocount, lsdm_is_ioidle);
+	if ((bio->bi_iter.bi_sector == 0) || (bio->bi_iter.bi_sector ==  8))
+		printk(KERN_INFO "\n %s lba: %llu, pba: %llu nr_sectors: %d ", __func__, bio->bi_iter.bi_sector, clone->bi_iter.bi_sector, bio_sectors(bio));
+	bio_put(clone);
 	kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
-	trace_printk("\n lsdm_subread_done! \n");
-	bio_put(read_ctx->clone);
 }
 
 /*
@@ -1209,26 +1213,36 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	struct app_read_ctx *read_ctx;
 	struct bio *clone;
 
-	trace_printk("Read begins! ctx->app_read_ctx_cache: %p", ctx->app_read_ctx_cache);
+	if (bio->bi_iter.bi_sector == 0) {
+		printk(KERN_INFO "\n %s lba: 0, nr_sectors: %d ", __func__,  bio_sectors(bio));
+	}
+
 	read_ctx = kmem_cache_alloc(ctx->app_read_ctx_cache, GFP_KERNEL);
-	if (!read_ctx)
+	if (!read_ctx) {
+		bio->bi_status = -ENOMEM;
+		bio_endio(bio);
 		return -ENOMEM;
+	}
 
 	atomic_inc(&ctx->n_reads);
 	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
 		kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
+		bio->bi_status = -ENOMEM;
+		bio_endio(bio);
 		return -ENOMEM;
 	}
 
 	read_ctx->ctx = ctx;
 	read_ctx->bio = bio;
 
+
+	nr_sectors = bio_sectors(clone);
+
 	split = NULL;
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
 		lba = clone->bi_iter.bi_sector;
-		printk(KERN_ERR "\n %s lba: %llu nr_sectors: %d ", lba, nr_sectors);
 		e = lsdm_rb_geq(ctx, lba);
 
 		/* note that beginning of extent is >= start of bio */
@@ -1266,12 +1280,28 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			bio_endio(clone);
 			return 0;
 		}
+
 		if (e->lba > lba) {
 		/*               [eeeeeeeeeeee]
 			       [---------bio------] */
-			trace_printk("\n e->lba >  lba \n");
 			nr_sectors = e->lba - lba;
+			printk(KERN_ERR "\n %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
 			split = bio_split(clone, nr_sectors, GFP_NOIO, &fs_bio_set);
+			if (!split) {
+				printk(KERN_INFO "\n Could not split the clone! ERR ");
+				/* other bios could have
+				 * been chained to clone. Hence we
+				 *  should be calling bio_endio(clone)
+				 */
+				clone->bi_status = BLK_STS_RESOURCE;
+				kref_get(&ctx->ongoing_iocount);
+				bio->bi_status = -ENOMEM;
+				clone->bi_private = read_ctx;
+				clone->bi_end_io = lsdm_subread_done;
+				read_ctx->clone = clone;
+				bio_endio(clone);
+				return -ENOMEM;
+			}
 			bio_chain(split, clone);
 			zero_fill_bio(split);
 			bio_endio(split);
@@ -1281,17 +1311,18 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		     [---------bio------] */
 			overlap = e->lba + e->len - lba;
-			printk(KERN_ERR "\n %s e->lba <= lba  e->lba: %llu lba: %llu overlap: %d \n", __func__, e->lba, lba, overlap);
 			if (overlap < nr_sectors) {
+				printk(KERN_INFO "\n **** %s e->lba <= lba  e->lba: %llu lba: %llu overlap: %d nr_sectors: %d \n", __func__, e->lba, lba, overlap, nr_sectors);
 				split = bio_split(clone, overlap, GFP_NOIO, &fs_bio_set);
 				if (!split) {
-					trace_printk("\n Could not split the clone! ERR ");
+					printk(KERN_INFO "\n Could not split the clone! ERR ");
 					/* other bios could have
 					 * been chained to clone. Hence we
 					 *  should be calling bio_endio(clone)
 					 */
 					clone->bi_status = BLK_STS_RESOURCE;
 					kref_get(&ctx->ongoing_iocount);
+					bio->bi_status = -ENOMEM;
 					clone->bi_private = read_ctx;
 					clone->bi_end_io = lsdm_subread_done;
 					read_ctx->clone = clone;
@@ -1307,7 +1338,6 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 				 */
 				atomic_set(&ctx->ioidle, 0);
 				split = clone;
-				//printk(KERN_INFO "\n read bio, lba: %llu, pba: %llu, len: %lld \n", lba, (e->pba + lba - e->lba), overlap);
 				kref_get(&ctx->ongoing_iocount);
 				split->bi_private = read_ctx;
 				split->bi_end_io = lsdm_subread_done;
@@ -1316,11 +1346,11 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			pba = e->pba + lba - e->lba;
 			split->bi_iter.bi_sector = pba;
 			bio_set_dev(split, ctx->dev->bdev);
-			printk(KERN_INFO "\n %s lba: %llu, pba: %llu ", lba, pba);
+			printk(KERN_INFO "\n %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
 			submit_bio(split);
 		}
 	}
-	//printk(KERN_INFO "\n Read end");
+	printk(KERN_INFO "\n %s end", __func__);
 	return 0;
 }
 
@@ -3560,7 +3590,7 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
-	//printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
+	printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
@@ -3585,8 +3615,10 @@ static void lsdm_clone_endio(struct bio * clone)
 
 	if (bio->bi_status == BLK_STS_OK) {
 		bio->bi_status = clone->bi_status;
+		printk(KERN_INFO "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
+	} else {
+		printk(KERN_ERR "%s IO ERROR !" );
 	}
-	//trace_printk("\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
 	complete(&subbioctx->write_done);
 	bio_put(clone);
 	return;
