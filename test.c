@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
 	char buff[BLKSZ];
 	int fd, i, j, k, val, ret;
 
-	fd = open("test", O_CREAT, S_IRWXU|S_IRWXG| S_IRWXO);
+	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
 		perror("\n Could not create file because: ");
 		printf("\n");
@@ -47,7 +47,7 @@ int main(int argc, char *argv[])
 			}
 			for(k=0; k<BLKSZ; k++) {
 				if (buff[k] != 1) {
-					perror("\n Read error! ");
+					perror("\n Read error! 1");
 					printf("\n");
 					return errno;
 				}
@@ -84,7 +84,7 @@ int main(int argc, char *argv[])
 				val = 1;
 			for(k=0; k<BLKSZ; k++) {
 				if (buff[k] != val) {
-					perror("\n Read error! ");
+					perror("\n Read error 2! ");
 					printf("\n");
 					return errno;
 				}
