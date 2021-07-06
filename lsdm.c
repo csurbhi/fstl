@@ -3472,7 +3472,6 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 			ptr++;
 		}
 		if (found) {
-			trace_printk("\n Merged revmap entries");
 			//printk(KERN_ERR "\n (Merged) revmap entry added! ptr: %p i: %d, j:%d lba: %llu pba: %llu len: %d \n", ptr, i, j, lba, pba, nrsectors);
 			up(&ctx->rev_entries_lock);
 			return;
@@ -3487,7 +3486,10 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 				page = ctx->revmap_page;
 				BUG_ON(page == NULL);
 				flush_revmap_block_disk(ctx, page);
-				wait_on_block_barrier(ctx);
+				/* we do not wait for the write to
+				 * complete as we are in the write
+				 * context
+				 */
 				atomic_set(&ctx->revmap_sector_nr, 0);
 				/* Adjust the revmap_pba for the next block 
 				* Addressing is based on 512bytes sector.
@@ -3558,7 +3560,6 @@ void write_done(struct kref *kref)
 	bio = lsdm_bioctx->orig;
 	bio_endio(bio);
 
-	trace_printk(">>>>>>>>>>>>> I/O done, freeing....! %s \n", __func__);
 	ctx = lsdm_bioctx->ctx;
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	//kref_put(&ctx->ongoing_iocount, lsdm_is_ioidle);
@@ -3590,7 +3591,6 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
-	printk(KERN_ERR "\n (%s): DONE! lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
