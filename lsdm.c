@@ -629,8 +629,8 @@ static int select_zone_to_clean(struct ctx *ctx, int mode)
 	struct rb_node *node;
 
 	if (mode == BG_GC) {
-		node = rb_first(&ctx->sit_rb_root);
-		zonenr = rb_entry(node, struct sit_extent, rb)->zonenr; 
+		node = rb_first(&ctx->gc_rb_root);
+		zonenr = rb_entry(node, struct gc_rb_node, rb)->zonenr; 
 		return zonenr;
 	}
 	/* TODO: Mode: FG_GC */
@@ -2206,7 +2206,7 @@ void mark_segment_free(struct ctx *ctx, sector_t zonenr)
 	return;
 }
 
-int update_inmem_sit(struct ctx *, unsigned int , u32 , u64 );
+int update_gc_rb_tree(struct ctx *, unsigned int , u32 , u64 );
 
 /*
  * pba: from the LBA-PBA pair. Of a data block
@@ -2240,7 +2240,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	 * the older cost which is stored in the tree. The newer ones
 	 * on the other hand are used to modify the tree
 	 */
-	//update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
+	//update_gc_rb_tree(ctx, zonenr, ptr->vblocks, ptr->mtime);
 	ptr->vblocks = ptr->vblocks - 1;
 	if (!ptr->vblocks) {
 		spin_lock(&ctx->lock);
@@ -2318,7 +2318,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	 * on the other hand are used to modify the tree
 	 * Also dont call this function under sit_flush_lock
 	 */
-	//update_inmem_sit(ctx, zonenr, ptr->vblocks, ptr->mtime);
+	//update_gc_rb_tree(ctx, zonenr, ptr->vblocks, ptr->mtime);
 	ptr->mtime = get_elapsed_time(ctx);
 	if (ctx->max_mtime < ptr->mtime)
 		ctx->max_mtime = ptr->mtime;
@@ -3984,7 +3984,7 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 		//printk(KERN_ERR "\n Setting ckpt 1 version: %d ckpt2 version: %d", ckpt1->version, ckpt2->version);
 	}
 	ctx->user_block_count = ckpt->user_block_count;
-	printk(KERN_ERR "\n %s Nr of free blocks: %lld",  __func__, ctx->user_block_count);
+	printk(KERN_ERR "\n %s Nr of free blocks: %d",  __func__, ctx->user_block_count);
 	ctx->nr_invalid_zones = ckpt->nr_invalid_zones;
 	ctx->app_write_frontier = ckpt->cur_frontier_pba;
 	ctx->elapsed_time = ckpt->elapsed_time;
@@ -4092,7 +4092,6 @@ int read_translation_map(struct ctx *ctx)
 int read_revmap_bitmap(struct ctx *ctx)
 {
 	unsigned long nrblks = ctx->sb->blk_count_revmap_bm;
-	struct page * page;
 
 	if (nrblks != 1) {
 		panic("\n Wrong revmap bitmap calculations!");
@@ -4139,7 +4138,6 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page, struct r
  */
 int read_revmap(struct ctx *ctx)
 {
-	struct buffer_head *bh = NULL;
 	int i = 0, byte = 0;
 	struct page *page;
 	char *ptr;
@@ -4257,10 +4255,10 @@ int allocate_gc_zone_bitmap(struct ctx *ctx)
  */
 
 int _lsdm_verbose;
-static void sit_rb_insert(struct ctx *ctx, struct rb_root *root, struct sit_extent *new)
+static void gc_rb_insert(struct ctx *ctx, struct rb_root *root, struct gc_rb_node *new)
 {
 	struct rb_node **link = &root->rb_node, *parent = NULL;
-	struct sit_extent *e = NULL;
+	struct gc_rb_node *e = NULL;
 
 	RB_CLEAR_NODE(&new->rb);
 	write_lock(&ctx->sit_rb_lock);
@@ -4268,7 +4266,7 @@ static void sit_rb_insert(struct ctx *ctx, struct rb_root *root, struct sit_exte
 	/* Go to the bottom of the tree */
 	while (*link) {
 		parent = *link;
-		e = container_of(parent, struct sit_extent, rb);
+		e = container_of(parent, struct gc_rb_node, rb);
 		if (new->cb_cost < e->cb_cost) {
 			link = &(*link)->rb_left;
 		} else {
@@ -4283,7 +4281,7 @@ static void sit_rb_insert(struct ctx *ctx, struct rb_root *root, struct sit_exte
 }
 
 
-static void sit_rb_remove(struct ctx *ctx, struct rb_root *root, struct sit_extent *e)
+static void sit_rb_remove(struct ctx *ctx, struct rb_root *root, struct gc_rb_node*e)
 {
 	/* rb_erase resorts and rebalances the tree */
 	rb_erase(&e->rb, root);
@@ -4320,15 +4318,15 @@ static int get_cost(struct ctx *ctx, u32 nrblks, u64 age, char gc_mode)
  *
  * When nrblks is 0, we update the cb_cost based on mtime only.
  */
-int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime)
+int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime)
 {
 	/* TODO: There is a tree with SIT pages and there is one for
 	 * GC cost. These are separate trees. So use another root.
 	 * Do not mix these trees!
 	 */
-	struct rb_root *root = &ctx->sit_rb_root;
-	struct rb_node **link = &root->rb_node, *parent = NULL;
-	struct sit_extent *e = NULL, *new = NULL;
+	struct rb_root *root = &ctx->gc_rb_root;
+	struct rb_node **link = &root->rb_node, *parent = NULL, *rb_parent = NULL;
+	struct gc_rb_node *e = NULL, *new = NULL;
 	int cb_cost = 0;
 
 	BUG_ON(nrblks == 0);
@@ -4338,21 +4336,24 @@ int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime
 	/* Go to the bottom of the tree */
 	while (*link) {
 		parent = *link;
-		e = container_of(parent, struct sit_extent, rb);
+		e = container_of(parent, struct gc_rb_node, rb);
+		if (zonenr == e->zonenr) {
+			rb_parent = rb_parent(&e->rb);
+			rb_erase(&e->rb, root);
+			kmem_cache_free(ctx->gc_rb_node_cache, e);
+			link = &rb_parent;
+		}
 		if (cb_cost == e->cb_cost) {
-			if (zonenr == e->zonenr) {
-				sit_rb_remove(ctx, root, e);
-				e->zonenr = zonenr;
-				e->cb_cost = cb_cost;
-				e->nrblks = nrblks;
-				sit_rb_insert(ctx, root, e);
-				write_unlock(&ctx->sit_rb_lock);
-				return 0;
-			}
-			if (zonenr > e->zonenr)
-				link = &(*link)->rb_right;
-			else
+			/* We prefer older segments when the cost is the same
+			 * mtime of segments is always unique and the
+			 * cost is the same. Thus nrblks is the
+			 * differentiting factor. More nrblks, less
+			 * mtime when the cost is the same.
+			 */
+			if (nrblks > e->nrblks)
 				link = &(*link)->rb_left;
+			else
+				link = &(*link)->rb_right;
 			continue;
 
 		}
@@ -4363,7 +4364,7 @@ int update_inmem_sit(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime
 		}
 	}
 	/* We are essentially adding a new node here */
-	new = kmem_cache_alloc(ctx->sit_extent_cache, GFP_KERNEL);
+	new = kmem_cache_alloc(ctx->gc_rb_node_cache, GFP_KERNEL);
 	if (!new) {
 		write_unlock(&ctx->sit_rb_lock);
 		return -ENOMEM;
@@ -4423,10 +4424,8 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 				ctx->min_mtime = entry->mtime;
 			if (ctx->max_mtime < entry->mtime)
 				ctx->max_mtime = entry->mtime;
-			/*
-			if (!update_inmem_sit(ctx, *zonenr, entry->vblocks, entry->mtime))
+			if (!update_gc_rb_tree(ctx, *zonenr, entry->vblocks, entry->mtime))
 				panic("Memory error, write a memory shrinker!");
-			*/
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
@@ -4690,7 +4689,7 @@ static void destroy_caches(struct ctx *ctx)
 	kmem_cache_destroy(ctx->gc_extents_cache);
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
 	kmem_cache_destroy(ctx->tm_page_cache);
-	kmem_cache_destroy(ctx->sit_extent_cache);
+	kmem_cache_destroy(ctx->gc_rb_node_cache);
 	kmem_cache_destroy(ctx->reflist_cache);
 	kmem_cache_destroy(ctx->sit_ctx_cache);
 	kmem_cache_destroy(ctx->sit_page_cache);
@@ -4731,13 +4730,13 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->tm_page_cache) {
 		goto destroy_reflist_cache;
 	}
-	ctx->sit_extent_cache = kmem_cache_create("sit_extent_cache", sizeof(struct sit_extent), 0, SLAB_ACCOUNT, NULL);
+	ctx->gc_rb_node_cache = kmem_cache_create("gc_rb_node_cache", sizeof(struct gc_rb_node), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->sit_page_cache) {
 		goto destroy_tm_page_cache;
 	}
 	ctx->subbio_ctx_cache = kmem_cache_create("subbio_ctx_cache", sizeof(struct lsdm_sub_bioctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->subbio_ctx_cache) {
-		goto destroy_sit_extent_cache;
+		goto destroy_gc_rb_node_cache;
 	}
 	ctx->gc_extents_cache = kmem_cache_create("gc_extents_cache", sizeof(struct gc_extents), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->gc_extents_cache) {
@@ -4755,8 +4754,8 @@ destroy_gc_extents_cache:
 	kmem_cache_destroy(ctx->gc_extents_cache);
 destroy_subbio_ctx_cache:
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
-destroy_sit_extent_cache:
-	kmem_cache_destroy(ctx->sit_extent_cache);
+destroy_gc_rb_node_cache:
+	kmem_cache_destroy(ctx->gc_rb_node_cache);
 destroy_tm_page_cache:
 	kmem_cache_destroy(ctx->tm_page_cache);
 destroy_reflist_cache:
@@ -4860,8 +4859,9 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	init_rwsem(&ctx->metadata_update_lock);
 
 	ctx->tm_rb_root = RB_ROOT;
-
 	ctx->sit_rb_root = RB_ROOT;
+	ctx->gc_rb_root = RB_ROOT;
+
 	rwlock_init(&ctx->sit_rb_lock);
 
 	ctx->sectors_copied = 0;
