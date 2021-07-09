@@ -2240,7 +2240,11 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	 * the older cost which is stored in the tree. The newer ones
 	 * on the other hand are used to modify the tree
 	 */
-	//update_gc_rb_tree(ctx, zonenr, ptr->vblocks, ptr->mtime);
+	if ((zonenr != get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba)) &&
+                    (zonenr != get_zone_nr(ctx, ctx->ckpt->cur_gc_frontier_pba))) {
+		printk(KERN_ERR "\n updating gc rb zonenr: %d nrblks: %d", ptr->vblocks);
+		//update_gc_rb_tree(ctx, zonenr, ptr->vblocks, ptr->mtime);
+	}
 	ptr->vblocks = ptr->vblocks - 1;
 	if (!ptr->vblocks) {
 		spin_lock(&ctx->lock);
@@ -4325,23 +4329,32 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	 * Do not mix these trees!
 	 */
 	struct rb_root *root = &ctx->gc_rb_root;
-	struct rb_node **link = &root->rb_node, *parent = NULL, *rb_parent = NULL;
+	struct rb_node **link = &root->rb_node, *parent = NULL, *prev = NULL;
 	struct gc_rb_node *e = NULL, *new = NULL;
 	int cb_cost = 0;
 
 	BUG_ON(nrblks == 0);
+
+	/* We are essentially adding a new node here */
+	new = kmem_cache_alloc(ctx->gc_rb_node_cache, GFP_KERNEL);
+	if (!new) {
+		write_unlock(&ctx->sit_rb_lock);
+		return -ENOMEM;
+	}
+	printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu, GC_GREEDY \n", __func__, zonenr, nrblks, mtime);
 	write_lock(&ctx->sit_rb_lock);
-	//trace_printk("\n %s zonenr: %d nrblks: %u, mtime: %llu, GC_GREEDY \n", __func__, zonenr, nrblks, mtime);
-	cb_cost = get_cost(ctx, nrblks, mtime, GC_GREEDY);
+	cb_cost = get_cost(ctx, nrblks, mtime, GC_CB);
 	/* Go to the bottom of the tree */
 	while (*link) {
 		parent = *link;
 		e = container_of(parent, struct gc_rb_node, rb);
 		if (zonenr == e->zonenr) {
-			rb_parent = rb_parent(&e->rb);
+			parent = rb_parent(&e->rb);
 			rb_erase(&e->rb, root);
 			kmem_cache_free(ctx->gc_rb_node_cache, e);
-			link = &rb_parent;
+			printk(KERN_ERR "\n Found the zone and deleted it, will read again later! ");
+			link = &parent;
+			continue;
 		}
 		if (cb_cost == e->cb_cost) {
 			/* We prefer older segments when the cost is the same
@@ -4363,12 +4376,7 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 			link = &(*link)->rb_right;
 		}
 	}
-	/* We are essentially adding a new node here */
-	new = kmem_cache_alloc(ctx->gc_rb_node_cache, GFP_KERNEL);
-	if (!new) {
-		write_unlock(&ctx->sit_rb_lock);
-		return -ENOMEM;
-	}
+
 
 	RB_CLEAR_NODE(&new->rb);
 	new->zonenr = zonenr;
@@ -4378,6 +4386,7 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	rb_insert_color(&new->rb, root);
 	ctx->n_sit_extents++;
 	write_unlock(&ctx->sit_rb_lock);
+	printk(KERN_ERR "\n %s Added zonenr: %d cost: %d to the RB tree ", __func__, zonenr, cb_cost);
 	return 0;
 }
 
