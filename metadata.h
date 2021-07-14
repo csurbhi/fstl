@@ -91,11 +91,11 @@ struct lsdm_bioctx {
 	struct ctx *ctx;
 };
 
-struct sit_extent {
+struct gc_rb_node {
 	struct rb_node rb;	/* 20 bytes */
 	u32 zonenr;
 	u32 nrblks;
-	int cb_cost;
+	unsigned int cb_cost;
 };
 
 struct extent_entry {
@@ -208,6 +208,7 @@ struct ctx {
 	struct rb_root	  rev_tbl_root; /* in memory reverse extent map */
 	struct rb_root    tm_rb_root;	          /* map RB tree */
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
+	struct rb_root	  gc_rb_root;	  /* GC tree */
 	struct rw_semaphore metadata_update_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
@@ -255,7 +256,7 @@ struct ctx {
 	struct kmem_cache *tm_page_write_cache;
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
-	struct kmem_cache *sit_extent_cache;
+	struct kmem_cache *gc_rb_node_cache;
 	struct kmem_cache *gc_extents_cache;
 	struct kmem_cache *app_read_ctx_cache;
 	wait_queue_head_t tm_blk_flushq;
