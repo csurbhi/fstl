@@ -4319,6 +4319,12 @@ static unsigned int get_cost(struct ctx *ctx, u32 nrblks, u64 age, char gc_mode)
  */
 int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime)
 {
+
+	return 0;
+}
+
+int temp(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime)
+{
 	/* TODO: There is a tree with SIT pages and there is one for
 	 * GC cost. These are separate trees. So use another root.
 	 * Do not mix these trees!
@@ -4334,7 +4340,6 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	/* We are essentially adding a new node here */
 	new = kmem_cache_alloc(ctx->gc_rb_node_cache, GFP_KERNEL);
 	if (!new) {
-		write_unlock(&ctx->sit_rb_lock);
 		return -ENOMEM;
 	}
 	cb_cost = get_cost(ctx, nrblks, mtime, GC_CB);

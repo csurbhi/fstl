@@ -168,8 +168,7 @@ struct lsdm_ckpt {
 } __attribute__((packed));
 
 struct lsdm_revmap_bitmaps {
-	unsigned char bitmap0[16384];
-	unsigned char bitmap1[16384];
+	unsigned char bitmap0[4096];
 } __attribute__((packed));
 
 struct lsdm_sit_cache {
