@@ -331,7 +331,7 @@ static int lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *
 {
 	struct rb_node **link = &root->rb_node, *parent = NULL;
 	struct extent *e = NULL;
-	int ret = 0;
+	//int ret = 0;
 
 	RB_CLEAR_NODE(&new->rb);
 
@@ -1637,6 +1637,8 @@ static u64 get_next_freezone_nr(struct ctx *ctx)
 void wait_on_zone_barrier(struct ctx *);
 static void add_ckpt_new_wf(struct ctx *, sector_t);
 static void add_ckpt_new_gc_wf(struct ctx * ctx, sector_t wf);
+static void mark_zone_occupied(struct ctx *, int );
+
 /* moves the write frontier, returns the LBA of the packet trailer
  *
  * Always called with the ctx->lock held
@@ -1668,13 +1670,14 @@ try_again:
 	 */
 	ctx->app_write_frontier = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	ctx->app_wf_end = zone_end(ctx, ctx->app_write_frontier);
-	trace_printk("\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d app_write_frontier: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->app_write_frontier, ctx->app_wf_end);
+	printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d app_write_frontier: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->app_write_frontier, ctx->app_wf_end);
 	if (ctx->app_write_frontier > ctx->app_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %lld", ctx->free_sectors_in_wf );
 	}
 	ctx->free_sectors_in_wf = ctx->app_wf_end - ctx->app_write_frontier + 1;
 	ctx->nr_freezones--;
-	//printk(KERN_INFO "Num of free sect.: %llu, diff of end and wf:%llu\n", ctx->free_sectors_in_wf, ctx->app_wf_end - ctx->app_write_frontier);
+	printk(KERN_INFO "Num of free sect.: %llu, diff of end and wf:%llu\n", ctx->free_sectors_in_wf, ctx->app_wf_end - ctx->app_write_frontier);
+	mark_zone_occupied(ctx, zone_nr);
 	add_ckpt_new_wf(ctx, ctx->app_write_frontier);
 	return ctx->app_write_frontier;
 }
@@ -2013,6 +2016,7 @@ static void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
 	ctx->user_block_count -= sectors_s8 / NR_SECTORS_IN_BLK;
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
+		printk(KERN_INFO "Num of free sect.: %llu, about to call get_new_zone() \n", ctx->free_sectors_in_wf);
 		if ((ctx->app_write_frontier - 1) != ctx->app_wf_end) {
 			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->app_write_frontier, ctx->app_wf_end);
 			BUG_ON(ctx->app_write_frontier != (ctx->app_wf_end + 1));
@@ -2071,10 +2075,10 @@ void wait_on_block_barrier(struct ctx * ctx)
 
 int is_revmap_block_available(struct ctx *ctx, u64 pba);
 void flush_translation_blocks(struct ctx *ctx);
+void flush_tm_nodes(struct rb_node *node, struct ctx *ctx);
 
 void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 {
-
 	spin_lock(&ctx->rev_flush_lock);
 	if (1 == is_revmap_block_available(ctx, pba)) {
 		spin_unlock(&ctx->rev_flush_lock);
@@ -2084,16 +2088,22 @@ void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 /* You could wait here for ever if the translation blocks are not
  * flushed!
  */
-	trace_printk("\n About to flush translation blocks! before waiting on revmap blk availability!!!! \n");
+	printk(KERN_ERR "\n About to flush translation blocks! before waiting on revmap blk availability!!!! \n");
 	if (down_trylock(&ctx->flush_lock)) {
-		flush_translation_blocks(ctx);
+		struct rb_root *root = &ctx->tm_rb_root;
+		struct rb_node *node = NULL;
+
+		node = root->rb_node;
+		if (node) {
+			flush_tm_nodes(node, ctx);
+		}
 		up(&ctx->flush_lock);
 	}
 
-	spin_lock(&ctx->rev_flush_lock);
+	//spin_lock(&ctx->rev_flush_lock);
 	/* wait until atleast one zone's revmap entries are flushed */
-	wait_event_lock_irq(ctx->rev_blk_flushq, (1 == is_revmap_block_available(ctx, pba)), ctx->rev_flush_lock);
-	spin_unlock(&ctx->rev_flush_lock);
+	//wait_event_lock_irq(ctx->rev_blk_flushq, (1 == is_revmap_block_available(ctx, pba)), ctx->rev_flush_lock);
+	//spin_unlock(&ctx->rev_flush_lock);
 }
 
 void remove_sit_blk_kv_store(struct ctx *ctx, u64 pba)
@@ -2250,9 +2260,12 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	spin_unlock(&ctx->sit_flush_lock);
 }
 
-static void mark_zone_occupied(struct ctx *, int );
 /*
  * pba: from the LBA-PBA pair. Of a data block
+ * this function will be always called for the current write frontier
+ * or current gc frontier. This zone is already marked as in
+ * use/occupied. We do not need to do it everytime a block is added
+ * here.
  */
 void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 {
@@ -2276,11 +2289,6 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 	trace_printk("\n %s: pba: %llu zonenr: %llu", __func__, pba, zonenr);
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
-	if(ptr->vblocks) {
-		spin_lock(&ctx->lock);
-		mark_zone_occupied(ctx, zonenr);
-		spin_unlock(&ctx->lock);
-	}
 	ptr->vblocks = ptr->vblocks + 1;
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->sit_flush_lock);
@@ -2527,6 +2535,7 @@ void revmap_block_release(struct kref *kref)
 	revmap_bio_ctx = container_of(kref, struct revmap_meta_inmem, kref);
 	ctx = revmap_bio_ctx->ctx;
 
+	printk(KERN_ERR "\n %s done %llu !!", __func__, revmap_bio_ctx->revmap_pba);
 	/* now we calculate the pba where the revmap
 	 * is flushed. We can reuse that pba as all
 	 * entries related to it are on disk in the
@@ -2546,7 +2555,6 @@ void revmap_block_release(struct kref *kref)
 	 * waiters call: wait_on_revmap_block_availability()
 	 */
 	wake_up(&ctx->rev_blk_flushq);
-	//printk(KERN_ERR "\n %s done!!", __func__);
 }
 
 /*
@@ -2581,7 +2589,7 @@ void write_tmbl_complete(struct bio *bio)
 		revmap_bio_ctx = refnode->revmap_bio_ctx;
 		spin_unlock(&ctx->tm_ref_lock);
 		kref_put(&revmap_bio_ctx->kref, revmap_block_release);
-		//printk(KERN_ERR "\n %s tm_page->blknr: %llu, revmap_pba: %llu revmap_bio_ctx->kref -- ", __func__, tm_page->blknr, revmap_bio_ctx->revmap_pba);
+		printk(KERN_ERR "\n %s tm_page->blknr: %llu, revmap_pba: %llu revmap_bio_ctx->kref -- ", __func__, tm_page->blknr, revmap_bio_ctx->revmap_pba);
 		kmem_cache_free(ctx->reflist_cache, refnode);
 	}
 
@@ -2641,7 +2649,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	if (!page)
 		return;
 
-	//printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
+	printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
 
 	/* Only flush if the page needs flushing */
 
@@ -2649,7 +2657,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	/*--------------------------------------*/
 	if (!test_bit(PG_dirty, &page->flags)) {
 		spin_unlock(&ctx->tm_flush_lock);
-		trace_printk("\n TM Page is not dirty!");
+		printk(KERN_INFO "\n TM Page is not dirty!");
 		return;
 	}
 	/*--------------------------------------*/
@@ -2673,7 +2681,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
 		kmem_cache_free(ctx->tm_page_write_cache, tm_page_write_ctx);
-		trace_printk("\n Inside %s 2 - Going.. Bye!! \n", __func__);
+		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
 		return;
 	}
 	/* blknr is the relative blknr within the translation blocks
@@ -2685,7 +2693,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_private = tm_page_write_ctx;
 	bio->bi_end_io = write_tmbl_complete;
-	trace_printk("\n Inside %s \n 2 \n", __func__);
+	printk(KERN_INFO "\n Inside %s \n 2 \n", __func__);
 	spin_lock(&ctx->ckpt_lock);
 	/* The next code is related to synchronizing at dtr() time.
 	 */
@@ -2701,7 +2709,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 {
 	if (!node) {
-		printk("No tm node found! returning!");
+		printk(KERN_INFO "\nNo tm node found! returning!");
 		return;
 	}
 	flush_tm_node_page(ctx, node);
@@ -2714,6 +2722,10 @@ void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 
 int read_translation_map(struct ctx *);
 
+/* This function waits for all the translation blocks to be flushed to
+ * the disk by calling wait_for_ckpt_completion and ckpt_ref
+ * The non blocking call is flush_tm_nodes
+ */
 void flush_translation_blocks(struct ctx *ctx)
 {
 	struct rb_root *root = &ctx->tm_rb_root;
@@ -2742,7 +2754,8 @@ void flush_translation_blocks(struct ctx *ctx)
 	//blk_finish_plug(&plug);	
 	atomic_dec(&ctx->ckpt_ref);
 	wait_for_ckpt_completion(ctx);
-	trace_printk("\n %s done!!", __func__);
+	ctx->flag_ckpt = 0;
+	printk(KERN_INFO "\n %s done!!", __func__);
 }
 
 void flush_count_tm_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
@@ -3720,10 +3733,10 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 			trace_printk("\n insufficient memory!");
 			goto fail;
 		}
+		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 		//trace_printk("\n subbio_ctx: %llu", subbio_ctx);
 		spin_lock(&ctx->lock);
 		/*-------------------------------*/
-		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 		wf = ctx->app_write_frontier;
 		
 		/* room_in_zone should be same as
