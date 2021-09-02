@@ -326,32 +326,12 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 	ctx->n_extents++;
 }
 
-
-static struct rb_node * lsdm_search_rb_node(struct rb_node **link, sector_t lba, size_t len)
-{
-
-	struct extent *e = NULL;
-	struct rb_node *parent = NULL;
-
-
-	/* Go to the bottom of the tree */
-	while (*link) {
-		parent = *link;
-		e = rb_entry(parent, struct extent, rb);
-		if ((lba + len) <= e->lba) {
-			link = &(*link)->rb_left;
-		} else if (lba >= (e->lba + e->len)){
-			link = &(*link)->rb_right;
-		} 
-	}
-	return parent;
-}
-
-
-
-
 int _lsdm_verbose;
-static int lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
+/* 
+ * Returns NULL if the new node code be added.
+ * Return overlapping extent otherwise (overlapping node already exists)
+ */
+static struct extent * lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
 {
 	struct rb_node **link = NULL, *parent = NULL;
 	struct extent *e = NULL;
@@ -360,8 +340,20 @@ static int lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *
 	RB_CLEAR_NODE(&new->rb);
 
 	link = &root->rb_node;
-	parent = lsdm_search_rb_node(link, new->lba, new->len);
 
+	/* Go to the bottom of the tree */
+	while (*link) {
+		parent = *link;
+		e = rb_entry(parent, struct extent, rb);
+		if ((new->lba + new->len) <= e->lba) {
+			link = &(parent->rb_left);
+		} else if (new->lba >= (e->lba + e->len)){
+			link = &(parent->rb_right);
+		} else {
+			return e;
+		}
+	}
+	//printk( KERN_ERR "\n %s Inserting (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
 	/* Put the new node there */
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
@@ -372,7 +364,7 @@ static int lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *
 		printk(KERN_ERR"\n !!!! Corruption while Inserting: lba: %lld pba: %lld len: %d", new->lba, new->pba, new->len);
 		return -1;
 	}*/
-	return(0);
+	return NULL;
 }
 
 
@@ -383,8 +375,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 {
 	struct extent *e = NULL, *new = NULL, *split = NULL, *prev = NULL;
 	struct extent *tmp = NULL;
-	struct rb_node **link = NULL, *parent = NULL, *node = NULL;
-	int diff = 0, ret=0;
+	int diff = 0;
 
 	//printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	
@@ -393,11 +384,6 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		BUG_ON(root == NULL);
 	}
 	BUG_ON(len == 0);
-
-
-	link = &root->rb_node;
-	parent = lsdm_search_rb_node(link, lba, len);
-	node = *link;
 
 	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 	if (unlikely(!new)) {
@@ -408,19 +394,10 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	RB_CLEAR_NODE(&new->rb);
 	extent_init(new, lba, pba, len);
 
-	mempool_free(new, ctx->extent_pool);
-	return 0;
-
-	if (!node) {
-		/* new node has to be added */
-		//printk( KERN_ERR "\n %s Inserting (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
-		rb_link_node(&new->rb, parent, link);
-		rb_insert_color(&new->rb, root);
-		merge(ctx, root, new);
-		return (0);
-	}
-
-
+	e = lsdm_rb_insert(ctx, root, new);
+	/* No overlapping extent found, inserted new */
+	if (!e)
+		return 0;
 
 	/* new overlaps with e
 	 * new: ++++
@@ -448,8 +425,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		 */
 		BUG_ON(e->pba + diff ==  pba);
 		e->len = diff;
-		ret = lsdm_rb_insert(ctx, root, new);
-		if (ret < 0) {
+		if (lsdm_rb_insert(ctx, root, new)) {
 			printk(KERN_ERR"\n Corruption in case 1.1, diff: %d !! ", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
@@ -461,8 +437,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		printk(KERN_ERR "\n lba: %lld, e->lba: %lld ", lba, e->lba);
 		printk(KERN_ERR "\n e->len: %d, diff: %d len: %ld ", e->len, diff, len);
 		*/
-		ret = lsdm_rb_insert(ctx, root, split);
-		if (ret < 0) {
+		if (lsdm_rb_insert(ctx, root, split)) {
 			printk(KERN_ERR"\n Corruption in case 1.2!! diff: %d", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff);
@@ -534,8 +509,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		e = tmp;
 	}
 	if (!e || (e->lba >= lba + len))  {
-		ret = lsdm_rb_insert(ctx, root, new);
-		if (ret < 0) {
+		if (lsdm_rb_insert(ctx, root, new)) {
 			printk(KERN_ERR"\n Corruption in case 3!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
@@ -566,8 +540,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		e->lba = e->lba + diff;
 		e->len = e->len - diff;
 		e->pba = e->pba + diff;
-		ret = lsdm_rb_insert(ctx, root, new);
-		if (ret < 0) {
+		if (lsdm_rb_insert(ctx, root, new)) {
 			printk(KERN_ERR"\n Corruption in case 4.1!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
@@ -575,8 +548,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
 		}
-		ret = lsdm_rb_insert(ctx, root, e);
-		if (ret < 0) {
+		if (lsdm_rb_insert(ctx, root, e)) {
 			printk(KERN_ERR"\n Corruption in case 4.2!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
@@ -2558,11 +2530,11 @@ void revmap_block_release(struct kref *kref)
 	 * entries related to it are on disk in the
 	 * right place.
 	 */
-	spin_lock(&ctx->rev_flush_lock);
+	//spin_lock(&ctx->rev_flush_lock);
 	/*-------------------------------------------------------------*/
-	clear_revmap_bit(ctx, revmap_bio_ctx->revmap_pba);
+	//clear_revmap_bit(ctx, revmap_bio_ctx->revmap_pba);
 	/*-------------------------------------------------------------*/
-	spin_unlock(&ctx->rev_flush_lock);
+	//spin_unlock(&ctx->rev_flush_lock);
 	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
 	/* Wakeup waiters waiting on revblk bit that 
 	 * indicates that revmap block is rewritable
@@ -3278,7 +3250,9 @@ int revmap_entries_flushed(void *data)
 	struct revmap_meta_inmem *revmap_bio_ctx = (struct revmap_meta_inmem *)data;
 	struct page *page;
 
-	wait_for_completion(&revmap_bio_ctx->io_done);
+	if (wait_for_completion_timeout(&revmap_bio_ctx->io_done, msecs_to_jiffies(3000)) == 0) {
+		return 0;
+	}
 
 	pba = revmap_bio_ctx->revmap_pba;
 	ctx = revmap_bio_ctx->ctx;
@@ -3336,7 +3310,7 @@ void revmap_blk_flushed(struct bio *bio)
 				return;
 			}
 			// else
-			panic("Cannot flush revmap entries! ");
+			//panic("Cannot flush revmap entries! ");
 
 		default:
 			/* TODO: do something better?
@@ -3345,7 +3319,7 @@ void revmap_blk_flushed(struct bio *bio)
 			remove_partial_entries();
 			 */
 			//trace_printk("\n revmap_entries_flushed ERROR!! \n");
-			panic("revmap block write error, needs better handling!");
+			//panic("revmap block write error, needs better handling!");
 			break;
 	}
 	spin_lock(&ctx->rev_flush_lock);
@@ -3399,12 +3373,12 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	revmap_bio_ctx->retrial = 0;
 	bio->bi_iter.bi_sector = ctx->revmap_pba;
 	//printk(KERN_ERR "%s Checking if revmap blk at pba:%llu is available for writing! ctx->revmap_pba: %llu", __func__, bio->bi_iter.bi_sector, ctx->revmap_pba);
-	wait_on_revmap_block_availability(ctx, bio->bi_iter.bi_sector);
-	spin_lock(&ctx->rev_flush_lock);
+	//wait_on_revmap_block_availability(ctx, bio->bi_iter.bi_sector);
+	//spin_lock(&ctx->rev_flush_lock);
 	/*-------------------------------------------*/
-	mark_revmap_bit(ctx, bio->bi_iter.bi_sector);
+	//mark_revmap_bit(ctx, bio->bi_iter.bi_sector);
 	/*-------------------------------------------*/
-	spin_unlock(&ctx->rev_flush_lock);
+	//spin_unlock(&ctx->rev_flush_lock);
 	//trace_printk("\n Marked pba: %llu in use! \n", ctx->revmap_pba);
 	
 	bio->bi_private = revmap_bio_ctx;
@@ -3416,7 +3390,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	atomic_inc(&ctx->nr_pending_writes);
 	/*------------------------------------------*/
 	spin_unlock(&ctx->rev_flush_lock);
-	////trace_printk("\n flushing revmap at pba: %llu", bio->bi_iter.bi_sector);
+	printk(KERN_ERR "\n flushing revmap at pba: %llu", bio->bi_iter.bi_sector);
 	kthread_run(revmap_entries_flushed, revmap_bio_ctx, "revmap_entries_flushed");
 	submit_bio(bio);
 	return 0;
@@ -3436,7 +3410,7 @@ void flush_revmap_entries(struct ctx *ctx)
 	flush_revmap_block_disk(ctx, page);
 	////trace_printk("%s waiting on block barrier ", __func__);
 	/* We wait for translation entries to be added! */
-	wait_on_block_barrier(ctx);
+	//wait_on_block_barrier(ctx);
 	//trace_printk("%s revmap entries are on disk, wait is over!", __func__);
 }
 
@@ -3589,6 +3563,8 @@ void write_done(struct kref *kref)
 	bio = lsdm_bioctx->orig;
 	bio_endio(bio);
 
+	lsdm_bioctx->orig = NULL;
+
 	ctx = lsdm_bioctx->ctx;
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	//kref_put(&ctx->ongoing_iocount, lsdm_is_ioidle);
@@ -3599,14 +3575,24 @@ void sub_write_done(void *data, async_cookie_t cookie)
 {
 
 	struct lsdm_sub_bioctx *subbioctx = NULL;
+	struct lsdm_bioctx * bioctx;
 	struct ctx *ctx;
 	sector_t lba, pba;
 	unsigned int len;
+	struct bio * sub_bio;
 
 	subbioctx = (struct lsdm_sub_bioctx *) data;
-	////trace_printk("\n * (%s) thread ... waiting.... LBA: %llu &write_done: %llu!! \n", __func__, subbioctx->extent.lba, &subbioctx->write_done);
-	wait_for_completion(&subbioctx->write_done);
-
+	if (wait_for_completion_timeout(&subbioctx->write_done, msecs_to_jiffies(30000)) == 0)  {
+		/* We timed out, sub bio did not complete */
+		sub_bio = container_of((void *)subbioctx, struct bio , bi_private);
+		rcu_assign_pointer(sub_bio->bi_private, NULL);
+		bioctx = rcu_dereference(subbioctx->bioctx);
+		synchronize_rcu();
+		//kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+		bioctx->orig->bi_status = -EIO;
+		kref_put(&bioctx->ref, write_done);
+		return;
+	}
 	ctx = subbioctx->bioctx->ctx;
 	lba = subbioctx->extent.lba;
 	pba = subbioctx->extent.pba;
@@ -3620,6 +3606,7 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
+	//printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu &write_done: %llu!! \n", __func__, subbioctx->extent.lba, &subbioctx->write_done);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 }
 
@@ -3639,14 +3626,17 @@ static void lsdm_clone_endio(struct bio * clone)
 	struct lsdm_sub_bioctx *subbioctx = NULL;
 	struct bio *bio = NULL;
 
-	subbioctx = (struct lsdm_sub_bioctx *) clone->bi_private;
-	bio = subbioctx->bioctx->orig;
-
-	if (bio->bi_status == BLK_STS_OK) {
-		bio->bi_status = clone->bi_status;
-		//printk(KERN_INFO "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
-	} 
-	complete(&subbioctx->write_done);
+	rcu_read_lock();
+	subbioctx = rcu_dereference(clone->bi_private);
+	if (subbioctx) {
+		bio = rcu_dereference(subbioctx->bioctx->orig);
+		if (bio && bio->bi_status == BLK_STS_OK) {
+			bio->bi_status = clone->bi_status;
+			//printk(KERN_INFO "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
+		} 
+		complete(&subbioctx->write_done);
+	}
+	rcu_read_unlock();
 	bio_put(clone);
 	return;
 }
@@ -3709,7 +3699,6 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	
 	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
-		kmem_cache_free(ctx->bioctx_cache, bioctx);
 		//trace_printk("\n Insufficient memory!");
 		bio->bi_status = BLK_STS_RESOURCE;
 		bio_endio(bio);
@@ -5029,7 +5018,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 
 	sync_blockdev(ctx->dev->bdev);
 	//printk(KERN_ERR "\n Inside dtr! About to call flush_revmap_entries()");
-	flush_revmap_entries(ctx);
+	//flush_revmap_entries(ctx);
 	//printk(KERN_ERR "flush_revmap_entries done!");
 	/* At this point we are sure that the revmap
 	 * entries have made it to the disk but since the translation
@@ -5046,7 +5035,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	down(&ctx->flush_lock);
 	flush_translation_blocks(ctx);
 	//printk(KERN_ERR "\n translation blocks flushed! ");
-	wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
+	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
 	up(&ctx->flush_lock);
 	do_checkpoint(ctx);
 	//trace_printk("\n checkpoint done!");
