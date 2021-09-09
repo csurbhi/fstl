@@ -4067,19 +4067,10 @@ int read_revmap(struct ctx *ctx)
 	unsigned long pba;
 	struct block_device *bdev = NULL;
 	char flush_needed = 0;
-	struct revmap_bioctx *revmap_bio_ctx;
 	struct page * revmap_page;
 	unsigned int nr_revmap_blks = ctx->sb->blk_count_revmap;
 
-	revmap_bio_ctx = kmem_cache_alloc(ctx->revmap_bioctx_cache, GFP_KERNEL);
-	if (!revmap_bio_ctx) {
-		return -ENOMEM;
-	}
-
 	bdev = ctx->dev->bdev;
-	////trace_printk("\n PBA for first revmap blk: %lu", pba);
-	////trace_printk("\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
-
 	/* We read the revmap bitmap first. If a bit is set,
 	 * then the corresponding revmap blk is read
 	 */
@@ -4087,7 +4078,7 @@ int read_revmap(struct ctx *ctx)
 	if (!page)
 		return -1;
 	ptr = (char *) page_address(page);
-	////trace_printk("\n page_address(ctx->revmap_bm): %p", ptr);
+	//trace_printk("\n page_address(ctx->revmap_bm): %p", ptr);
 	pba = 0;
 	for (i = 0; i < BLK_SZ; i++, pba++) {
 		byte = *ptr;
@@ -4098,10 +4089,10 @@ int read_revmap(struct ctx *ctx)
 				////trace_printk("\n read revmap blk: %lu", pba);
 				revmap_page = read_block(ctx, pba, ctx->revmap_pba);
 				if (!revmap_page) {
-					/* free the successful bh till now */
 					return -1;
 				}
 				process_revmap_entries_on_boot(ctx, revmap_page);
+				__free_pages(revmap_page, 0);
 				pba = pba + 1;
 				if (pba >= nr_revmap_blks)
 					break;
@@ -4112,17 +4103,13 @@ int read_revmap(struct ctx *ctx)
 			break;
 		ptr = ptr + 1;
 	}
-	////trace_printk("\n flush_needed: %d", flush_needed);
+	printk("\n %s flush_needed: %d", __func__, flush_needed);
 	if (flush_needed) {
 		////trace_printk("\n Why do we need to flush!!");
 		down_interruptible(&ctx->flush_lock);
 		flush_translation_blocks(ctx);
 		up(&ctx->flush_lock);
 	}
-	/* no need to take tm_ref_lock as this function will be called
-	 * only once; when the value turns 0
-	 */
-	revmap_block_release(revmap_bio_ctx);
 	return 0;
 }
 
@@ -4361,8 +4348,10 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 				ctx->min_mtime = entry->mtime;
 			if (ctx->max_mtime < entry->mtime)
 				ctx->max_mtime = entry->mtime;
+			/*
 			if (!update_gc_rb_tree(ctx, *zonenr, entry->vblocks, entry->mtime))
 				panic("Memory error, write a memory shrinker!");
+			*/
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
@@ -4544,10 +4533,9 @@ int read_metadata(struct ctx * ctx)
 		put_page(ctx->ckpt_page);
 		return -1;
 	}
-	////trace_printk("\n revmap bitmap read!");
-	////trace_printk("\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
+	printk(KERN_ERR "\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
 	read_revmap(ctx);
-	//printk(KERN_INFO "Reverse map flushed!");
+	printk(KERN_INFO "Reverse map flushed!");
 	ret = read_translation_map(ctx);
 	if (0 > ret) {
 		put_page(ctx->sb_page);
@@ -4556,7 +4544,7 @@ int read_metadata(struct ctx * ctx)
 		//trace_printk("\n read_extent_map failed! cannot read the metadata ");
 		return ret;
 	}
-	//printk(KERN_INFO "\n extent_map read!");
+	printk(KERN_INFO "\n extent_map read!");
 
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb1->zone_count_main /BITS_IN_BYTE;
@@ -4567,7 +4555,8 @@ int read_metadata(struct ctx * ctx)
 		ctx->bitmap_bytes += 1;
 	ctx->nr_freezones = 0;
 	read_seg_info_table(ctx);
-	//printk(KERN_INFO "\n read segment entries, free bitmap created! \n");
+	printk(KERN_INFO "\n read segment entries, free bitmap created! \n");
+	printk(KERN_INFO "\n ctx->nr_freezones: %u, ckpt->nr_free_zones:%llu", ctx->nr_freezones, ckpt->nr_free_zones);
 	if (ctx->nr_freezones != ckpt->nr_free_zones) { 
 		/* TODO: Do some recovery here.
 		 * We do not wait for confirmation of SIT pages on the
@@ -4575,15 +4564,14 @@ int read_metadata(struct ctx * ctx)
 		 * translation map. we also make sure that the ckpt
 		 * entries are based on the translation map
 		 */
+		printk(KERN_ERR "\n SIT and checkpoint does not match!");
 		do_recovery(ctx);
 		put_page(ctx->sb_page);
 		put_page(ctx->ckpt_page);
 		put_page(ctx->revmap_bm);
-		printk(KERN_INFO "\n ctx->nr_freezones: %u, ckpt->nr_free_zones:%llu", ctx->nr_freezones, ckpt->nr_free_zones);
-		printk(KERN_ERR "\n SIT and checkpoint does not match!");
 		return -1;
 	}
-	////trace_printk("\n Metadata read!");
+	printk(KERN_ERR "\n Metadata read! \n");
 	return 0;
 }
 

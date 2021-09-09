@@ -51,27 +51,17 @@ struct tm_page_write_ctx {
 	struct tm_page *tm_page;
 };
 
-struct revmap_meta_inmem {
-	u64 revmap_pba;			/* PBA where the revmap entries should be written. Reset when the refcount is 0
-					 */
+struct revmap_bioctx {
+	u64 revmap_pba;			/* PBA where the revmap entries should be written.*/
 	struct ctx * ctx;
 	struct page *page;
-	struct kref kref;
-	struct completion io_done;
 	int retrial;
-};
-
-struct ref_list
-{
-	struct revmap_meta_inmem *revmap_bio_ctx;
-	struct list_head list;
 };
 
 struct tm_page {
 	struct rb_node rb;
 	sector_t blknr;
 	struct page *page;
-	struct ref_list reflist;
 };
 
 struct sit_page_write_ctx {
