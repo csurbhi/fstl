@@ -5,7 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define NR_ZONES 30
+#define NR_ZONES 2
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
 
@@ -48,7 +48,6 @@ int main(int argc, char *argv[])
 
 	sync();
 
-/*
 	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
 		perror("\n Could not create file because: ");
@@ -80,7 +79,6 @@ int main(int argc, char *argv[])
 	close(fd);
 
 	sync();
-*/
 
 	printf("\n Conducting overwrites verification! .......");
 
@@ -122,6 +120,7 @@ int main(int argc, char *argv[])
 	close(fd);
 
 	sync();
+	return (0);
 
 /*
 	fd = open("/dev/dm-0", O_RDWR);
