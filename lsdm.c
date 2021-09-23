@@ -2071,6 +2071,8 @@ void flush_tm_nodes(struct rb_node *node, struct ctx *ctx);
 
 void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 {
+	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_node *node = NULL;
 	spin_lock(&ctx->rev_flush_lock);
 	if (1 == is_revmap_block_available(ctx, pba)) {
 		spin_unlock(&ctx->rev_flush_lock);
@@ -2081,15 +2083,10 @@ void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
  * flushed!
  */
 	printk(KERN_ERR "\n About to flush translation blocks! before waiting on revmap blk availability!!!! \n");
-	if (down_trylock(&ctx->flush_lock)) {
-		struct rb_root *root = &ctx->tm_rb_root;
-		struct rb_node *node = NULL;
 
-		node = root->rb_node;
-		if (node) {
-			flush_tm_nodes(node, ctx);
-		}
-		up(&ctx->flush_lock);
+	node = root->rb_node;
+	if (node) {
+		flush_tm_nodes(node, ctx);
 	}
 
 	//spin_lock(&ctx->rev_flush_lock);
@@ -2178,18 +2175,10 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 	atomic_inc(&ctx->sit_flush_count);
 
 	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
-	/*--------------------------------------------*/
+		atomic_set(&ctx->sit_flush_count, 0);
 		up(&ctx->sit_kv_store_lock);
-
-		if (down_trylock(&ctx->flush_lock)) {
-			/* Only one flush operation at a time 
-			 * but we dont want to wait.
-			 */
-			atomic_set(&ctx->sit_flush_count, 0);
-			flush_sit(ctx);
-			up(&ctx->flush_lock);
-		}
-		down_interruptible(&ctx->flush_lock);
+		flush_sit(ctx);
+		down_interruptible(&ctx->sit_kv_store_lock);
 	}
 
 	//trace_printk("\n %s pba: %llu page_address: %p", __func__, pba, page_address(new->page));
@@ -2603,7 +2592,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	if (!page)
 		return;
 
-	printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
+	//printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
 
 	/* Only flush if the page needs flushing */
 
@@ -2655,7 +2644,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	}
 	spin_unlock(&ctx->ckpt_lock);
 	submit_bio(bio);
-	printk(KERN_INFO "\n 2. Leaving %s! flushed dirty page! \n", __func__);
+	//printk(KERN_INFO "\n 2. Leaving %s! flushed dirty page! \n", __func__);
 	return;
 }
 
@@ -2703,13 +2692,13 @@ void flush_translation_blocks(void *data, async_cookie_t cookie)
 	//spin_unlock(&ctx->ckpt_lock);
 
 	//blk_start_plug(&plug);
-	printk(KERN_ERR "\n %s nr_tm_pages: %llu", ctx->nr_tm_pages);
+	//printk(KERN_ERR "\n %s nr_tm_pages: %llu", ctx->nr_tm_pages);
 	flush_tm_nodes(node, ctx);
 	//blk_finish_plug(&plug);	
 	atomic_dec(&ctx->ckpt_ref);
 	//wait_for_ckpt_completion(ctx);
 	ctx->flag_ckpt = 0;
-	printk(KERN_INFO "\n %s done!!", __func__);
+	//printk(KERN_INFO "\n %s done!!", __func__);
 }
 
 void flush_count_tm_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
@@ -2994,23 +2983,20 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	}
 	/* Balance the tree after node is addded to it */
 	rb_insert_color(&new_tmpage->rb, root);
+	up(&ctx->tm_kv_store_lock);
 	atomic_inc(&ctx->nr_tm_pages);
-	var = atomic_read(&ctx->nr_tm_pages);
+	//var = atomic_read(&ctx->nr_tm_pages);
 	//printk(KERN_ERR "\n %s nr_tm_pages: %d", __func__, var);
 	atomic_inc(&ctx->tm_flush_count);
 	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_PAGES) {
 		/*---------------------------------------------*/
-		up(&ctx->tm_kv_store_lock);
-		//if (down_trylock(&ctx->flush_lock)) {
-			atomic_set(&ctx->tm_flush_count, 0);
-			/* Only one flush operation at a time 
-			 * but we dont want to wait.
-			 */
-			async_schedule(flush_translation_blocks, ctx);
-			//up(&ctx->flush_lock);
-		//}
-		down_interruptible(&ctx->tm_kv_store_lock);
+		atomic_set(&ctx->tm_flush_count, 0);
+		/* Only one flush operation at a time 
+		* but we dont want to wait.
+		*/
+		async_schedule(flush_translation_blocks, ctx);
 	}
+	down_interruptible(&ctx->tm_kv_store_lock);
 	return new_tmpage;
 }
 
@@ -3822,7 +3808,6 @@ static void do_checkpoint(struct ctx *ctx)
 	 * found its way on the disk
 	 */
 
-	down_interruptible(&ctx->flush_lock);
 	/*--------------------------------------------*/
 	flush_checkpoint(ctx);
 	//blk_finish_plug(&plug);
@@ -4104,9 +4089,7 @@ int read_revmap(struct ctx *ctx)
 	if (flush_needed) {
 		async_cookie_t cookie;
 		//trace_printk("\n Why do we need to flush!!");
-		//down_interruptible(&ctx->flush_lock);
 		flush_translation_blocks(ctx, cookie);
-		//up(&ctx->flush_lock);
 	}
 	return 0;
 }
@@ -4737,7 +4720,6 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	//printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
 	sema_init(&ctx->sit_kv_store_lock, 1);
 	sema_init(&ctx->tm_kv_store_lock, 1);
-	sema_init(&ctx->flush_lock, 1);
 	sema_init(&ctx->rev_entries_lock, 1);
 
 	spin_lock_init(&ctx->lock);
@@ -4904,11 +4886,9 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * that the wait_on_revmap_block_availability does try another
 	 * flush_translation_blocks path!
 	 */
-	//down(&ctx->flush_lock);
 	flush_translation_blocks(ctx, cookie);
 	//printk(KERN_ERR "\n translation blocks flushed! ");
 	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
-	//up(&ctx->flush_lock);
 	do_checkpoint(ctx);
 	//trace_printk("\n checkpoint done!");
 	/* If we are here, then there was no crash while writing out
