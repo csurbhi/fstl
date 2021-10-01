@@ -1331,17 +1331,7 @@ print_repeat:
 			if (overlap < nr_sectors) {
 				if (overlap == 0) {
 					printk(KERN_ERR "\n **** %s e->lba <= lba  e->lba: %llu e->len: %lu lba: %llu overlap: %d nr_sectors: %d \n", __func__, e->lba, e->len, lba, overlap, nr_sectors);
-					if (!print) {
-						print = 1;
-						goto print_repeat;
-					} else {
-						/*
-						e = lsdm_rb_geq(ctx, lba, print);
-						continue;
-						*/
-						e = NULL;
-						continue;
-					}
+					panic("\n Overlap cannot be zero! ");
 				}
 
 				split = bio_split(clone, overlap, GFP_NOIO, ctx->bs);
