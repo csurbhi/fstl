@@ -114,38 +114,48 @@ static sector_t get_last_pba_for_zone(struct ctx *ctx, unsigned int zonenr)
 /* find a map entry containing 'lba' or the next higher entry.
  * see Documentation/rbtree.txt
  */
-static struct extent *_lsdm_rb_geq(struct rb_root *root, off_t lba)
+static struct extent *_lsdm_rb_geq(struct rb_root *root, off_t lba, int print)
 {
 	struct rb_node *node = root->rb_node;  /* top of the tree */
 	struct extent *higher = NULL;
 	struct extent *e = NULL;
 
+	print = 1;
+
 	while (node) {
 		e = container_of(node, struct extent, rb);
-		if (e->lba >= lba && (!higher || e->lba < higher->lba)) {
+		if (print) {
+			printk(KERN_ERR "\n %s Searching lba: %llu, found:  (e->lba: %llu, e->pba: %llu e->len: %lu)", __func__, lba, e->lba, e->pba, e->len); 
+		}
+		if ((e->lba >= lba) && (!higher || (e->lba < higher->lba))) {
 			higher = e;
 		}
-		if (lba < e->lba) {
+		if (e->lba > lba) {
 			node = node->rb_left;
+			printk(KERN_ERR "\n \t Going left! ");
 		} else {
-			if (lba >= e->lba + e->len) {
+			// e->lba <= lba
+			if ((e->lba + e->len) <= lba) {
 				node = node->rb_right;
+				printk(KERN_ERR "\n \t\t Going right! ");
 			} else {
 				/* lba falls within "e"
-				 * (lba >= e->lba) && (lba < (e->lba + e->len)) */
+				 * (e->lba <= lba) && ((e->lba + e->len) > lba) */
+				printk(KERN_ERR "\n Found an overlapping e, returning e");
 				return e;
 			}
 		}
 	}
+	printk(KERN_ERR "\n did not find a natural match and so returning the next higher: %s ", (higher == NULL) ? "null" : "not null");
 	return higher;
 }
 
-static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba)
+static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba, int print)
 {
 	struct extent *e = NULL;
 
 	down_read(&ctx->metadata_update_lock); 
-	e = _lsdm_rb_geq(&ctx->extent_tbl_root, lba);
+	e = _lsdm_rb_geq(&ctx->extent_tbl_root, lba, print);
 	up_read(&ctx->metadata_update_lock); 
 
 	return e;
@@ -350,15 +360,19 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, str
 	while (*link) {
 		parent = *link;
 		e = rb_entry(parent, struct extent, rb);
-		if ((new->lba + new->len) <= e->lba) {
+		printk(KERN_ERR "\n %s parent->lba: %llu, parent->pba: %llu, parent->len: %lu", __func__, e->lba, e->pba, e->len);
+		if (e->lba >= (new->lba + new->len)) {
+			printk(KERN_ERR "\n \t Going left now! ");
 			link = &(parent->rb_left);
-		} else if (new->lba >= (e->lba + e->len)){
+		} else if ((e->lba + e->len) <= new->lba){
+			printk(KERN_ERR "\n \t Going right now! ");
 			link = &(parent->rb_right);
 		} else {
+			printk(KERN_ERR "\n Found e (same as parent above)! returning!");
 			return e;
 		}
 	}
-	//printk( KERN_ERR "\n %s Inserting (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
+	printk( KERN_ERR "\n %s Inserting (lba: %llu pba: %llu len: %u) ", __func__, new->lba, new->pba, new->len);
 	/* Put the new node there */
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
@@ -381,7 +395,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	struct extent *tmp = NULL;
 	int diff = 0;
 
-	//printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
+	printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	
 	if (root == NULL) {
 		printk(KERN_ERR "\n %f root: NULL! \n");
@@ -389,6 +403,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	}
 	BUG_ON(len == 0);
 
+	//printk(KERN_ERR "\n lba: %lld, len: %lld ", lba, len);
 	new = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 	if (unlikely(!new)) {
 		BUG();
@@ -403,6 +418,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	if (!e)
 		return 0;
 
+	printk(KERN_ERR "\n e->lba: %d, e->len: %ld ", e->lba, e->len);
 	/* new overlaps with e
 	 * new: ++++
 	 * e: --
@@ -416,7 +432,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	 *  No end matches!! new overlaps with ONLY ONE extent e
 	 */
 
-	if ((lba > e->lba)  && ((lba + len) < (e->lba + e->len))) {
+	if ((lba > e->lba) && ((lba + len) < (e->lba + e->len))) {
 		split = mempool_alloc(ctx->extent_pool, GFP_NOIO);
 		if (!split) {
 			mempool_free(new, ctx->extent_pool);
@@ -429,6 +445,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		 */
 		BUG_ON(e->pba + diff ==  pba);
 		e->len = diff;
+		printk("\n Case1: Modified: (new->lba: %llu, new->pba: %llu, new->len: %lu) ", e->lba, e->pba, e->len);
 		if (lsdm_rb_insert(ctx, root, new)) {
 			printk(KERN_ERR"\n Corruption in case 1.1, diff: %d !! ", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
@@ -437,10 +454,6 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
 		} 
-		/*	
-		printk(KERN_ERR "\n lba: %lld, e->lba: %lld ", lba, e->lba);
-		printk(KERN_ERR "\n e->len: %d, diff: %d len: %ld ", e->len, diff, len);
-		*/
 		if (lsdm_rb_insert(ctx, root, split)) {
 			printk(KERN_ERR"\n Corruption in case 1.2!! diff: %d", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
@@ -484,6 +497,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	*
 	*/
 	if ((lba > e->lba) && ((lba + len) >= (e->lba + e->len)) && (lba < (e->lba + e->len))) {
+		printk(KERN_ERR "\n Case2, Modified e->len: %lu to %lu ", e->len, lba - e->lba);
 		e->len = lba - e->lba;
 		e = lsdm_rb_next(e);
 		/*  
@@ -509,6 +523,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	while ((e!=NULL) && (lba <= e->lba) && ((lba + len) >= (e->lba + e->len))) {
 		tmp = lsdm_rb_next(e);
 		lsdm_rb_remove(ctx, root, e);
+		printk("\n Case3, Removed: (e->lba: %llu, e->pba: %llu, e->len: %lu) ", e->lba, e->pba, e->len);
 		mempool_free(e, ctx->extent_pool);
 		e = tmp;
 	}
@@ -541,6 +556,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	if ((lba <= e->lba) && (lba + len > e->lba) && (lba + len < e->lba + e->len))  {
 		diff = lba + len - e->lba;
 		lsdm_rb_remove(ctx, root, e);
+		printk("\n Case4, Removed: (e->lba: %llu, e->pba: %llu, e->len: %lu) ", e->lba, e->pba, e->len);
 		e->lba = e->lba + diff;
 		e->len = e->len - diff;
 		e->pba = e->pba + diff;
@@ -1204,9 +1220,11 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 
 	struct app_read_ctx *read_ctx;
 	struct bio *clone;
+	int print = 0;
 
 	read_ctx = kmem_cache_alloc(ctx->app_read_ctx_cache, GFP_KERNEL);
 	if (!read_ctx) {
+		printk(KERN_ERR "\n %s could not allocate memory to read_ctx ", __func__);
 		bio->bi_status = -ENOMEM;
 		bio_endio(bio);
 		return -ENOMEM;
@@ -1215,6 +1233,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	atomic_inc(&ctx->n_reads);
 	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
+		printk(KERN_ERR "\n %s could not allocate memory to clone", __func__);
 		kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
 		bio->bi_status = -ENOMEM;
 		bio_endio(bio);
@@ -1228,10 +1247,13 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	nr_sectors = bio_sectors(clone);
 
 	split = NULL;
+	printk(KERN_ERR "\n %s lba: %llu, nrsectors: %lu", __func__, bio->bi_iter.bi_sector, nr_sectors);
+print_repeat:
+	lba = clone->bi_iter.bi_sector;
+	e = lsdm_rb_geq(ctx, lba, print);
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
 		lba = clone->bi_iter.bi_sector;
-		e = lsdm_rb_geq(ctx, lba);
 
 		/* note that beginning of extent is >= start of bio */
 		/* [----bio-----] [eeeeeee] a
@@ -1253,8 +1275,11 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 * bbbbbb
 		 *
 		 */
-		if (e == NULL || e->lba >= lba + nr_sectors)  {
-			//trace_printk("\n Case of no overlap \n");
+		if ((e == NULL) || (e->lba >= lba + nr_sectors) || (e->lba + e->len == lba))  {
+			printk(KERN_ERR "\n %s did not find a matching extent, e: %s , so zero filling! ", __func__, ((e != NULL) ?  "not null" : "null"));
+			if (e) {
+				printk(KERN_ERR "\n e is not null,  e->lba: %llu, e->pba: %llu, e->len: %lu \n", e->lba, e->pba, e->len);
+			}
 			zero_fill_bio(clone);
 			kref_get(&ctx->ongoing_iocount);
 			clone->bi_private = read_ctx;
@@ -1266,17 +1291,18 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			 * directly
 			 */
 			bio_endio(clone);
-			return 0;
+			break;
 		}
+		printk(KERN_ERR "\n Found e->lba: %llu, e->pba: %llu, e->len: %lu", e->lba, e->pba, e->len);
 
 		if (e->lba > lba) {
 		/*               [eeeeeeeeeeee]
 			       [---------bio------] */
 			nr_sectors = e->lba - lba;
 			//printk(KERN_ERR "\n %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
-			split = bio_split(clone, nr_sectors, GFP_NOIO, &fs_bio_set);
+			split = bio_split(clone, nr_sectors, GFP_NOIO, ctx->bs);
 			if (!split) {
-				printk(KERN_INFO "\n Could not split the clone! ERR ");
+				printk(KERN_ERR "\n Could not split the clone! ERR ");
 				/* other bios could have
 				 * been chained to clone. Hence we
 				 *  should be calling bio_endio(clone)
@@ -1293,6 +1319,9 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			bio_chain(split, clone);
 			zero_fill_bio(split);
 			bio_endio(split);
+			/* bio is front filled with zeroes, but we
+			 * need to compare now with the same e
+			 */
 			continue;
 		}
 		else { //(e->lba <= lba)
@@ -1300,8 +1329,22 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		     [---------bio------] */
 			overlap = e->lba + e->len - lba;
 			if (overlap < nr_sectors) {
-				//printk(KERN_INFO "\n **** %s e->lba <= lba  e->lba: %llu lba: %llu overlap: %d nr_sectors: %d \n", __func__, e->lba, lba, overlap, nr_sectors);
-				split = bio_split(clone, overlap, GFP_NOIO, &fs_bio_set);
+				if (overlap == 0) {
+					printk(KERN_ERR "\n **** %s e->lba <= lba  e->lba: %llu e->len: %lu lba: %llu overlap: %d nr_sectors: %d \n", __func__, e->lba, e->len, lba, overlap, nr_sectors);
+					if (!print) {
+						print = 1;
+						goto print_repeat;
+					} else {
+						/*
+						e = lsdm_rb_geq(ctx, lba, print);
+						continue;
+						*/
+						e = NULL;
+						continue;
+					}
+				}
+
+				split = bio_split(clone, overlap, GFP_NOIO, ctx->bs);
 				if (!split) {
 					printk(KERN_INFO "\n Could not split the clone! ERR ");
 					/* other bios could have
@@ -1318,24 +1361,33 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 					return -ENOMEM;
 				}
 				bio_chain(split, clone);
-			} else {
-				/* All the previous splits are chained
-				 * to this last one. No more bios will
-				 * be submitted once this is
-				 * submitted
-				 */
-				atomic_set(&ctx->ioidle, 0);
-				split = clone;
-				kref_get(&ctx->ongoing_iocount);
-				split->bi_private = read_ctx;
-				split->bi_end_io = lsdm_subread_done;
-				read_ctx->clone = clone;
-			}
-			pba = e->pba + lba - e->lba;
-			split->bi_iter.bi_sector = pba;
+
+				pba = e->pba + lba - e->lba;
+				split->bi_iter.bi_sector = pba;
+				bio_set_dev(split, ctx->dev->bdev);
+				//printk(KERN_ERR "\n %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
+				submit_bio(split);
+				e = lsdm_rb_geq(ctx, lba, print);
+				continue;
+			} 
+			//else overlap == e->len
+			/* All the previous splits are chained
+			 * to this last one. No more bios will
+			 * be submitted once this is
+			 * submitted
+			 */
+			atomic_set(&ctx->ioidle, 0);
+			split = clone;
+			kref_get(&ctx->ongoing_iocount);
+			split->bi_private = read_ctx;
+			split->bi_end_io = lsdm_subread_done;
+			read_ctx->clone = clone;
+
+			split->bi_iter.bi_sector = e->pba;
 			bio_set_dev(split, ctx->dev->bdev);
-			//printk(KERN_INFO "\n %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
+			//printk(KERN_ERR "\n %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
 			submit_bio(split);
+			break;
 		}
 	}
 	//printk(KERN_INFO "\n %s end", __func__);
@@ -1920,6 +1972,26 @@ void flush_sit(void * data, async_cookie_t cookie)
 	blk_start_plug(&plug);
 	flush_sit_nodes(ctx, node);
 	blk_finish_plug(&plug);	
+}
+
+/*
+ *
+ */
+void remove_gc_rb_nodes(struct ctx *ctx, struct rb_node *node)
+{
+
+	printk(KERN_ERR "\n Inside %s ", __func__);
+	if (!node) {
+		printk(KERN_ERR "\n %s node is null! ");
+		return;
+	}
+
+	if (node->rb_left)
+		remove_gc_rb_nodes(ctx, node->rb_left);
+	if (node->rb_right)
+		remove_gc_rb_nodes(ctx, node->rb_right);
+	rb_erase(node, &ctx->gc_rb_root);
+	kmem_cache_free(ctx->gc_rb_node_cache, node);
 }
 
 void wait_for_ckpt_completion(struct ctx *ctx)
@@ -3176,7 +3248,6 @@ void process_tm_entries(void *data, async_cookie_t cookie)
 	struct page *page = revmap_bio_ctx->page;
 	struct ctx * ctx = revmap_bio_ctx->ctx;
 
-	schedule();
 	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
 	add_block_based_translation(ctx, page);
 	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
@@ -3467,7 +3538,7 @@ void sub_write_done(void *data, async_cookie_t cookie)
 			 * bio_endio()
 			 */
 			bioctx->orig->bi_status =  -EAGAIN;
-			printk(KERN_ERR "\n **** I/O timed out!! \n");
+			printk(KERN_ERR "\n **** Write timed out!! \n");
 			kref_put(&bioctx->ref, write_done);
 			return;
 		}
@@ -3476,9 +3547,9 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	lba = subbioctx->extent.lba;
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
-	//printk(KERN_ERR "\n %s done; %llu at %llu ", __func__, lba, pba);
 	kref_put(&bioctx->ref, write_done);
 
+	//printk(KERN_ERR "\n %s done; %llu at %llu ", __func__, lba, pba);
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
 	add_revmap_entries(ctx, lba, pba, len);
@@ -4248,7 +4319,7 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 			parent = rb_parent(&e->rb);
 			rb_erase(&e->rb, root);
 			kmem_cache_free(ctx->gc_rb_node_cache, e);
-			//printk(KERN_ERR "\n Found the zone and deleted it, will read again later! ");
+			//printk(KERN_ERR "\n %s Found the zone: %d and deleted it, will read again later! ", __func__, zonenr);
 			link = &parent;
 			break;
 		}
@@ -4283,7 +4354,7 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
 	write_unlock(&ctx->sit_rb_lock);
-	//printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
+//	printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
 	return 0;
 }
 
@@ -4591,15 +4662,15 @@ static struct lsdm_shrinker {
 
 static void destroy_caches(struct ctx *ctx)
 {	
-	kmem_cache_destroy(ctx->gc_extents_cache);
+	//kmem_cache_destroy(ctx->gc_extents_cache);
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
 	kmem_cache_destroy(ctx->tm_page_cache);
 	kmem_cache_destroy(ctx->gc_rb_node_cache);
 	kmem_cache_destroy(ctx->sit_ctx_cache);
 	kmem_cache_destroy(ctx->sit_page_cache);
-	kmem_cache_destroy(ctx->tm_page_write_cache);
+	//kmem_cache_destroy(ctx->tm_page_write_cache);
 	kmem_cache_destroy(ctx->revmap_bioctx_cache);
-	kmem_cache_destroy(ctx->bioctx_cache);
+	//kmem_cache_destroy(ctx->bioctx_cache);
 	kmem_cache_destroy(ctx->sit_ctx_cache);
 }
 
@@ -4638,20 +4709,23 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->subbio_ctx_cache) {
 		goto destroy_gc_rb_node_cache;
 	}
+	/*
 	ctx->gc_extents_cache = kmem_cache_create("gc_extents_cache", sizeof(struct gc_extents), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->gc_extents_cache) {
 		goto destroy_subbio_ctx_cache;
 	}
+	*/
 	//trace_printk("\n gc_extents_cache initialized to address: %p", ctx->gc_extents_cache);
 	ctx->app_read_ctx_cache = kmem_cache_create("app_read_ctx_cache", sizeof(struct app_read_ctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->app_read_ctx_cache) {
-		goto destroy_gc_extents_cache;
+		goto destroy_subbio_ctx_cache;
+		//goto destroy_gc_extents_cache;
 	}
 	//trace_printk("\n app_read_ctx_cache initialized to address: %p", ctx->app_read_ctx_cache);
 	return 0;
 /* failed case */
-destroy_gc_extents_cache:
-	kmem_cache_destroy(ctx->gc_extents_cache);
+//destroy_gc_extents_cache:
+//	kmem_cache_destroy(ctx->gc_extents_cache);
 destroy_subbio_ctx_cache:
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
 destroy_gc_rb_node_cache:
@@ -4809,6 +4883,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	}
 
 	//trace_printk("\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
+	/*
 	ctx->gc_extents = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 	if (!ctx->gc_extents) {
 		//trace_printk("\n Could not allocate gc_extent and hence could not initialized \n");
@@ -4816,6 +4891,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	}
 	//trace_printk("\n Extent allocated....! ctx->gc_extents: %p", ctx->gc_extents);
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
+	*/
 	/*
 	 * Will work with timer based invocation later
 	 * init_timer(ctx->timer);
@@ -4870,6 +4946,9 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 {
 	struct ctx *ctx = dm_target->private;
 	async_cookie_t cookie;
+	struct rb_root *root = &ctx->gc_rb_root;
+	struct completion write_done;
+	unsigned long timeout = 99999;
 
 	sync_blockdev(ctx->dev->bdev);
 	//printk(KERN_ERR "\n Inside dtr! About to call flush_revmap_entries()");
@@ -4888,6 +4967,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * flush_translation_blocks path!
 	 */
 	flush_translation_blocks(ctx, cookie);
+	flush_translation_blocks(ctx, cookie);
 	//printk(KERN_ERR "\n translation blocks flushed! ");
 	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
 	do_checkpoint(ctx);
@@ -4896,6 +4976,9 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * the disk metadata
 	 */
 	lsdm_free_rb_mappings(ctx);
+	remove_gc_rb_nodes(ctx, root->rb_node);
+	init_completion(&write_done);
+	wait_for_completion_timeout(&write_done, msecs_to_jiffies(timeout));
 	async_synchronize_full();
 	printk(KERN_ERR "\n RB mappings freed! ");
 	//printk(KERN_ERR "\n Nr of free blocks: %lld",  ctx->user_block_count);
@@ -4978,6 +5061,7 @@ static int ls_dm_dev_map_io(struct dm_target *dm_target, struct bio *bio)
 	ctx = dm_target->private;
 
 	if(unlikely(bio == NULL)) {
+		printk(KERN_ERR "\n %s bio is null \n", __func__);
 		dump_stack();
 		return 0;
 	}
