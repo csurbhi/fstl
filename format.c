@@ -10,6 +10,7 @@
 #include <string.h>
 #include <errno.h>
 //#include <zlib.h>
+#include <assert.h>
 
 #define ZONE_SZ (256 * 1024 * 1024)
 #define BLK_SZ 4096
@@ -284,7 +285,7 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 	char buffer[4096];
 	int i, ret;
 
-	printf("\n Writing zeroed blks: %d", nr_blks);
+	printf("\n Writing %d zeroed blks, from pba: %llu", nr_blks, pba);
 	
 	memset(buffer, 0, 4096);
 	for (i=0; i<nr_blks; i++) {
@@ -298,6 +299,37 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 	}
 }
 
+
+void read_block(int fd, sector_t pba, unsigned nr_blks)
+{
+
+	char buffer[4096];
+	int i, ret, j;
+
+	printf("\n Reading %d zeroed blks, from pba: %llu", nr_blks, pba);
+	
+	/* lseek offset is in  bytes not sectors, pba is in sectors */
+	ret = lseek(fd, (pba * 512), SEEK_SET);
+	if (ret < 0) {
+		perror("Error in lseek: \n");
+		exit(errno);
+	}
+	for (i=0; i<nr_blks; i++) {
+		ret = read(fd, buffer, 4096);
+		if (ret < 4096) {
+			perror("Error while reading: ");
+			exit(errno);
+		}
+		for(j=0; j<ret; j++) {
+			if(buffer[i] != 0) {
+				assert(1);
+			}
+		}
+	}
+
+
+}
+
 /*
  * Initially the reverse map should be all zero.
  */
@@ -308,8 +340,9 @@ void write_revmap(int fd, sector_t revmap_pba, unsigned nr_blks)
 
 void write_tm(int fd, sector_t tm_pba, unsigned nr_blks)
 {
-	printf("\n Writing tm blocks at pba: %llu, nrblks: %u", tm_pba/NR_SECTORS_IN_BLK, nr_blks);
+	printf("\n Writing tm blocks at pba: %llu, nrblks: %u", tm_pba, nr_blks);
 	write_zeroed_blks(fd, tm_pba, nr_blks);
+	read_block(fd, tm_pba, nr_blks);
 }
 
 

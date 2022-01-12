@@ -101,8 +101,8 @@ typedef u64 sector_t;
 __u8 valid_map[VBLK_MAP_SIZE];
  */
 
-#define SIT_ENTRIES_BLK 	BLK_SIZE/sizeof(struct lsdm_seg_entry)
-#define TM_ENTRIES_BLK 		BLK_SIZE/sizeof(struct tm_entry)
+#define SIT_ENTRIES_BLK 	(BLK_SIZE/sizeof(struct lsdm_seg_entry))
+#define TM_ENTRIES_BLK 		(BLK_SIZE/sizeof(struct tm_entry))
 
 struct lsdm_seg_entry {
 	__le32 vblocks;

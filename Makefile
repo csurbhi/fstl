@@ -11,6 +11,8 @@ CC += ${MY_CFLAGS}
 
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules EXTRA_CFLAGS="$(MY_CFLAGS)"
+	gcc write_zones.c -o writezones
+	gcc read_verify.c -o readverify
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean

@@ -1,6 +1,7 @@
 #include <linux/types.h>
 #include <linux/refcount.h>
 #include <linux/wait.h>
+#include <linux/async.h>
 #include "format_metadata.h"
 
 /*
@@ -67,6 +68,7 @@ struct tm_page {
 struct sit_page_write_ctx {
 	struct ctx *ctx;
 	struct page *page;
+	sector_t sit_nr;
 };
 
 struct sit_page {
@@ -97,8 +99,8 @@ struct extent_entry {
 struct lsdm_sub_bioctx {
 	struct extent_entry extent;
 	struct lsdm_bioctx * bioctx;
-	u8 magic;
 	struct completion write_done;
+	spinlock_t spin_lock;
 };
 
 struct cur_zone_info {
@@ -264,11 +266,9 @@ struct ctx {
 	wait_queue_head_t rev_blk_flushq;
 	wait_queue_head_t ckptq;
 	struct page * revmap_page;
-	struct semaphore flush_lock;
 	struct semaphore gc_lock;
 	struct semaphore sit_kv_store_lock;
 	struct semaphore tm_kv_store_lock;
-	struct semaphore rev_entries_lock; 	/* protects revmap_[sector/blk]_count */
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
 	 * non contiguous pages in memory
 	 */

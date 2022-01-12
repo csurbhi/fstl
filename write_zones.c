@@ -5,8 +5,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define NR_ZONES 2
-#define NR_BLKS_IN_ZONE 65536
+#define NR_ZONES 1
+#define NR_BLKS_IN_ZONE 65535
 #define BLKSZ 4096
 
 int main(int argc, char *argv[])
@@ -66,15 +66,17 @@ int main(int argc, char *argv[])
 			}
 			for(k=0; k<BLKSZ; k++) {
 				if (buff[k] != 1) {
-					printf("\n 1) read/write error! ");
+					printf("\n 1) write could not be verified, content is not 1 ");
 					printf("\n zone_nr: %d, blknr: %d k: %d buff[k]: %d \n", i, j, k, buff[k]);
-					return -1; 
+					break;
 				}
 			}
 		}
 	}
 
 	printf("\n Writes verified!! ");
+
+
 
 	close(fd);
 
@@ -102,7 +104,6 @@ int main(int argc, char *argv[])
 	for(i=0; i<NR_ZONES; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
 			lseek(fd, offset, SEEK_SET);
-			offset = offset + 8192;
 			ret = write(fd, buff, BLKSZ);
 			if (ret < 0) {
 				perror("\n Could not write to file because: ");
@@ -113,16 +114,15 @@ int main(int argc, char *argv[])
 				printf("\n Partial write, zonenr: %d blknr: %d", i, j);
 				return(-1);
 			}
+			offset = offset + 8192;
 		}
 	}
 
-	printf("\n Read verifying the writes ......");
 	close(fd);
+	printf("\n Overwrites done ! ");
 
-	sync();
-	return (0);
-
-/*
+	/*
+	printf("\n Read verifying the writes ......\n");
 	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
 		perror("\n Could not create file because: ");
@@ -135,7 +135,7 @@ int main(int argc, char *argv[])
 
 	offset = 0;
 	for(i=0; i<NR_ZONES; i++) {
-		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
+		for(j=2; j<NR_BLKS_IN_ZONE; j=j+2) {
 			lseek(fd, offset, SEEK_SET);
 			offset = offset + 8192;
 			ret = read(fd, buff, BLKSZ);
@@ -167,7 +167,7 @@ int main(int argc, char *argv[])
 
 		}
 	}
-*/
 	printf("\n");
+	close(fd);*/
 	return 0;
 }
