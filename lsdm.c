@@ -162,15 +162,15 @@ static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba, int print)
 	return e;
 }
 
+/* Not called under any lock
+ */
 static struct extent * revmap_rb_search_geq(struct ctx *ctx, sector_t pba)
 {
 	struct rb_root *root = &ctx->rev_tbl_root;
 	unsigned int print = 1;
 	struct extent * e;
 
-	down_read(&ctx->metadata_update_lock);
 	e = _lsdm_rb_geq(root, pba, print);
-	up_read(&ctx->metadata_update_lock);
 	return e;
 }
 
@@ -819,7 +819,7 @@ static void read_gc_extents(struct ctx *ctx)
 	}
 	printk(KERN_ERR "\n %s count: %d", __func__, count);
 	last_extent = gc_extent;
-	//read_all_bios_and_wait(ctx, last_extent);
+	read_all_bios_and_wait(ctx, last_extent);
 	printk(KERN_ERR "\n %s Read all the pbas in zone for gc! Done ", __func__);
 }
 
@@ -1017,8 +1017,6 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	 * order
 	 */
 	read_gc_extents(ctx);
-	/* We sort this list on their LBAs */
-	//list_sort(NULL, &ctx->gc_extents->list, cmp_list_nodes);
 
 	/* Since our read_extents call, overwrites could have made
 	 * the blocks in this zone invalid. Thus we now take a 
@@ -1044,19 +1042,13 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		}
 		/* extents are partially snipped */
 		if (e->lba > gc_extent->e.pba) {
-			diff = e->lba - gc_extent->e.pba;
 			gc_extent->e.pba = e->lba;
 			gc_extent->e.lba = e->pba;
+			diff = gc_extent->e.len - e->len;
 			gc_extent->e.len = e->len;
 			/* bio advance will advance the bi_sector and bi_size
 		 	 */
 			bio_advance(gc_extent->bio, diff << 9);
-		}
-		if (e->len < gc_extent->e.len) {
-			diff = gc_extent->e.len - e->len;
-			gc_extent->e.len = e->len;
-			/* bio advance will advance the bi_sector and bi_size */
-			bio_advance(gc_extent->bio, diff<<9);
 		}
 		/* Now we adjust the gc_extent such that it can be
 		 * written without getting split in the gc write
