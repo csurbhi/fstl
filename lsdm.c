@@ -129,6 +129,7 @@ static struct extent *_lsdm_rb_geq(struct rb_root *root, off_t lba, int print)
 		}
 		if ((e->lba >= lba) && (!higher || (e->lba < higher->lba))) {
 			higher = e;
+			//printk(KERN_ERR "\n %s Searching lba: %llu, higher:  (e->lba: %llu, e->pba: %llu e->len: %lu)", __func__, lba, e->lba, e->pba, e->len); 
 		}
 		if (e->lba > lba) {
 			node = node->rb_left;
@@ -141,12 +142,12 @@ static struct extent *_lsdm_rb_geq(struct rb_root *root, off_t lba, int print)
 			} else {
 				/* lba falls within "e"
 				 * (e->lba <= lba) && ((e->lba + e->len) > lba) */
-			//	printk(KERN_ERR "\n Found an overlapping e, returning e");
+				//printk(KERN_ERR "\n Found an overlapping e, returning e");
 				return e;
 			}
 		}
 	}
-	//printk(KERN_ERR "\n did not find a natural match and so returning the next higher: %s ", (higher == NULL) ? "null" : "not null");
+	printk(KERN_ERR "\n did not find a natural match and so returning the next higher: %s ", (higher == NULL) ? "null" : "not null");
 	return higher;
 }
 
@@ -164,7 +165,7 @@ static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba, int print)
 static struct extent * revmap_rb_search_geq(struct ctx *ctx, sector_t pba)
 {
 	struct rb_root *root = &ctx->rev_tbl_root;
-	unsigned int print = 0;
+	unsigned int print = 1;
 	struct extent * e;
 
 	down_read(&ctx->metadata_update_lock);
@@ -822,6 +823,9 @@ static void read_gc_extents(struct ctx *ctx)
 	printk(KERN_ERR "\n %s Read all the pbas in zone for gc! Done ", __func__);
 }
 
+/*
+ * We sort on the LBA
+ */
 static int cmp_list_nodes(void *priv, struct list_head *lha, struct list_head *lhb)
 {
 	struct gc_extents *ga, *gb;
@@ -922,11 +926,11 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	/* Take a semaphore lock so that no two gc instances are
 	 * started in parallel.
 	 */
-
 	if (!down_trylock(&ctx->gc_lock)) {
-		printk(KERN_ERR "\n GC is already running!");
+		printk(KERN_ERR "\n GC is already running! zone_to_clean: %u", zone_to_clean);
+		dump_stack();
 		return -1;
-	}
+	} 
 	BUG_ON(!list_empty(&ctx->gc_extents->list));
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
 
@@ -947,47 +951,74 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	 */
 	last_pba = get_last_pba_for_zone(ctx, zonenr);
 
-	//printk(KERN_ERR "\n %s first_pba: %llu last_pba: %llu", __func__, pba, last_pba);
+	printk(KERN_ERR "\n %s first_pba: %llu last_pba: %llu", __func__, pba, last_pba);
 	
+	down_write(&ctx->metadata_update_lock);
 	while(pba <= last_pba) {
-		//printk(KERN_ERR "\n %s Looking for pba: %llu" , __func__, pba);
+		printk(KERN_ERR "\n %s Looking for pba: %llu" , __func__, pba);
 		e = revmap_rb_search_geq(ctx, pba);
 		if (NULL == e) {
+			printk(KERN_ERR "\n Found NULL! ");
 			break;
 		}
-		if (e->pba > last_pba)
-			break;
-		temp.pba = e->pba;
-		temp.lba = e->lba;
-		//printk(KERN_ERR "\n %s pba: %llu, lba: %llu e->len: %d ", __func__, temp.pba, temp.lba, e->len);
-		/* Don't change e directly, as e belongs to the
+		printk(KERN_ERR "\n %s Found e, PBA: %llu, LBA: %llu, len: %llu", __func__, e->lba, e->pba, e->len);
+		/* In a reverse table extent, e->lba is actually the
+		 * PBA and e->pba is actually the LBA. This was done
+		 * for code reusability.
+		 * We are storing the actual lba and pba pair in e
+		 * Don't change e directly, as e belongs to the
 		 * reverse map rb tree and we have the node address
 		 */
-		if (e->pba + e->len - 1 > last_pba)
-			temp.len = last_pba - e->pba + 1;
+		if (e->lba > last_pba)
+			break;
+		temp.pba = pba;
+		if (e->lba < pba) {
+			/* 
+			 * Overlapping e found
+			 * e-------
+			 * 	pba
+			 */
+
+			diff = pba - e->lba;
+			/* Bug when e is non overlapping */
+			BUG_ON(diff >= e->len);
+			temp.pba = pba;
+			temp.lba = e->pba + diff;
+			temp.len = e->len - diff;
+		} else {
+			/*
+			 * 	e------
+			 * pba
+			 */
+			temp.pba = e->lba;
+			temp.lba = e->pba;
+			temp.len = e->len;
+			/* if start is 0, len is 4, then you
+			 * want to read 4 sectors.
+			 * If last_pba is 3, you want len to be 4
+			 */
+			if (temp.pba + temp.len > last_pba + 1) {
+				diff = (temp.pba + temp.len - 1) - last_pba;
+				temp.len = temp.len - diff;
+			}
+		}
+		printk(KERN_ERR "\n %s pba: %llu, lba: %llu e->len: %d last_pba: %llu", __func__, temp.pba, temp.lba, temp.len, last_pba);
 		add_extent_to_gclist(ctx, &temp);
-		pba = e->pba + temp.len;
+		pba = temp.pba + temp.len;
 	}
+	up_write(&ctx->metadata_update_lock);
 	/* This segment has valid extents, thus there should be
 	 * atleast one node in the gc list. An empty list indicates
 	 * the reverse translation map does not match with the segment
 	 * information table
 	 */
 	BUG_ON(list_empty(&ctx->gc_extents->list));
-	read_gc_extents(ctx);
 	/* Sort the list on LBAs. Write increasing LBAs in the same
 	 * order
 	 */
-	list_sort(NULL, &ctx->gc_extents->list, cmp_list_nodes);
-	list_for_each(list_head, &ctx->gc_extents->list) {
-		gc_extent = list_entry(list_head, struct gc_extents, list);
-		temp_ptr = list_next_entry(gc_extent, list);
-		list_head = &temp_ptr->list;
-		list_del(&gc_extent->list);
-		kmem_cache_free(ctx->gc_extents_cache, gc_extent);
-	}
-	goto done1;
-
+	read_gc_extents(ctx);
+	/* We sort this list on their LBAs */
+	//list_sort(NULL, &ctx->gc_extents->list, cmp_list_nodes);
 
 	/* Since our read_extents call, overwrites could have made
 	 * the blocks in this zone invalid. Thus we now take a 
@@ -995,12 +1026,16 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	 * will end up writing invalid blocks and loosing the
 	 * overwritten data
 	 */
+	down_write(&ctx->metadata_update_lock);
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
-		down_write(&ctx->metadata_update_lock);
+		/* Reverse map stores PBA as e->lba and LBA as e->pba
+		 * This was done for code reuse between map and revmap
+		 * Thus e->lba is actually the PBA
+		 */
 		e = revmap_rb_search_geq(ctx, pba);
 		/* entire extrents is lost by interim overwrites */
-		if (e->pba > gc_extent->e.pba + gc_extent->e.len) {
+		if (e->lba > (gc_extent->e.pba + gc_extent->e.len)) {
 			temp_ptr = list_next_entry(gc_extent, list);
 			list_head = &temp_ptr->list;
 			list_del(&gc_extent->list);
@@ -1008,9 +1043,10 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 			continue;
 		}
 		/* extents are partially snipped */
-		if (e->pba > gc_extent->e.pba) {
-			gc_extent->e.pba = e->pba;
-			gc_extent->e.lba = e->lba;
+		if (e->lba > gc_extent->e.pba) {
+			diff = e->lba - gc_extent->e.pba;
+			gc_extent->e.pba = e->lba;
+			gc_extent->e.lba = e->pba;
 			gc_extent->e.len = e->len;
 			/* bio advance will advance the bi_sector and bi_size
 		 	 */
@@ -1028,30 +1064,8 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		 */
 		nr_sectors = bio_sectors(gc_extent->bio);
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
-		if (s8 > ctx->free_sectors_in_gc_wf){
-			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
-			bio = gc_extent->bio;
-			split = bio_split(bio, s8, GFP_KERNEL, ctx->bs);
-			if (unlikely(!split)) {
-				// do something
-				panic("No memory, couldnt split! write better code!");
-			}
-			gc_extent->e.len = s8;
-			gc_extent->bio = split;
-
-			new = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
-			if (unlikely(!new)) {
-				// do something
-				panic("No memory, couldnt split! write better code!");
-			}
-			diff = nr_sectors - s8;
-			new->e.pba = e->pba + nr_sectors;
-			new->e.lba = e->lba + nr_sectors;
-			new->e.len = diff;
-			new->bio = bio;
-			/* Add new after gc_extent */
-			list_add(&new->list, &gc_extent->list);
-		}
+		BUG_ON(nr_sectors != s8);
+		BUG_ON(s8 > ctx->free_sectors_in_gc_wf);
 		write_gc_extent(ctx, gc_extent);
 		if (gc_extent->bio->bi_status != BLK_STS_OK) {
 			/* write error! disk is in a read mode! we
@@ -1067,8 +1081,8 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		list_head = &temp_ptr->list;
 		list_del(&gc_extent->list);
 		kmem_cache_free(ctx->gc_extents_cache, gc_extent);
-		up_write(&ctx->metadata_update_lock);
 	}
+	up_write(&ctx->metadata_update_lock);
 	do_checkpoint(ctx);
 	/* Complete the GC and then sync the block device */
 	sync_blockdev(ctx->dev->bdev);
@@ -1082,7 +1096,7 @@ done1:
 		rb_erase(node, &ctx->gc_rb_root);
 		kmem_cache_free(ctx->gc_rb_node_cache, node);
 	}
-	//printk(KERN_ERR "\n %s removed zone from the gc_rb_root tree", __func__);
+	printk(KERN_ERR "\n %s removed zone from the gc_rb_root tree", __func__);
 /* Remove the zone from the gc_rb_root */
 
 done:
@@ -1091,6 +1105,13 @@ done:
 	printk(KERN_ERR "\n %s going out! \n", __func__);
 	return 0;
 }
+/*
+
+	mark_zone_free(ctx , zonenr);
+	up(&ctx->gc_lock);
+	return (0);
+*/
+
 
 /*
  * TODO: When we want to mark a zone free create a bio with opf:
@@ -1144,7 +1165,10 @@ static int gc_thread_fn(void * data)
 		/* Doing this for now! ret part */
 		if (zonenr >= 0) {
 			lsdm_gc(ctx, zonenr, newzone, 0);
-		}
+		} /*else {
+		    wait_ms = wait_ms* 2;
+		    continue;
+		} */
 	} while(!kthread_should_stop());
 	return 0;
 }
