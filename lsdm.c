@@ -695,10 +695,8 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	}
 	nr_sectors = gc_extent->e.len;
 	s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
-	gc_extent->e.len = s8;
-	bio_put(bio);
+	BUG_ON(gc_extent->e.len != s8);
 	printk(KERN_ERR "\n %s count: %d gc_extent->e.len = %d ", __func__, count, s8);
-	return 0;
 	/* Now allocate pages to the bio 
 	 * 2^3 sectors make 1 page
 	 * Since the length is blk aligned, we dont have to add a 1
@@ -710,12 +708,7 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	 
 	for(i=0; i<nr_pages; i++) {
 		page = mempool_alloc(ctx->page_pool, GFP_KERNEL);
-		if (!page) {
-			printk(KERN_ERR "\n %s could not allocate memory for page", __func__);
-			return -ENOMEM;
-		}
-		/* bio_add_page() sets the bi_size of the bio */
-		if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
+		if ((!page) || ( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0))) {
 			bio_for_each_segment_all(bv, bio, iter_all) {
 				mempool_free(bv->bv_page, ctx->page_pool);
 				printk(KERN_ERR "\n %s could not add page to a bio ", __func__);
@@ -727,7 +720,6 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
-	bio->bi_private = ctx;
 	bio->bi_end_io = read_extent_done;
 	gc_extent->bio = bio;
 	return 0;
@@ -757,6 +749,9 @@ static void free_gc_list(struct ctx *ctx)
 
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref);
 
+/* All the bios share the same reference. The address of this common
+ * reference is stored in the bi_private field of the bio
+ */
 static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_extent)
 {
 
@@ -765,17 +760,10 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
 	struct blk_plug plug;
 	refcount_t * ref;
 
-	ref = kzalloc(sizeof(refcount_t), GFP_KERNEL);
-	if (!ref) {
-		return -ENOMEM;
-	}
-
-	refcount_set(ref, 1);
-
 	blk_start_plug(&plug);
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
-		gc_extent->bio->bi_private = ref;
+		ref = gc_extent->bio->bi_private;
 		refcount_inc(ref);
 		/* setup bio sets bio->bi_end_io = read_extent_done */
 		submit_bio(gc_extent->bio);
@@ -797,11 +785,20 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
  * of what extent reading did not work! We can retry and if
  * the block did not work, we can do something more meaningful.
  */
-static void read_gc_extents(struct ctx *ctx)
+static int read_gc_extents(struct ctx *ctx)
 {
 	struct list_head *list_head;
 	struct gc_extents *gc_extent, *last_extent;
 	int count;
+	refcount_t * ref;
+
+	ref = kzalloc(sizeof(refcount_t), GFP_KERNEL);
+	if (!ref) {
+		return -ENOMEM;
+	}
+
+	refcount_set(ref, 1);
+
 
 	/* If list is empty we have nothing to do */
 	BUG_ON(list_empty(&ctx->gc_extents->list));
@@ -816,11 +813,13 @@ static void read_gc_extents(struct ctx *ctx)
 			free_gc_list(ctx);
 			panic("Low memory! TODO: Write code to free memory from translation tables etc ");
 		}
+		gc_extent->bio->bi_private = ref;
 	}
 	printk(KERN_ERR "\n %s count: %d", __func__, count);
 	last_extent = gc_extent;
 	read_all_bios_and_wait(ctx, last_extent);
 	printk(KERN_ERR "\n %s Read all the pbas in zone for gc! Done ", __func__);
+	return 0;
 }
 
 /*
@@ -856,7 +855,7 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 {
 	struct bio *bio;
 	struct gc_ctx *gc_ctx;
-	int nrsectors;
+	sector_t nrsectors, s8;
 	int trials = 0;
 
 	bio = gc_extent->bio;
@@ -865,6 +864,8 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = ctx->gc_write_frontier;
 	nrsectors = bio_sectors(bio);
+	s8 = round_up(nrsectors, NR_SECTORS_IN_BLK);
+	BUG_ON (nrsectors != s8);
 again:
 	submit_bio_wait(bio);
 	if (bio->bi_status != BLK_STS_OK) {
@@ -884,7 +885,6 @@ again:
 		}
 		panic("GC writes failed! Perhaps a resource error");
 	}
-	move_gc_write_frontier(ctx, nrsectors);
 	return 0;
 }
 
@@ -1057,7 +1057,31 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		nr_sectors = bio_sectors(gc_extent->bio);
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 		BUG_ON(nr_sectors != s8);
-		BUG_ON(s8 > ctx->free_sectors_in_gc_wf);
+		if (s8 > ctx->free_sectors_in_gc_wf){
+			//trace_printk("SPLITTING!!!!!!!! s8: %d ctx->free_sectors_in_wf: %d", s8, ctx->free_sectors_in_wf);
+			s8 = round_down(ctx->free_sectors_in_gc_wf, NR_SECTORS_IN_BLK);
+			if (s8 <= 0) {
+				panic("Should always have atleast a block left ");
+			}
+			if (!(split = bio_split(gc_extent->bio, s8, GFP_NOIO, ctx->bs))){
+				printk(KERN_ERR "\n %s:%d failed at bio_split! ", __func__, __LINE__);
+				goto done1;
+			}
+			gc_extent->e.len = s8;
+			gc_extent->bio = split;
+			new = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
+			if (unlikely(!new)) {
+				panic("No memory, couldnt split! write better code!");
+			}
+			diff = nr_sectors - s8;
+			new->e.pba = gc_extent->e.pba + s8;
+			new->e.lba = gc_extent->e.lba + s8;
+			new->e.len = diff;
+			/* Add new after gc_extent */
+			list_add(&new->list, &gc_extent->list);
+		}
+		// else we do nothing
+		move_gc_write_frontier(ctx, s8);
 		write_gc_extent(ctx, gc_extent);
 		if (gc_extent->bio->bi_status != BLK_STS_OK) {
 			/* write error! disk is in a read mode! we
@@ -2176,7 +2200,7 @@ static void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	ctx->free_sectors_in_gc_wf = ctx->free_sectors_in_gc_wf - sectors_s8;
 	if (ctx->free_sectors_in_gc_wf < NR_SECTORS_IN_BLK) {
 		if ((ctx->gc_write_frontier - 1) != ctx->gc_wf_end) {
-			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->app_write_frontier, ctx->app_wf_end);
+			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->gc_write_frontier, ctx->gc_wf_end);
 			BUG_ON(ctx->gc_write_frontier != (ctx->gc_wf_end + 1));
 		}
 		get_new_gc_zone(ctx);
@@ -3312,6 +3336,7 @@ void wake_up_refcount_waiters(struct ctx *ctx)
 	wake_up(&ctx->refq);
 }
 
+/* Waits until the value of refcount becomes 1  */
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref)
 {
 	spin_lock(&ctx->tm_ref_lock);
