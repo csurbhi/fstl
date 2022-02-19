@@ -702,9 +702,10 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	 * Since the length is blk aligned, we dont have to add a 1
 	 * to the nr_pages calculation
 	 */
-	nr_pages = (gc_extent->e.len >> 3);
+	nr_pages = (s8 >> 3);
 	/* bio_add_page sets the bi_size for the bio */
-	printk(KERN_ERR "\n %s nr_pages: %d ", nr_pages);
+	printk(KERN_ERR "\n %s nr_pages: %d, gc_extent->e.len: %d s8: %d", __func__, nr_pages, gc_extent->e.len, s8);
+	BUG_ON(nr_pages == 0);
 	 
 	for(i=0; i<nr_pages; i++) {
 		page = mempool_alloc(ctx->page_pool, GFP_KERNEL);
@@ -773,7 +774,7 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
 	 * that the previous bios have completed as well
 	 */
 	blk_finish_plug(&plug);
-	printk(KERN_ERR "\n %s Submitted reads", __func__);
+	printk(KERN_ERR "\n %s Submitted reads, waiting for them to complete.....\n", __func__);
 	wait_on_refcount(ctx, ref);
 	kfree(ref);
 	printk(KERN_ERR "\n %s reads done!", __func__);
@@ -914,6 +915,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	struct bio *split, *bio;
 	struct rb_node *node;
 	int ret;
+	static int count = 0;
 
 	printk(KERN_ERR "\n GC thread polling after every few seconds, zone_to_clean: %u", zone_to_clean);
 	
@@ -927,10 +929,12 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	 * started in parallel.
 	 */
 	if (!down_trylock(&ctx->gc_lock)) {
-		printk(KERN_ERR "\n GC is already running! zone_to_clean: %u", zone_to_clean);
+		printk(KERN_ERR "\n GC is already running! zone_to_clean: %u count: %d", zone_to_clean, count);
 		dump_stack();
 		return -1;
 	} 
+	count = 1;
+	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u count: %d ", zone_to_clean, count);
 	BUG_ON(!list_empty(&ctx->gc_extents->list));
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
 
@@ -1031,9 +1035,10 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		 * This was done for code reuse between map and revmap
 		 * Thus e->lba is actually the PBA
 		 */
-		e = revmap_rb_search_geq(ctx, pba);
+		e = revmap_rb_search_geq(ctx, gc_extent->e.pba);
 		/* entire extrents is lost by interim overwrites */
 		if (e->lba > (gc_extent->e.pba + gc_extent->e.len)) {
+			printk(KERN_ERR "\n %s:%d entire extent is lost! \n", __func__, __LINE__);
 			temp_ptr = list_next_entry(gc_extent, list);
 			list_head = &temp_ptr->list;
 			list_del(&gc_extent->list);
@@ -1042,7 +1047,8 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		}
 		/* extents are partially snipped */
 		if (e->lba > gc_extent->e.pba) {
-			gc_extent->e.pba = e->lba;
+			printk(KERN_ERR "\n %s:%d extent is snipped! \n", __func__, __LINE__);
+			/* e->pba is actually the stored lba */
 			gc_extent->e.lba = e->pba;
 			diff = gc_extent->e.len - e->len;
 			gc_extent->e.len = e->len;
@@ -1051,8 +1057,13 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 			bio_advance(gc_extent->bio, diff << 9);
 		}
 		/* Now we adjust the gc_extent such that it can be
-		 * written without getting split in the gc write
-		 * frontier
+		 * written in the available space in the gc segment.
+		 * If less space is available than is required by a
+		 * bio, we split that bio. Else we write it as it is.
+		 *
+		 * We also note the new PBA which is the PBA where the
+		 * contents of the cleaned segment should be
+		 * transferred to! 
 		 */
 		nr_sectors = bio_sectors(gc_extent->bio);
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
@@ -1064,7 +1075,8 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 				panic("Should always have atleast a block left ");
 			}
 			if (!(split = bio_split(gc_extent->bio, s8, GFP_NOIO, ctx->bs))){
-				printk(KERN_ERR "\n %s:%d failed at bio_split! ", __func__, __LINE__);
+				printk(KERN_ERR "\n %s:%d failed at bio_split! GC failed!! ", __func__, __LINE__);
+				panic("\n Low memory, cannot split bio!");
 				goto done1;
 			}
 			gc_extent->e.len = s8;
@@ -1074,6 +1086,8 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 				panic("No memory, couldnt split! write better code!");
 			}
 			diff = nr_sectors - s8;
+			/* This is the old pba that we use for
+			 * searching */
 			new->e.pba = gc_extent->e.pba + s8;
 			new->e.lba = gc_extent->e.lba + s8;
 			new->e.len = diff;
@@ -1081,6 +1095,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 			list_add(&new->list, &gc_extent->list);
 		}
 		// else we do nothing
+		gc_extent->e.pba = ctx->gc_write_frontier;
 		move_gc_write_frontier(ctx, s8);
 		write_gc_extent(ctx, gc_extent);
 		if (gc_extent->bio->bi_status != BLK_STS_OK) {
@@ -1145,6 +1160,7 @@ static int gc_thread_fn(void * data)
 	int zonenr, newzone;
 
 	wait_ms = gc_th->min_sleep_time;
+	sema_init(&ctx->gc_lock, 1);
 	printk(KERN_ERR "\n %s executing! ", __func__);
 	set_freezable();
 	do {
@@ -1838,7 +1854,7 @@ static int get_new_gc_zone(struct ctx *ctx)
 	 */
 	ctx->gc_write_frontier = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	ctx->gc_wf_end = zone_end(ctx, ctx->gc_write_frontier);
-	//trace_printk("\n !!!!!!!!!!!!!!! get_new_gc_zone():: zone0_pba: %u zone_nr: %ld gc_write_frontier: %llu, gc_wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->gc_write_frontier, ctx->gc_wf_end);
+	printk("\n !!!!!!!!!!!!!!! get_new_gc_zone():: zone0_pba: %u zone_nr: %ld gc_write_frontier: %llu, gc_wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->gc_write_frontier, ctx->gc_wf_end);
 	if (ctx->gc_write_frontier > ctx->gc_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %llu", ctx->free_sectors_in_wf );
 	}
@@ -4760,6 +4776,14 @@ int read_metadata(struct ctx * ctx)
 	//printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
 	ctx->free_sectors_in_wf = ctx->app_wf_end - ctx->app_write_frontier + 1;
 	//printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
+	
+	ctx->gc_write_frontier = ctx->ckpt->cur_gc_frontier_pba;
+	//printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
+	ctx->gc_wf_end = zone_end(ctx, ctx->gc_write_frontier);
+	//printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->app_wf_end);
+	//printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
+	ctx->free_sectors_in_gc_wf = ctx->gc_wf_end - ctx->gc_write_frontier + 1;
+	//printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_
 
 	ret = read_revmap_bitmap(ctx);
 	if (ret) {
@@ -4976,7 +5000,6 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	//printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
 	sema_init(&ctx->sit_kv_store_lock, 1);
 	sema_init(&ctx->tm_kv_store_lock, 1);
-	sema_init(&ctx->gc_lock, 1);
 
 	spin_lock_init(&ctx->lock);
 	spin_lock_init(&ctx->tm_ref_lock);
