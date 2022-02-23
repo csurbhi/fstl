@@ -644,6 +644,7 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 	gc_extent->e.lba = e->lba;
 	gc_extent->e.pba = e->pba;
 	gc_extent->e.len = e->len;
+	printk(KERN_ERR "\n %s lba: %llu, pba: %llu e->len: %d", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	INIT_LIST_HEAD(&gc_extent->list);
 	/* 
 	 * We always want to add the extents in a PBA increasing order
@@ -717,8 +718,10 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 			bio_put(bio);
 			return -ENOMEM;
 		}
+		printk(KERN_ERR "\n %s page added to the bio ");
 	}
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
+	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu nr_pages: %d", __func__,  bio->bi_iter.bi_sector, nr_pages);
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_end_io = read_extent_done;
@@ -766,6 +769,7 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
 		gc_extent = list_entry(list_head, struct gc_extents, list);
 		ref = gc_extent->bio->bi_private;
 		refcount_inc(ref);
+		printk(KERN_ERR "\n %s bio::pba: %llu, bio::lba: %llu bio::len: %llu", __func__, bio->bi_iter.bi_sector, gc_extent->e.lba, bio_sectors(gc_extent->bio));
 		/* setup bio sets bio->bi_end_io = read_extent_done */
 		submit_bio(gc_extent->bio);
 	}
@@ -809,14 +813,14 @@ static int read_gc_extents(struct ctx *ctx)
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		count++;
 		gc_extent = list_entry(list_head, struct gc_extents, list);
-		printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len:%d ", gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+		printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len:%d ", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 		if (setup_extent_bio(ctx, gc_extent)) {
 			free_gc_list(ctx);
 			panic("Low memory! TODO: Write code to free memory from translation tables etc ");
 		}
 		gc_extent->bio->bi_private = ref;
 	}
-	printk(KERN_ERR "\n %s count: %d", __func__, count);
+	printk(KERN_ERR "\n %s gc_extents #count: %d", __func__, count);
 	last_extent = gc_extent;
 	read_all_bios_and_wait(ctx, last_extent);
 	printk(KERN_ERR "\n %s Read all the pbas in zone for gc! Done ", __func__);
@@ -976,7 +980,6 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		 */
 		if (e->lba > last_pba)
 			break;
-		temp.pba = pba;
 		if (e->lba < pba) {
 			/* 
 			 * Overlapping e found
@@ -1083,7 +1086,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 				goto done1;
 			}
 			gc_extent->e.len = s8;
-			gc_extent->bio = split;
+			gc_extent->e.bio = split;
 			new = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 			if (unlikely(!new)) {
 				panic("No memory, couldnt split! write better code!");
@@ -1094,6 +1097,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 			new->e.pba = gc_extent->e.pba + s8;
 			new->e.lba = gc_extent->e.lba + s8;
 			new->e.len = diff;
+			new->bio = bio;
 			/* Add new after gc_extent */
 			list_add(&new->list, &gc_extent->list);
 		}
@@ -1358,7 +1362,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	split = NULL;
 print_repeat:
 	lba = clone->bi_iter.bi_sector;
-	//printk(KERN_ERR "\n %s lba: %llu, nrsectors: %lu", __func__, bio->bi_iter.bi_sector, nr_sectors);
+	printk(KERN_ERR "\n %s lba: %llu, nrsectors: %lu", __func__, bio->bi_iter.bi_sector, nr_sectors);
 	e = lsdm_rb_geq(ctx, lba, print);
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
@@ -1403,13 +1407,20 @@ print_repeat:
 			bio_endio(clone);
 			break;
 		}
-		//printk(KERN_ERR "\n %s Searching: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu", __func__, lba, nr_sectors, e->lba, e->pba, e->len);
+		if (e->lba + e->len < lba) {
+			/* case of no overlap!, e should have been
+			 * NULL
+			 */
+			printk(KERN_ERR "\n **** %s e->lba + e->len <lba! e->lba: %llu e->len: %lu lba: %llu nr_sectors: %d \n", __func__, e->lba, e->len, lba, nr_sectors);
+			panic("e cannot be lesser than lba! ");
+		}
+		printk(KERN_ERR "\n %s Searching: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu", __func__, lba, nr_sectors, e->lba, e->pba, e->len);
 
 		if (e->lba > lba) {
 		/*               [eeeeeeeeeeee]
 			       [---------bio------] */
 			nr_sectors = e->lba - lba;
-			//printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
+			printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
 			split = bio_split(clone, nr_sectors, GFP_NOIO, ctx->bs);
 			if (!split) {
 				printk(KERN_ERR "\n Could not split the clone! ERR ");
@@ -1434,16 +1445,16 @@ print_repeat:
 			 */
 			continue;
 		}
-		else { //(e->lba <= lba)
+		else { //(e->lba <= lba) and (e->lba + e->len < lba)
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		     [---------bio------] */
 			overlap = e->lba + e->len - lba;
+			diff = lba - e->lba;
+			pba = e->pba + diff;
 			if (overlap < nr_sectors) {
-				if (overlap == 0) {
-					printk(KERN_ERR "\n **** %s e->lba <= lba  e->lba: %llu e->len: %lu lba: %llu overlap: %d nr_sectors: %d \n", __func__, e->lba, e->len, lba, overlap, nr_sectors);
-					panic("\n Overlap cannot be zero! ");
-				}
-
+				/* we need to read more after we read
+				 * in split
+				 */
 				split = bio_split(clone, overlap, GFP_NOIO, ctx->bs);
 				if (!split) {
 					printk(KERN_INFO "\n Could not split the clone! ERR ");
@@ -1461,11 +1472,9 @@ print_repeat:
 					return -ENOMEM;
 				}
 				bio_chain(split, clone);
-
-				pba = e->pba + lba - e->lba;
 				split->bi_iter.bi_sector = pba;
 				bio_set_dev(split, ctx->dev->bdev);
-			//	printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
+				printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
 				submit_bio(split);
 				/* Search for the next lba, as this
 				 * was processed */
@@ -1473,8 +1482,9 @@ print_repeat:
 				e = lsdm_rb_geq(ctx, lba, print);
 				continue;
 			} 
-			//else overlap == e->len
-			/* All the previous splits are chained
+			/* else overlap == nr_sectors, no further splitting
+			 * required!
+			 * All the previous splits are chained
 			 * to this last one. No more bios will
 			 * be submitted once this is
 			 * submitted
@@ -1486,14 +1496,14 @@ print_repeat:
 			split->bi_end_io = lsdm_subread_done;
 			read_ctx->clone = clone;
 
-			split->bi_iter.bi_sector = e->pba;
+			split->bi_iter.bi_sector = pba;
 			bio_set_dev(split, ctx->dev->bdev);
-			//printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(split), e->lba, e->pba, e->len);
+			printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(split), e->lba, e->pba, e->len);
 			submit_bio(split);
 			break;
 		}
 	}
-	//printk(KERN_INFO "\n %s end", __func__);
+	printk(KERN_INFO "\n %s end", __func__);
 	return 0;
 }
 
@@ -3897,9 +3907,6 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 				kmem_cache_free(ctx->subbio_ctx_cache, subbio_ctx);
 				goto fail;
 			}
-			/* Add a translation map entry for shortened
-			 * length
-			 */
 			subbio_ctx->extent.len = s8;
 		} 
 		else {
@@ -5086,10 +5093,10 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	 * Will work with timer based invocation later
 	 * init_timer(ctx->timer);
 	 */
-	ret = lsdm_gc_thread_start(ctx);
-	if (ret) {
-		goto free_metadata_pages;
-	}
+	//ret = lsdm_gc_thread_start(ctx);
+	//if (ret) {
+	//	goto free_metadata_pages;
+	//}
 
 	/*
 	if (register_shrinker(lsdm_shrinker))
