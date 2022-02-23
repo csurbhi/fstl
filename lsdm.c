@@ -39,7 +39,7 @@
 #include <linux/list_sort.h>
 #include <linux/sched.h>
 #include <linux/async.h>
-
+#include <linux/workqueue.h>
 #include "metadata.h"
 
 #define DM_MSG_PREFIX "lsdm"
@@ -147,7 +147,7 @@ static struct extent *_lsdm_rb_geq(struct rb_root *root, off_t lba, int print)
 			}
 		}
 	}
-	printk(KERN_ERR "\n did not find a natural match and so returning the next higher: %s ", (higher == NULL) ? "null" : "not null");
+	//printk(KERN_ERR "\n did not find a natural match and so returning the next higher: %s ", (higher == NULL) ? "null" : "not null");
 	return higher;
 }
 
@@ -167,7 +167,7 @@ static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba, int print)
 static struct extent * revmap_rb_search_geq(struct ctx *ctx, sector_t pba)
 {
 	struct rb_root *root = &ctx->rev_tbl_root;
-	unsigned int print = 1;
+	unsigned int print = 0;
 	struct extent * e;
 
 	e = _lsdm_rb_geq(root, pba, print);
@@ -862,6 +862,7 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio = gc_extent->bio;
 	gc_ctx = bio->bi_private;
 
+	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = ctx->gc_write_frontier;
 	nrsectors = bio_sectors(bio);
@@ -928,7 +929,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	/* Take a semaphore lock so that no two gc instances are
 	 * started in parallel.
 	 */
-	if (!down_trylock(&ctx->gc_lock)) {
+	if (!mutex_trylock(&ctx->gc_lock)) {
 		printk(KERN_ERR "\n GC is already running! zone_to_clean: %u count: %d", zone_to_clean, count);
 		dump_stack();
 		return -1;
@@ -1022,19 +1023,21 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	 */
 	read_gc_extents(ctx);
 
+	printk(KERN_ERR "%s:%d All GC extents read! \n", __func__, __LINE__);
+
 	/* Since our read_extents call, overwrites could have made
 	 * the blocks in this zone invalid. Thus we now take a 
 	 * write lock and then re-read the extents metadata; else we
 	 * will end up writing invalid blocks and loosing the
 	 * overwritten data
 	 */
-	down_write(&ctx->metadata_update_lock);
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
 		/* Reverse map stores PBA as e->lba and LBA as e->pba
 		 * This was done for code reuse between map and revmap
 		 * Thus e->lba is actually the PBA
 		 */
+		down_write(&ctx->metadata_update_lock);
 		e = revmap_rb_search_geq(ctx, gc_extent->e.pba);
 		/* entire extrents is lost by interim overwrites */
 		if (e->lba > (gc_extent->e.pba + gc_extent->e.len)) {
@@ -1096,8 +1099,9 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		}
 		// else we do nothing
 		gc_extent->e.pba = ctx->gc_write_frontier;
-		move_gc_write_frontier(ctx, s8);
 		write_gc_extent(ctx, gc_extent);
+		move_gc_write_frontier(ctx, s8);
+		printk(KERN_ERR "\n %s write pointer adjusted! ", __func__);
 		if (gc_extent->bio->bi_status != BLK_STS_OK) {
 			/* write error! disk is in a read mode! we
 			 * cannot perform any further GC
@@ -1108,17 +1112,19 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		ret = lsdm_update_range(ctx, &ctx->extent_tbl_root, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 		ret = lsdm_update_range(ctx, &ctx->rev_tbl_root, gc_extent->e.pba, gc_extent->e.lba, gc_extent->e.len);
 		add_revmap_entries(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+		up_write(&ctx->metadata_update_lock);
+		printk(KERN_ERR "\n %s extent entries updated!", __func__);
 		temp_ptr = list_next_entry(gc_extent, list);
 		list_head = &temp_ptr->list;
 		list_del(&gc_extent->list);
 		kmem_cache_free(ctx->gc_extents_cache, gc_extent);
 	}
-	up_write(&ctx->metadata_update_lock);
 	do_checkpoint(ctx);
 	/* Complete the GC and then sync the block device */
 	sync_blockdev(ctx->dev->bdev);
-	/* Free the zone */
-	mark_zone_free(ctx , zonenr);
+	/* Zone gets freed when the valid blocks count is adjusted and
+	 * becomes zero. This happens on writes.
+	 */
 	/* TODO: Mode: FG_GC */
 done1:
 	//printk(KERN_ERR "\n %s ctx:%llu, &ctx->gc_lock:%llu ", ctx, &ctx->gc_lock);
@@ -1132,17 +1138,10 @@ done1:
 
 done:
 	/* Release GC lock */
-	up(&ctx->gc_lock);
+	mutex_unlock(&ctx->gc_lock);
 	printk(KERN_ERR "\n %s going out! \n", __func__);
 	return 0;
 }
-/*
-
-	mark_zone_free(ctx , zonenr);
-	up(&ctx->gc_lock);
-	return (0);
-*/
-
 
 /*
  * TODO: When we want to mark a zone free create a bio with opf:
@@ -1160,7 +1159,7 @@ static int gc_thread_fn(void * data)
 	int zonenr, newzone;
 
 	wait_ms = gc_th->min_sleep_time;
-	sema_init(&ctx->gc_lock, 1);
+	mutex_init(&ctx->gc_lock);
 	printk(KERN_ERR "\n %s executing! ", __func__);
 	set_freezable();
 	do {
@@ -1197,6 +1196,7 @@ static int gc_thread_fn(void * data)
 		/* Doing this for now! ret part */
 		if (zonenr >= 0) {
 			lsdm_gc(ctx, zonenr, newzone, 0);
+			printk(KERN_ERR "\n zone: %d marked free! \n", zonenr);
 		} /*else {
 		    wait_ms = wait_ms* 2;
 		    continue;
@@ -1716,6 +1716,8 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	if (unlikely(NULL == bitmap)) {
 		panic("This is a ctx freezone bitmap bug!");
 	}
+
+	//printk(KERN_ERR "\n %s zonenr: %lu, bytenr: %d bitnr: %d bitmap[%d]: %d", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr]);
 
 	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
 		/* This bit was 1 and hence already free*/
@@ -3718,7 +3720,7 @@ void write_done(struct kref *kref)
 }
 
 
-void sub_write_done(void *data, async_cookie_t cookie)
+void sub_write_done(struct work_struct * w)
 {
 
 	struct lsdm_sub_bioctx *subbioctx = NULL;
@@ -3726,29 +3728,21 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	struct ctx *ctx;
 	sector_t lba, pba;
 	unsigned int len;
-	static unsigned long timeout = 100000;
+	static unsigned long timeout = 50000;
 
-	subbioctx = (struct lsdm_sub_bioctx *) data;
+	subbioctx = container_of(w, struct lsdm_sub_bioctx, work);
 	bioctx = rcu_dereference(subbioctx->bioctx);
-	ctx = subbioctx->bioctx->ctx;
-	if (wait_for_completion_timeout(&subbioctx->write_done, msecs_to_jiffies(timeout)) == 0)  {
-		if (spin_trylock(&subbioctx->spin_lock)) {
-			/* Could aquire lock, because
-			 * wait_for_completion_timeout() did not race with
-			 * bio_endio()
-			 */
-			atomic_inc(&ctx->nr_failed_writes);
-			bioctx->orig->bi_status =  -EAGAIN;
-			kref_put(&bioctx->ref, write_done);
-			return;
-		}
-	}
+	ctx = bioctx->ctx;
+	kref_put(&bioctx->ref, write_done);
+	/* Task completed successfully */
 	lba = subbioctx->extent.lba;
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
-	kref_put(&bioctx->ref, write_done);
 
+	/* for now updating the metadata in the write request itself
+	 * (part of debug)
+	 */
 	//printk(KERN_ERR "\n %s done; %llu at %llu len: %lu", __func__, lba, pba, len);
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
@@ -3757,6 +3751,7 @@ void sub_write_done(void *data, async_cookie_t cookie)
 	lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
+
 	//printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu done \n", __func__, lba);
 	return;
 }
@@ -3780,25 +3775,13 @@ static void lsdm_clone_endio(struct bio * clone)
 
 	subbioctx = clone->bi_private;
 	ctx = subbioctx->bioctx->ctx;
-	if (spin_trylock(&subbioctx->spin_lock)) {
-		/* Did not race with wait_for_completion_timeout() 
-		 * Reached here first 
-		 */
-		bio = subbioctx->bioctx->orig;
-		if (bio && bio->bi_status == BLK_STS_OK) {
-			bio->bi_status = clone->bi_status;
-			//printk(KERN_INFO "\n (%s) .. completing I/O......lba: %llu, pba: %llu, len: %lu &write_done: %llu", __func__, subbioctx->extent.lba, subbioctx->extent.pba, subbioctx->extent.len, &subbioctx->write_done);
-		} 
-		complete(&subbioctx->write_done);
-		/* bio_put can race with the wait_completion_timeout() */
-	} else {
-		/* wait_for_completion_timeout() timedout before the
-		 * bio could complete writing. We release subbioctx
-		 * here as it is never needed in the timeout case
-		 */
-		kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
-	}
+	bio = subbioctx->bioctx->orig;
+	if (bio && bio->bi_status == BLK_STS_OK) {
+		bio->bi_status = clone->bi_status;
+	} 
 	bio_put(clone);
+	INIT_WORK(&subbioctx->work, sub_write_done);
+	queue_work(ctx->writes_wq, &subbioctx->work);
 	return;
 }
 
@@ -3858,6 +3841,7 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		return -1;
 	}
 	
+	bio->bi_status = BLK_STS_OK;
 	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
 		//trace_printk("\n Insufficient memory!");
@@ -3881,7 +3865,6 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 	}
 	//printk(KERN_ERR "\n bioctx allocated from bioctx_cache, ptr: %p", bioctx);
-
 	atomic_inc(&ctx->nr_writes);
 	bioctx->orig = bio;
 	bioctx->ctx = ctx;
@@ -3918,6 +3901,7 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 			}
 			if (!(split = bio_split(clone, s8, GFP_NOIO, ctx->bs))){
 				//trace_printk("\n failed at bio_split! ");
+				kmem_cache_free(ctx->subbio_ctx_cache, subbio_ctx);
 				goto fail;
 			}
 			/* Add a translation map entry for shortened
@@ -3943,18 +3927,15 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		atomic_set(&ctx->ioidle, 0);
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
-		init_completion(&subbio_ctx->write_done);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
-		spin_lock_init(&subbio_ctx->spin_lock);
 
 		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
 		split->bi_private = subbio_ctx;
 		split->bi_end_io = lsdm_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
 		submit_bio(split);
-		cookie = async_schedule(sub_write_done, subbio_ctx);
 	} while (split != clone);
 
 	/* We might need padding when the original request is not block
@@ -4184,11 +4165,17 @@ static void mark_zone_occupied(struct ctx *ctx , int zonenr)
 		panic("\n Trying to set an invalid bit in the free zone bitmap. bytenr > bitmap_bytes");
 	}
 
+	/*
+	 * printk(KERN_ERR "\n %s zonenr: %d, bytenr: %d, bitnr: %d ", __func__, zonenr, bytenr, bitnr);
+	 *  printk(KERN_ERR "\n %s bitmap[%d]: %d ", __func__, bytenr, bitnr, bitmap[bytenr]);
+	 */
+
 	if ((bitmap[bytenr] & (1 << bitnr)) == 0) {
 		/* This function can be called multiple times for the
 		 * same zone. The bit is already unset and the zone 
 		 * is marked occupied already.
 		 */
+		//printk(KERN_ERR "\n %s zone is already occupied! bitmap[%d]: %d ", __func__, bytenr, bitnr, bitmap[bytenr]);
 		return;
 	}
 	/* This bit is set and the zone is free. We want to unset it
@@ -4581,6 +4568,10 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 		if ((*zonenr == get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba)) ||
 		    (*zonenr == get_zone_nr(ctx, ctx->ckpt->cur_gc_frontier_pba))) {
 			//trace_printk("\n zonenr: %d is our cur_frontier! not marking it free!", *zonenr);
+			spin_lock(&ctx->lock);
+			mark_zone_occupied(ctx , *zonenr);
+			spin_unlock(&ctx->lock);
+
 			entry = entry + 1;
 			*zonenr= *zonenr + 1;
 			i++;
@@ -4869,7 +4860,7 @@ static struct lsdm_shrinker {
 
 static void destroy_caches(struct ctx *ctx)
 {	
-	//kmem_cache_destroy(ctx->gc_extents_cache);
+	kmem_cache_destroy(ctx->gc_extents_cache);
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
 	kmem_cache_destroy(ctx->tm_page_cache);
 	kmem_cache_destroy(ctx->gc_rb_node_cache);
@@ -4923,14 +4914,15 @@ static int create_caches(struct ctx *ctx)
 	//trace_printk("\n gc_extents_cache initialized to address: %p", ctx->gc_extents_cache);
 	ctx->app_read_ctx_cache = kmem_cache_create("app_read_ctx_cache", sizeof(struct app_read_ctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->app_read_ctx_cache) {
-		goto destroy_subbio_ctx_cache;
-		//goto destroy_gc_extents_cache;
+		goto destroy_gc_extents_cache;
 	}
 	//trace_printk("\n app_read_ctx_cache initialized to address: %p", ctx->app_read_ctx_cache);
 	return 0;
 /* failed case */
-//destroy_gc_extents_cache:
-//	kmem_cache_destroy(ctx->gc_extents_cache);
+destroy_app_read_cache:
+	kmem_cache_destroy(ctx->app_read_ctx_cache);
+destroy_gc_extents_cache:
+	kmem_cache_destroy(ctx->gc_extents_cache);
 destroy_subbio_ctx_cache:
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
 destroy_gc_rb_node_cache:
@@ -4995,9 +4987,10 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 		goto put_dev;
 
 	disk_size = i_size_read(ctx->dev->bdev->bd_inode);
-	//printk(KERN_INFO "\n The disk size as read from the bd_inode: %llu", disk_size);
+	printk(KERN_INFO "\n The disk size as read from the bd_inode: %llu", disk_size);
 	//printk(KERN_INFO "\n max sectors: %llu", disk_size/512);
 	//printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
+	ctx->writes_wq = create_workqueue("writes_queue");
 	sema_init(&ctx->sit_kv_store_lock, 1);
 	sema_init(&ctx->tm_kv_store_lock, 1);
 
@@ -5170,6 +5163,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * that the wait_on_revmap_block_availability does try another
 	 * flush_translation_blocks path!
 	 */
+	async_synchronize_full();
 	flush_translation_blocks(ctx, cookie);
 	flush_translation_blocks(ctx, cookie);
 	//printk(KERN_ERR "\n translation blocks flushed! ");
@@ -5182,7 +5176,6 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	lsdm_free_rb_mappings(ctx);
 	remove_gc_rb_nodes(ctx, root->rb_node);
 	//init_completion(&write_done);
-	async_synchronize_full();
 	//wait_for_completion_timeout(&write_done, msecs_to_jiffies(timeout));
 	printk(KERN_ERR "\n RB mappings freed! ");
 	//printk(KERN_ERR "\n Nr of free blocks: %lld",  ctx->user_block_count);

@@ -1,7 +1,7 @@
-#include <linux/types.h>
 #include <linux/refcount.h>
 #include <linux/wait.h>
 #include <linux/async.h>
+#include <linux/workqueue.h>
 #include "format_metadata.h"
 
 /*
@@ -99,8 +99,7 @@ struct extent_entry {
 struct lsdm_sub_bioctx {
 	struct extent_entry extent;
 	struct lsdm_bioctx * bioctx;
-	struct completion write_done;
-	spinlock_t spin_lock;
+	struct work_struct work;
 };
 
 struct cur_zone_info {
@@ -266,7 +265,7 @@ struct ctx {
 	wait_queue_head_t rev_blk_flushq;
 	wait_queue_head_t ckptq;
 	struct page * revmap_page;
-	struct semaphore gc_lock;
+	struct mutex gc_lock;
 	struct semaphore sit_kv_store_lock;
 	struct semaphore tm_kv_store_lock;
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
@@ -289,6 +288,7 @@ struct ctx {
 	struct kref	ongoing_iocount;
 	atomic_t ioidle;
 	//struct timer_list timer_list;
+	struct workqueue_struct *writes_wq;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 
