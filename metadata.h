@@ -57,6 +57,7 @@ struct revmap_bioctx {
 	struct ctx * ctx;
 	struct page *page;
 	int retrial;
+	struct work_struct process_tm_work;
 };
 
 struct tm_page {
@@ -289,6 +290,8 @@ struct ctx {
 	atomic_t ioidle;
 	//struct timer_list timer_list;
 	struct workqueue_struct *writes_wq;
+	struct work_struct sit_work;
+	struct work_struct tb_work;
 };
 
 /* total size = xx bytes (64b). fits in 1 cache line 

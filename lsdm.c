@@ -2060,9 +2060,9 @@ void flush_sit_nodes(struct ctx *ctx, struct rb_node *node)
  * pages in a linked list.
  * We can then later flush all the sit page in one go
  */
-void flush_sit(void * data, async_cookie_t cookie)
+void flush_sit(struct work_struct *w)
 {
-	struct ctx *ctx = (struct ctx *) data;
+	struct ctx *ctx = container_of(w, struct ctx, sit_work);
 	struct rb_root *rb_root = &ctx->sit_rb_root;
 	struct rb_node *node = NULL;
 	struct blk_plug plug;
@@ -2248,7 +2248,7 @@ void wait_on_block_barrier(struct ctx * ctx)
 }
 
 int is_revmap_block_available(struct ctx *ctx, u64 pba);
-void flush_translation_blocks(void *, async_cookie_t);
+void flush_translation_blocks(struct work_struct * w);
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx);
 
 void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
@@ -2372,20 +2372,12 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 
 	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
 		atomic_set(&ctx->sit_flush_count, 0);
-		up(&ctx->sit_kv_store_lock);
-		async_schedule(flush_sit, ctx);
-		down_interruptible(&ctx->sit_kv_store_lock);
+		INIT_WORK(&ctx->sit_work, flush_sit);
+		queue_work(ctx->writes_wq, &ctx->sit_work);
 	}
 
 	//trace_printk("\n %s pba: %llu page_address: %p", __func__, pba, page_address(new->page));
 	return new;
-}
-
-/*TODO: IMPLEMENT 
- */
-void mark_segment_free(struct ctx *ctx, sector_t zonenr)
-{
-	return;
 }
 
 int update_gc_rb_tree(struct ctx *, unsigned int , u32 , u64 );
@@ -2861,9 +2853,9 @@ int read_translation_map(struct ctx *);
  * the disk by calling wait_for_ckpt_completion and ckpt_ref
  * The non blocking call is flush_tm_nodes
  */
-void flush_translation_blocks(void *data, async_cookie_t cookie)
+void flush_translation_blocks(struct work_struct *w)
 {
-	struct ctx * ctx = (struct ctx *) data;
+	struct ctx * ctx = container_of(w, struct ctx, tb_work);
 	struct rb_root *root = &ctx->tm_rb_root;
 	struct rb_node *node = NULL;
 	struct blk_plug plug;
@@ -3182,7 +3174,9 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 		/* Only one flush operation at a time 
 		* but we dont want to wait.
 		*/
-		async_schedule(flush_translation_blocks, ctx);
+
+		INIT_WORK(&ctx->tb_work, flush_translation_blocks);
+		queue_work(ctx->writes_wq, &ctx->tb_work);
 	}
 	return new_tmpage;
 }
@@ -3363,9 +3357,9 @@ void wait_on_refcount(struct ctx *ctx, refcount_t *ref)
 }
 
 
-void process_tm_entries(void *data, async_cookie_t cookie)
+void process_tm_entries(struct work_struct * w)
 {
-	struct revmap_bioctx * revmap_bio_ctx = (struct revmap_bioctx *) data;
+	struct revmap_bioctx * revmap_bio_ctx = container_of(w, struct revmap_bioctx, process_tm_work);
 	struct page *page = revmap_bio_ctx->page;
 	struct ctx * ctx = revmap_bio_ctx->ctx;
 
@@ -3381,7 +3375,6 @@ void revmap_blk_flushed(struct bio *bio)
 	struct ctx *ctx;
 	sector_t pba;
 	struct revmap_bioctx *revmap_bio_ctx = bio->bi_private;
-	async_cookie_t cookie;
 
 	ctx = revmap_bio_ctx->ctx;
 	pba = revmap_bio_ctx->revmap_pba;
@@ -3407,7 +3400,8 @@ void revmap_blk_flushed(struct bio *bio)
 	wake_up(&ctx->rev_blk_flushq);
 	atomic_dec(&ctx->nr_pending_writes);
 
-	cookie = async_schedule(process_tm_entries, revmap_bio_ctx);
+	INIT_WORK(&revmap_bio_ctx->process_tm_work, process_tm_entries);
+	queue_work(ctx->writes_wq, &revmap_bio_ctx->process_tm_work);
 }
 
 
@@ -3731,7 +3725,7 @@ void sub_write_done(struct work_struct * w)
 	static unsigned long timeout = 50000;
 
 	subbioctx = container_of(w, struct lsdm_sub_bioctx, work);
-	bioctx = rcu_dereference(subbioctx->bioctx);
+	bioctx = subbioctx->bioctx;
 	ctx = bioctx->ctx;
 	kref_put(&bioctx->ref, write_done);
 	/* Task completed successfully */
@@ -3819,7 +3813,6 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	struct blk_plug plug;
 	sector_t wf;
 	struct lsdm_ckpt *ckpt;
-	async_cookie_t cookie;
 
 	if (is_disk_full(ctx)) {
 		bio->bi_status = BLK_STS_NOSPC;
@@ -4048,7 +4041,8 @@ static void do_checkpoint(struct ctx *ctx)
 	spin_unlock(&ctx->ckpt_lock);
 
 	/*--------------------------------------------*/
-	flush_sit(ctx, cookie);
+	INIT_WORK(&ctx->sit_work, flush_sit);
+	flush_sit(&ctx->sit_work);
 	/*--------------------------------------------*/
 	//printk(KERN_ERR "\n sit pages flushed!");
 
@@ -4347,7 +4341,8 @@ int read_revmap(struct ctx *ctx)
 	if (flush_needed) {
 		async_cookie_t cookie;
 		//trace_printk("\n Why do we need to flush!!");
-		flush_translation_blocks(ctx, cookie);
+		INIT_WORK(&ctx->tb_work, flush_translation_blocks);
+		flush_translation_blocks(&ctx->tb_work);
 	}
 	return 0;
 }
@@ -5164,8 +5159,8 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * flush_translation_blocks path!
 	 */
 	async_synchronize_full();
-	flush_translation_blocks(ctx, cookie);
-	flush_translation_blocks(ctx, cookie);
+	INIT_WORK(&ctx->tb_work, flush_translation_blocks);
+	flush_translation_blocks(&ctx->tb_work);
 	//printk(KERN_ERR "\n translation blocks flushed! ");
 	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
 	do_checkpoint(ctx);
