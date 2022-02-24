@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 #define NR_ZONES 1
-#define NR_BLKS_IN_ZONE 1000
+#define NR_BLKS_IN_ZONE 100
 #define BLKSZ 4096
 
 int main(int argc, char *argv[])

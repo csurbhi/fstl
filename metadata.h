@@ -50,6 +50,7 @@ struct metadata_read_ctx {
 struct tm_page_write_ctx {
 	struct ctx *ctx;
 	struct tm_page *tm_page;
+	struct work_struct rm_tm_work;
 };
 
 struct revmap_bioctx {
@@ -70,6 +71,7 @@ struct sit_page_write_ctx {
 	struct ctx *ctx;
 	struct page *page;
 	sector_t sit_nr;
+	struct work_struct sit_work;
 };
 
 struct sit_page {

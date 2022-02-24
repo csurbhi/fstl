@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 #define NR_ZONES 1
-#define NR_BLKS_IN_ZONE 65535
+#define NR_BLKS_IN_ZONE 500
 #define BLKSZ 4096
 
 int main(int argc, char *argv[])
@@ -25,6 +25,7 @@ int main(int argc, char *argv[])
 		printf("\n");
 		return errno;
 	}
+
 
 
 	printf("\n Conducting write verification ....");
@@ -121,7 +122,6 @@ int main(int argc, char *argv[])
 	close(fd);
 	printf("\n Overwrites done ! ");
 
-	/*
 	printf("\n Read verifying the writes ......\n");
 	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
@@ -168,6 +168,6 @@ int main(int argc, char *argv[])
 		}
 	}
 	printf("\n");
-	close(fd);*/
+	close(fd);
 	return 0;
 }

@@ -38,7 +38,6 @@
 #include <linux/list.h>
 #include <linux/list_sort.h>
 #include <linux/sched.h>
-#include <linux/async.h>
 #include <linux/workqueue.h>
 #include "metadata.h"
 
@@ -763,12 +762,14 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
 	struct gc_extents *gc_extent;
 	struct blk_plug plug;
 	refcount_t * ref;
+	struct bio * bio;
 
 	blk_start_plug(&plug);
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
 		ref = gc_extent->bio->bi_private;
 		refcount_inc(ref);
+		bio = gc_extent->bio;
 		printk(KERN_ERR "\n %s bio::pba: %llu, bio::lba: %llu bio::len: %llu", __func__, bio->bi_iter.bi_sector, gc_extent->e.lba, bio_sectors(gc_extent->bio));
 		/* setup bio sets bio->bi_end_io = read_extent_done */
 		submit_bio(gc_extent->bio);
@@ -891,6 +892,8 @@ again:
 		}
 		panic("GC writes failed! Perhaps a resource error");
 	}
+	bio_free_pages(bio);
+	bio_put(bio);
 	return 0;
 }
 
@@ -1086,7 +1089,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 				goto done1;
 			}
 			gc_extent->e.len = s8;
-			gc_extent->e.bio = split;
+			gc_extent->bio = split;
 			new = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 			if (unlikely(!new)) {
 				panic("No memory, couldnt split! write better code!");
@@ -1329,7 +1332,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	struct bio *split = NULL;
 	sector_t lba, pba;
 	struct extent *e;
-	unsigned nr_sectors, overlap;
+	unsigned nr_sectors, overlap, diff;
 
 	struct app_read_ctx *read_ctx;
 	struct bio *clone;
@@ -1362,7 +1365,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	split = NULL;
 print_repeat:
 	lba = clone->bi_iter.bi_sector;
-	printk(KERN_ERR "\n %s lba: %llu, nrsectors: %lu", __func__, bio->bi_iter.bi_sector, nr_sectors);
+	//printk(KERN_ERR "\n %s lba: %llu, nrsectors: %lu", __func__, bio->bi_iter.bi_sector, nr_sectors);
 	e = lsdm_rb_geq(ctx, lba, print);
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
@@ -1414,13 +1417,13 @@ print_repeat:
 			printk(KERN_ERR "\n **** %s e->lba + e->len <lba! e->lba: %llu e->len: %lu lba: %llu nr_sectors: %d \n", __func__, e->lba, e->len, lba, nr_sectors);
 			panic("e cannot be lesser than lba! ");
 		}
-		printk(KERN_ERR "\n %s Searching: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu", __func__, lba, nr_sectors, e->lba, e->pba, e->len);
+		//printk(KERN_ERR "\n %s Searching: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu", __func__, lba, nr_sectors, e->lba, e->pba, e->len);
 
 		if (e->lba > lba) {
 		/*               [eeeeeeeeeeee]
 			       [---------bio------] */
 			nr_sectors = e->lba - lba;
-			printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
+			//printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
 			split = bio_split(clone, nr_sectors, GFP_NOIO, ctx->bs);
 			if (!split) {
 				printk(KERN_ERR "\n Could not split the clone! ERR ");
@@ -1474,7 +1477,7 @@ print_repeat:
 				bio_chain(split, clone);
 				split->bi_iter.bi_sector = pba;
 				bio_set_dev(split, ctx->dev->bdev);
-				printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
+				//printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
 				submit_bio(split);
 				/* Search for the next lba, as this
 				 * was processed */
@@ -1498,12 +1501,12 @@ print_repeat:
 
 			split->bi_iter.bi_sector = pba;
 			bio_set_dev(split, ctx->dev->bdev);
-			printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(split), e->lba, e->pba, e->len);
+			//printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(split), e->lba, e->pba, e->len);
 			submit_bio(split);
 			break;
 		}
 	}
-	printk(KERN_INFO "\n %s end", __func__);
+	//printk(KERN_INFO "\n %s end", __func__);
 	return 0;
 }
 
@@ -1924,8 +1927,8 @@ void ckpt_flushed(struct bio *bio)
 {
 	struct ctx *ctx = bio->bi_private;
 
-	bio_put(bio);
 	bio_free_pages(bio);
+	bio_put(bio);
 	spin_lock(&ctx->ckpt_lock);
 	if(ctx->flag_ckpt) {
 		atomic_dec(&ctx->ckpt_ref);
@@ -2287,9 +2290,10 @@ void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 	//spin_unlock(&ctx->rev_flush_lock);
 }
 
-void remove_sit_blk_kv_store(void * data, async_cookie_t cookie)
+void remove_sit_blk_kv_store(struct work_struct *w)
 {
-	struct sit_page_write_ctx * sit_page_write_ctx = (struct sit_page_write_ctx *) data;
+	struct sit_page_write_ctx * sit_page_write_ctx = 
+			container_of(w, struct sit_page_write_ctx, sit_work);
 	struct ctx *ctx = sit_page_write_ctx->ctx;
 	struct page * page = sit_page_write_ctx->page;
        	u64 sit_nr = sit_page_write_ctx->sit_nr;
@@ -2382,6 +2386,9 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 
 	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
 		atomic_set(&ctx->sit_flush_count, 0);
+		/* We dont want to wait for the flush to complete,
+		 * just initiate here
+		 */
 		INIT_WORK(&ctx->sit_work, flush_sit);
 		queue_work(ctx->writes_wq, &ctx->sit_work);
 	}
@@ -2676,9 +2683,9 @@ void remove_tm_entry_kv_store(struct ctx *ctx, u64 lba)
  * remove the page from RB tree and reduce the total
  * count, through the remove_tm_blk_kv_store()
  */
-void remove_tm_blk_kv_store(void * data, async_cookie_t cookie)
+void remove_tm_blk_kv_store(struct work_struct * w)
 {
-	struct tm_page_write_ctx *tm_page_write_ctx = (struct tm_page_write_ctx *) data;
+	struct tm_page_write_ctx *tm_page_write_ctx = container_of(w, struct tm_page_write_ctx, rm_tm_work);
 	struct rb_node *parent = NULL;
 	struct tm_page *new;
 	struct ctx *ctx = tm_page_write_ctx->ctx;
@@ -2724,7 +2731,6 @@ void write_tmbl_complete(struct bio *bio)
 	struct list_head *temp;
 	struct revmap_meta_inmem * revmap_bio_ctx;
 	sector_t blknr;
-	async_cookie_t cookie;
 
 	cant_sleep();
 	tm_page_write_ctx = (struct tm_page_write_ctx *) bio->bi_private;
@@ -2752,7 +2758,8 @@ void write_tmbl_complete(struct bio *bio)
 	 * write has been attempted
 	 */	
 	if (!test_bit(PG_dirty, &page->flags)) {
-		async_schedule(remove_tm_blk_kv_store, tm_page_write_ctx);
+		INIT_WORK(&tm_page_write_ctx->rm_tm_work, remove_tm_blk_kv_store);
+		queue_work(ctx->writes_wq, &tm_page_write_ctx->rm_tm_work);
 	} else {
 		kmem_cache_free(ctx->tm_page_write_cache, tm_page_write_ctx);
 	}
@@ -2935,7 +2942,7 @@ void flush_count_tm_blocks(struct ctx *ctx, bool flush, int nrscan)
 	return;
 }
 
-void remove_sit_blk_kv_store(void * data, async_cookie_t cookie);
+void remove_sit_blk_kv_store(struct work_struct *);
 
 void write_sitbl_complete(struct bio *bio)
 {
@@ -2944,6 +2951,7 @@ void write_sitbl_complete(struct bio *bio)
 	struct page *page;
 	sector_t blknr;
 
+	cant_sleep();
 	sit_ctx = (struct sit_page_write_ctx *) bio->bi_private;
 	ctx = sit_ctx->ctx;
 	page = sit_ctx->page;
@@ -2971,8 +2979,8 @@ void write_sitbl_complete(struct bio *bio)
 	 * TODO: store the sector address directly 
 	 */
 
-	async_schedule(remove_sit_blk_kv_store, sit_ctx);
-
+	INIT_WORK(&sit_ctx->sit_work, remove_sit_blk_kv_store);
+	queue_work(ctx->writes_wq, &sit_ctx->sit_work);
 	atomic_dec(&ctx->sit_flush_count);
 }
 
@@ -3377,6 +3385,10 @@ void process_tm_entries(struct work_struct * w)
 	add_block_based_translation(ctx, page);
 	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
 	__free_pages(page, 0);
+	/* No one is waiting for this to complete as this is queued
+	 * work in itself
+	 */
+	flush_scheduled_work();
 }
 
 
@@ -3410,6 +3422,9 @@ void revmap_blk_flushed(struct bio *bio)
 	wake_up(&ctx->rev_blk_flushq);
 	atomic_dec(&ctx->nr_pending_writes);
 
+	/* queuing this work as we cannot use a sleeping semaphore in
+	 * bio_endio irq context 
+	 */
 	INIT_WORK(&revmap_bio_ctx->process_tm_work, process_tm_entries);
 	queue_work(ctx->writes_wq, &revmap_bio_ctx->process_tm_work);
 }
@@ -3711,13 +3726,15 @@ void write_done(struct kref *kref)
 	struct bio *bio;
 	struct lsdm_bioctx * lsdm_bioctx;
 	struct ctx *ctx;
+	static int count = 0;
 
 	lsdm_bioctx = container_of(kref, struct lsdm_bioctx, ref);
 	bio = lsdm_bioctx->orig;
 	bio_endio(bio);
 
 	ctx = lsdm_bioctx->ctx;
-	//printk(KERN_ERR "\n %s bioctx released to bioctx_cache, %p ", __func__, lsdm_bioctx);
+	count ++;
+	//printk(KERN_ERR "\n %s bioctx released to bioctx_cache, %p count:%d", __func__, lsdm_bioctx, count);
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	//kref_put(&ctx->ongoing_iocount, lsdm_is_ioidle);
 	//atomic_dec(&ctx->nr_writes);
@@ -3733,6 +3750,7 @@ void sub_write_done(struct work_struct * w)
 	sector_t lba, pba;
 	unsigned int len;
 	static unsigned long timeout = 50000;
+	static int count = 0;
 
 	subbioctx = container_of(w, struct lsdm_sub_bioctx, work);
 	bioctx = subbioctx->bioctx;
@@ -3747,7 +3765,8 @@ void sub_write_done(struct work_struct * w)
 	/* for now updating the metadata in the write request itself
 	 * (part of debug)
 	 */
-	//printk(KERN_ERR "\n %s done; %llu at %llu len: %lu", __func__, lba, pba, len);
+	count++;
+	//printk(KERN_ERR "\n %s done; %llu at %llu len: %lu count: %d", __func__, lba, pba, len, count);
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
 	add_revmap_entries(ctx, lba, pba, len);
@@ -3823,6 +3842,7 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	struct blk_plug plug;
 	sector_t wf;
 	struct lsdm_ckpt *ckpt;
+	static int count = 0;
 
 	if (is_disk_full(ctx)) {
 		bio->bi_status = BLK_STS_NOSPC;
@@ -3855,7 +3875,6 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		 */
 		return -ENOMEM;
 	}
-
 	bioctx = kmem_cache_alloc(ctx->bioctx_cache, GFP_KERNEL);
 	if (!bioctx) {
 		//trace_printk("\n Insufficient memory!");
@@ -3867,7 +3886,8 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		 */
 		return -ENOMEM;
 	}
-	//printk(KERN_ERR "\n bioctx allocated from bioctx_cache, ptr: %p", bioctx);
+	count++;
+	//printk(KERN_ERR "\n %s bioctx allocated from bioctx_cache, ptr: %p count: %d" , __func__, bioctx, count);
 	atomic_inc(&ctx->nr_writes);
 	bioctx->orig = bio;
 	bioctx->ctx = ctx;
@@ -3885,6 +3905,7 @@ static int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
 		if (!subbio_ctx) {
 			//trace_printk("\n insufficient memory!");
+			kmem_cache_free(ctx->bioctx_cache, bioctx);
 			goto fail;
 		}
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
@@ -4033,7 +4054,6 @@ struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
  */
 static void do_checkpoint(struct ctx *ctx)
 {
-	async_cookie_t cookie;
 	//struct blk_plug plug;
 
 	//trace_printk("Inside %s" , __func__);
@@ -4051,7 +4071,7 @@ static void do_checkpoint(struct ctx *ctx)
 	INIT_WORK(&ctx->sit_work, flush_sit);
 	flush_sit(&ctx->sit_work);
 	/*--------------------------------------------*/
-	//printk(KERN_ERR "\n sit pages flushed!");
+	printk(KERN_ERR "\n sit pages flushed!");
 
 	//blk_start_plug(&plug);
 	flush_revmap_bitmap(ctx);
@@ -4346,7 +4366,6 @@ int read_revmap(struct ctx *ctx)
 	}
 	//printk("\n %s flush_needed: %d", __func__, flush_needed);
 	if (flush_needed) {
-		async_cookie_t cookie;
 		//trace_printk("\n Why do we need to flush!!");
 		INIT_WORK(&ctx->tb_work, flush_translation_blocks);
 		flush_translation_blocks(&ctx->tb_work);
@@ -5141,14 +5160,12 @@ free_ctx:
 static void ls_dm_dev_exit(struct dm_target *dm_target)
 {
 	struct ctx *ctx = dm_target->private;
-	async_cookie_t cookie;
 	struct rb_root *root = &ctx->gc_rb_root;
 	//struct completion write_done;
 	unsigned long timeout = 99999;
 
 	sync_blockdev(ctx->dev->bdev);
 	schedule();
-	async_synchronize_full();
 	//printk(KERN_ERR "\n Inside dtr! About to call flush_revmap_entries()");
 
 	flush_revmap_entries(ctx);
@@ -5165,7 +5182,6 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * that the wait_on_revmap_block_availability does try another
 	 * flush_translation_blocks path!
 	 */
-	async_synchronize_full();
 	INIT_WORK(&ctx->tb_work, flush_translation_blocks);
 	flush_translation_blocks(&ctx->tb_work);
 	//printk(KERN_ERR "\n translation blocks flushed! ");
@@ -5177,6 +5193,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 */
 	lsdm_free_rb_mappings(ctx);
 	remove_gc_rb_nodes(ctx, root->rb_node);
+	kmem_cache_free(ctx->gc_extents_cache, ctx->gc_extents);
 	//init_completion(&write_done);
 	//wait_for_completion_timeout(&write_done, msecs_to_jiffies(timeout));
 	printk(KERN_ERR "\n RB mappings freed! ");
@@ -5194,7 +5211,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * del_timer_sync(&ctx->timer_list);
 	 */
 	//trace_printk("\n caches destroyed! \n");
-	lsdm_gc_thread_stop(ctx);
+	//lsdm_gc_thread_stop(ctx);
 	//trace_printk("\n gc thread stopped! \n");
 	bioset_exit(ctx->bs);
 	//trace_printk("\n exited from bioset \n");
@@ -5209,7 +5226,6 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	printk(KERN_ERR "\n nr_writes: %llu", atomic_read(&ctx->nr_writes));
 	printk(KERN_ERR "\n nr_failed_writes: %llu", atomic_read(&ctx->nr_failed_writes));
 	destroy_caches(ctx);
-	printk(KERN_ERR "\n nr_writes: %llu", atomic_read(&ctx->nr_writes));
 	kfree(ctx);
 	//trace_printk("\n ctx memory freed!\n");
 	printk(KERN_ERR "\n Goodbye World!\n");
