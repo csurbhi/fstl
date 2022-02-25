@@ -222,6 +222,7 @@ static int check_node_contents(struct rb_node *node)
 	if (next  && next->lba == e->lba) {
 		printk(KERN_ERR "\n LBA corruption (next) ! lba: %lld is present in two nodes!", next->lba);
 		printk(KERN_ERR "\n next->lba: %lld next->pba: %lld next->len: %d", next->lba, next->pba, next->len);
+		dump_stack();
 		return -1;
 	}
 
@@ -2305,6 +2306,7 @@ void remove_sit_blk_kv_store(struct work_struct *w)
 	new = search_sit_blk(ctx, sit_nr);
 	if (!new) {
 		up(&ctx->sit_kv_store_lock);
+		kmem_cache_free(ctx->sit_ctx_cache, sit_page_write_ctx);
 		return;
 	}
 
@@ -2312,11 +2314,13 @@ void remove_sit_blk_kv_store(struct work_struct *w)
 	if (!test_bit(PG_dirty, &page->flags)) {
 		rb_erase(&new->rb, rb_root);
 		__free_pages(page, 0);
+		kmem_cache_free(ctx->sit_page_cache, new);
 		atomic_dec(&ctx->nr_sit_pages);
 	}
 	spin_unlock(&ctx->sit_flush_lock);
 	/*--------------------------------------------*/
 	up(&ctx->sit_kv_store_lock);
+	kmem_cache_free(ctx->sit_ctx_cache, sit_page_write_ctx);
 }
 
 
@@ -2698,6 +2702,7 @@ void remove_tm_blk_kv_store(struct work_struct * w)
 	new = search_tm_kv_store(ctx, blknr, &parent);
 	if (!new) {
 		up(&ctx->tm_kv_store_lock);
+		kmem_cache_free(ctx->tm_page_write_cache, tm_page_write_ctx);
 		return;
 	}
 
@@ -2981,7 +2986,6 @@ void write_sitbl_complete(struct bio *bio)
 
 	INIT_WORK(&sit_ctx->sit_work, remove_sit_blk_kv_store);
 	queue_work(ctx->writes_wq, &sit_ctx->sit_work);
-	atomic_dec(&ctx->sit_flush_count);
 }
 
 
@@ -3007,6 +3011,10 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	page = sit_page->page;
 	if (!page)
 		return;
+	/* pba denotes a relative sit blknr that is 4096 sized
+	 * bio works on a LBA that is sector sized.
+	 */
+	pba = sit_page->blknr;
 
 	//trace_printk("\n sit page address: %p ", page_address(page));
 
@@ -3037,11 +3045,12 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 
 	sit_ctx->ctx = ctx;
 	sit_ctx->page = page;
-	sit_ctx->sit_nr = (pba - ctx->sb->sit_pba) / NR_SECTORS_IN_BLK;
+	/* sit_pba is a sector aligned LBA */
+	sit_ctx->sit_nr = pba;
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	/* Sector addressing */
-	pba = (sit_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->sit_pba;
+	pba = (pba * NR_SECTORS_IN_BLK) + ctx->sb->sit_pba;
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_private = sit_ctx;
 	bio->bi_end_io = write_sitbl_complete;
@@ -3050,11 +3059,11 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	if(ctx->flag_ckpt)
 		atomic_inc(&ctx->ckpt_ref);
 	spin_unlock(&ctx->ckpt_lock);
-	/*--------------------------------------------*/
+	/*--------------------------------------------*/	
 	clear_bit(PG_dirty, &page->flags);
 	/*-------------------------*/
 	submit_bio(bio);
-}
+}	
 
 void flush_count_sit_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
 {	
@@ -3157,10 +3166,14 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	clear_bit(PG_dirty, &new_tmpage->page->flags);
 
 	//printk("\n %s: lba: %lu blknr: %lu  NR_SECTORS_IN_BLK * TM_ENTRIES_BLK: %d \n", __func__, lba, blknr, NR_SECTORS_IN_BLK * TM_ENTRIES_BLK);
-	/* Testing */
-	tm_entry = (struct tm_entry *) page_address(new_tmpage->page);
-	read_extents_from_block(ctx, tm_entry, TM_ENTRIES_BLK);
-	/* Until here */
+	/* We do not read extents from block because at boot time we
+	 * have created the extent tree for the entire disk. We add tm
+	 * page kv store only when we have to update, which happens in
+	 * memory first and then gets flushed to the disk.
+	 *
+	 * tm_entry = (struct tm_entry *) page_address(new_tmpage->page);
+	 * read_extents_from_block(ctx, tm_entry, TM_ENTRIES_BLK, 0);
+	 */
 
 	/* Add this page to a RB tree based KV store.
 	 * Key is: blknr for this corresponding block
@@ -3385,10 +3398,6 @@ void process_tm_entries(struct work_struct * w)
 	add_block_based_translation(ctx, page);
 	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
 	__free_pages(page, 0);
-	/* No one is waiting for this to complete as this is queued
-	 * work in itself
-	 */
-	flush_scheduled_work();
 }
 
 
@@ -4067,12 +4076,14 @@ static void do_checkpoint(struct ctx *ctx)
 	/*--------------------------------------------*/
 	spin_unlock(&ctx->ckpt_lock);
 
+	flush_scheduled_work();
 	/*--------------------------------------------*/
 	INIT_WORK(&ctx->sit_work, flush_sit);
 	flush_sit(&ctx->sit_work);
 	/*--------------------------------------------*/
 	printk(KERN_ERR "\n sit pages flushed!");
 
+	flush_scheduled_work();
 	//blk_start_plug(&plug);
 	flush_revmap_bitmap(ctx);
 	update_checkpoint(ctx);
@@ -4082,6 +4093,7 @@ static void do_checkpoint(struct ctx *ctx)
 	 * found its way on the disk
 	 */
 
+	flush_scheduled_work();
 	/*--------------------------------------------*/
 	flush_checkpoint(ctx);
 	//blk_finish_plug(&plug);
@@ -4093,6 +4105,7 @@ static void do_checkpoint(struct ctx *ctx)
 	spin_lock(&ctx->ckpt_lock);
 	ctx->flag_ckpt = 0;
 	spin_unlock(&ctx->ckpt_lock);
+	flush_scheduled_work();
 }
 
 /* How do you know that recovery is necessary?
@@ -5186,6 +5199,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	flush_translation_blocks(&ctx->tb_work);
 	//printk(KERN_ERR "\n translation blocks flushed! ");
 	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
+	flush_scheduled_work();
 	do_checkpoint(ctx);
 	//trace_printk("\n checkpoint done!");
 	/* If we are here, then there was no crash while writing out
