@@ -2704,6 +2704,93 @@ void remove_tm_blk_kv_store(struct ctx * ctx, sector_t blknr)
 	return;
 }
 
+void remove_translation_pages(struct ctx *ctx, struct rb_node *node)
+{
+	struct rb_node *left=NULL, *right=NULL;
+	struct tm_page *tm_page;
+	struct page *page;
+
+	tm_page = rb_entry(node, struct tm_page, rb);
+	if (!tm_page)
+		return;
+
+	page = tm_page->page;
+	if (!page)
+		return;
+
+	left = node->rb_left;
+	right = node->rb_right;
+
+	rb_erase(&tm_page->rb, &ctx->tm_rb_root);
+	kmem_cache_free(ctx->tm_page_cache, tm_page);
+	__free_pages(page, 0);
+	printk(KERN_ERR "\n %s: Page freed! ", __func__);
+
+	if (node->rb_left)
+		remove_translation_pages(ctx, left);
+	if (node->rb_right)
+		remove_translation_pages(ctx, right);
+	return;
+
+}
+
+void free_translation_pages(struct ctx *ctx)
+{
+	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_node *node;
+
+	node = root->rb_node;
+	if (!node) {
+		printk(KERN_ERR "\n %s tm node is NULL!", __func__);
+		return;
+	}
+	remove_translation_pages(ctx, node);
+}
+
+void remove_sit_pages(struct ctx *ctx, struct rb_node *node)
+{
+	struct rb_node *left=NULL, *right=NULL;
+	struct sit_page *sit_page;
+	struct page *page;
+
+	sit_page = rb_entry(node, struct sit_page, rb);
+	if (!sit_page) {
+		printk(KERN_ERR "\n sit_page is NULL!");
+		return;
+	}
+	page = sit_page->page;
+	if (!page)
+		return;
+
+
+	left = node->rb_left;
+	right = node->rb_right;
+
+	rb_erase(&sit_page->rb, &ctx->tm_rb_root);
+	kmem_cache_free(ctx->sit_page_cache, sit_page);
+	__free_pages(page, 0);
+	printk(KERN_ERR "\n %s: Page freed! ", __func__);
+
+	if (node->rb_left)
+		remove_sit_pages(ctx, left);
+	if (node->rb_right)
+		remove_sit_pages(ctx, right);
+	return;
+
+}
+
+void free_sit_pages(struct ctx *ctx)
+{
+	struct rb_root *root = &ctx->sit_rb_root;
+	struct rb_node *node;
+
+	node = root->rb_node;
+	if (!node) {
+		printk(KERN_ERR "\n %s tm node is NULL!", __func__);
+		return;
+	}
+	remove_sit_pages(ctx, node);
+}
 
 /*
  * Note: 
@@ -2836,8 +2923,8 @@ void flush_translation_blocks(struct work_struct *w)
 	flush_tm_nodes(node, ctx);
 	mutex_unlock(&ctx->tm_lock);
 	//blk_finish_plug(&plug);	
-	printk(KERN_ERR "\n %s flushed: %d pages ", __func__, atomic_read(&ctx->tm_ref));
 	atomic_dec(&ctx->tm_ref);
+	printk(KERN_ERR "\n %s flushed: %d pages ", __func__, atomic_read(&ctx->tm_ref));
 	wait_event(ctx->tmq, (!atomic_read(&ctx->tm_ref)));
 	//printk(KERN_INFO "\n %s done!!", __func__);
 }
@@ -2905,6 +2992,7 @@ void write_sitbl_complete(struct bio *bio)
 
 	atomic_dec(&ctx->sit_ref);
 	wake_up(&ctx->sitq);
+	kmem_cache_free(ctx->sit_ctx_cache, sit_ctx);
 }
 
 
@@ -3971,13 +4059,12 @@ struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
  */
 static void do_checkpoint(struct ctx *ctx)
 {
-	//struct blk_plug plug;
-
 	printk("Inside %s" , __func__);
 	/*--------------------------------------------*/
 	INIT_WORK(&ctx->sit_work, flush_sit);
 	flush_sit(&ctx->sit_work);
 	printk(KERN_ERR "\n sit pages flushed!");
+	free_sit_pages(ctx);
 	/*--------------------------------------------*/
 
 	flush_revmap_bitmap(ctx);
@@ -3991,7 +4078,6 @@ static void do_checkpoint(struct ctx *ctx)
 	spin_lock(&ctx->ckpt_lock);
 	ctx->flag_ckpt = 0;
 	spin_unlock(&ctx->ckpt_lock);
-	//flush_workqueue(ctx->writes_wq);
 }
 
 /* How do you know that recovery is necessary?
@@ -5079,11 +5165,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	/* Wait for the ALL the translation pages to be flushed to the
 	 * disk. The removal work is queued.
 	 */
-	//wait_for_ckpt_completion(ctx);
-	//flush_workqueue(ctx->writes_wq);
-	/* here we know that if the removal function was called, it
-	 * has completed execution.
-	 */
+	free_translation_pages(ctx);	
 	//printk(KERN_ERR "\n translation blocks flushed! ");
 	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
 	do_checkpoint(ctx);
