@@ -47,12 +47,6 @@ struct metadata_read_ctx {
 	refcount_t ref;
 };
 
-struct tm_page_write_ctx {
-	struct ctx *ctx;
-	struct tm_page *tm_page;
-	struct work_struct rm_tm_work;
-};
-
 struct revmap_bioctx {
 	u64 revmap_pba;			/* PBA where the revmap entries should be written.*/
 	struct ctx * ctx;
@@ -247,7 +241,6 @@ struct ctx {
 	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
 	struct kmem_cache *reflist_cache;
-	struct kmem_cache *tm_page_write_cache;
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
 	struct kmem_cache *gc_rb_node_cache;
@@ -266,9 +259,12 @@ struct ctx {
 					 */
 	wait_queue_head_t refq;
 	wait_queue_head_t rev_blk_flushq;
-	wait_queue_head_t ckptq;
+	wait_queue_head_t sitq;
+	wait_queue_head_t tmq;
 	struct page * revmap_page;
 	struct mutex gc_lock;
+	struct mutex tm_lock;
+	struct mutex sit_lock;
 	struct semaphore sit_kv_store_lock;
 	struct semaphore tm_kv_store_lock;
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
@@ -283,7 +279,8 @@ struct ctx {
 	atomic_t nr_pending_writes;
 	atomic_t nr_sit_pages;
 	atomic_t nr_tm_pages;
-	atomic_t ckpt_ref;
+	atomic_t sit_ref;
+	atomic_t tm_ref;
 	unsigned int 	nr_invalid_zones;
 	unsigned int 	user_block_count;
 	struct crypto_shash *s_chksum_driver;
@@ -306,8 +303,3 @@ struct extent {
 	atomic_t refs[3];
 	atomic_t total_refs;
 }; /* xx bytes including padding after 'rb', xx on 32-bit */
-
-struct sit_page * search_sit_kv_store(struct ctx *ctx, sector_t pba, struct rb_node **);
-struct sit_page * add_sit_entry_kv_store(struct ctx *ctx, sector_t pba);
-
-
