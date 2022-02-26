@@ -8,5 +8,5 @@ echo ""
 sudo ./readverify
 sudo ./readverify
 sleep 1
-sudo dmsetup remove TL0
-sudo rmmod lsdm 
+#sudo dmsetup remove TL0
+#sudo rmmod lsdm 
