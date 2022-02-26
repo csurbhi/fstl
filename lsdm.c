@@ -2838,6 +2838,7 @@ void flush_translation_blocks(struct work_struct *w)
 	//blk_finish_plug(&plug);	
 	printk(KERN_ERR "\n %s flushed: %d pages ", __func__, atomic_read(&ctx->tm_ref));
 	atomic_dec(&ctx->tm_ref);
+	wait_event(ctx->tmq, (!atomic_read(&ctx->tm_ref)));
 	//printk(KERN_INFO "\n %s done!!", __func__);
 }
 
@@ -4920,6 +4921,8 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	atomic_set(&ctx->nr_failed_writes, 0);
 	atomic_set(&ctx->revmap_entry_nr, 0);
 	atomic_set(&ctx->revmap_sector_nr, 0);
+	atomic_set(&ctx->tm_ref, 0);
+	atomic_set(&ctx->sit_ref, 0);
 	ctx->target = 0;
 	//trace_printk("\n About to read metadata! 1 \n");
 	//trace_printk("\n About to read metadata! 2 \n");
@@ -5072,7 +5075,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 */
 	flush_workqueue(ctx->writes_wq);
 	//INIT_WORK(&ctx->tb_work, flush_translation_blocks);
-	//flush_translation_blocks(&ctx->tb_work);
+	flush_translation_blocks(&ctx->tb_work);
 	/* Wait for the ALL the translation pages to be flushed to the
 	 * disk. The removal work is queued.
 	 */
