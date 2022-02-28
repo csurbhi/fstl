@@ -2842,6 +2842,10 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	if (!page)
 		return;
 
+	if (!PageDirty(tm_page->page))
+		return;
+
+
 	//printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
 
 	clear_bit(PG_dirty, &page->flags);
@@ -2860,7 +2864,7 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	/* blknr is the relative blknr within the translation blocks
 	 */
 	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
-	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %lu", __func__,  page_address(page), pba);
+	printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %lu", __func__,  page_address(page), pba);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_iter.bi_sector = pba;
@@ -2925,7 +2929,6 @@ void flush_translation_blocks(struct work_struct *w)
 	//blk_finish_plug(&plug);	
 	atomic_dec(&ctx->tm_ref);
 	printk(KERN_ERR "\n %s flushed: %d pages ", __func__, atomic_read(&ctx->tm_ref));
-	wait_event(ctx->tmq, (!atomic_read(&ctx->tm_ref)));
 	//printk(KERN_INFO "\n %s done!!", __func__);
 }
 
@@ -3018,6 +3021,12 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	page = sit_page->page;
 	if (!page)
 		return;
+
+	if (!PageDirty(sit_page->page))
+		return;
+
+
+	clear_bit(PG_dirty, &page->flags);
 	/* pba denotes a relative sit blknr that is 4096 sized
 	 * bio works on a LBA that is sector sized.
 	 */
@@ -3662,7 +3671,6 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 			atomic_set(&ctx->revmap_entry_nr, 0);
 			atomic_inc(&ctx->revmap_sector_nr);
 			if (NR_SECTORS_PER_BLK == (sector_nr + 1)) {
-				//trace_printk("\n Waiting on block barrier! \n");
 				page = ctx->revmap_page;
 				BUG_ON(page == NULL);
 				flush_revmap_block_disk(ctx, page);
@@ -5162,6 +5170,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	flush_workqueue(ctx->writes_wq);
 	//INIT_WORK(&ctx->tb_work, flush_translation_blocks);
 	flush_translation_blocks(&ctx->tb_work);
+	wait_event(ctx->tmq, (!atomic_read(&ctx->tm_ref)));
 	/* Wait for the ALL the translation pages to be flushed to the
 	 * disk. The removal work is queued.
 	 */
