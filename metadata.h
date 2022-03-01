@@ -23,8 +23,8 @@
 #define MAX_ZONE_REVMAP 2
 #define BLOCKS_IN_ZONE 65536
 #define SUBBIOCTX_MAGIC 0x2
-#define MAX_TM_PAGES 100
-#define MAX_SIT_PAGES 100
+#define MAX_TM_PAGES 5
+#define MAX_SIT_PAGES 5
 #define NSTL_MAGIC 0xF2F52010
 #define GC_GREEDY 1
 #define GC_CB 2
