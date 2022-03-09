@@ -23,8 +23,8 @@
 #define MAX_ZONE_REVMAP 2
 #define BLOCKS_IN_ZONE 65536
 #define SUBBIOCTX_MAGIC 0x2
-#define MAX_TM_PAGES 5
-#define MAX_SIT_PAGES 5
+#define MAX_TM_PAGES 5000
+#define MAX_SIT_PAGES 5000
 #define NSTL_MAGIC 0xF2F52010
 #define GC_GREEDY 1
 #define GC_CB 2
@@ -48,6 +48,7 @@ struct metadata_read_ctx {
 };
 
 struct revmap_bioctx {
+	u32 wait;
 	u64 revmap_pba;			/* PBA where the revmap entries should be written.*/
 	struct ctx * ctx;
 	struct page *page;
@@ -59,7 +60,15 @@ struct tm_page {
 	struct rb_node rb;
 	sector_t blknr;
 	struct page *page;
+	int flag;
 };
+
+struct tm_page_write_ctx {
+	struct ctx *ctx;
+	struct tm_page *tm_page;
+	struct work_struct work;
+};
+
 
 struct sit_page_write_ctx {
 	struct ctx *ctx;
@@ -243,6 +252,7 @@ struct ctx {
 	struct kmem_cache *reflist_cache;
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
+	struct kmem_cache *tm_page_write_ctx_cache;
 	struct kmem_cache *gc_rb_node_cache;
 	struct kmem_cache *gc_extents_cache;
 	struct kmem_cache *app_read_ctx_cache;

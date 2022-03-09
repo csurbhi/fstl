@@ -1,4 +1,4 @@
-/*
+ /*
  *  Copyright (C) 2016 Peter Desnoyers and 2020 Surbhi Palande.
  *
  * This file is released under the GPL
@@ -2227,25 +2227,6 @@ void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 	}
 }
 
-/* 
- * We should be ideally be using to make sure that
- * one block worth of translation entries have made it to the 
- * disk. Not using this, will work in most case.
- * But no guarantees can be given
- *
- * Most code will only initiate the transfer of the data
- * but not ensure that the data is on disk.
- */
-void wait_on_block_barrier(struct ctx * ctx)
-{
-	spin_lock(&ctx->rev_flush_lock);
-	if (atomic_read(&ctx->nr_pending_writes)) {
-		//trace_printk("\n waiting on block barrier, nr_pending_writes: %d", atomic_read(&ctx->nr_pending_writes));
-		wait_event_lock_irq(ctx->rev_blk_flushq, 0 >= atomic_read(&ctx->nr_pending_writes), ctx->rev_flush_lock);
-	}
-	spin_unlock(&ctx->rev_flush_lock);
-}
-
 int is_revmap_block_available(struct ctx *ctx, u64 pba);
 void flush_translation_blocks(struct work_struct * w);
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx);
@@ -2254,15 +2235,17 @@ void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 {
 	struct rb_root *root = &ctx->tm_rb_root;
 	struct rb_node *node = NULL;
+
 	spin_lock(&ctx->rev_flush_lock);
 	if (1 == is_revmap_block_available(ctx, pba)) {
 		spin_unlock(&ctx->rev_flush_lock);
 		return;
 	}
 	spin_unlock(&ctx->rev_flush_lock);
-/* You could wait here for ever if the translation blocks are not
- * flushed!
- */
+
+	/* You could wait here for ever if the translation blocks are not
+	 * flushed!
+	 */
 	//printk(KERN_ERR "\n About to flush translation blocks! before waiting on revmap blk availability!!!! \n");
 
 	node = root->rb_node;
@@ -2270,10 +2253,10 @@ void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
 		flush_tm_nodes(node, ctx);
 	}
 
-	//spin_lock(&ctx->rev_flush_lock);
+	spin_lock(&ctx->rev_flush_lock);
 	/* wait until atleast one zone's revmap entries are flushed */
-	//wait_event_lock_irq(ctx->rev_blk_flushq, (1 == is_revmap_block_available(ctx, pba)), ctx->rev_flush_lock);
-	//spin_unlock(&ctx->rev_flush_lock);
+	wait_event_lock_irq(ctx->rev_blk_flushq, (1 == is_revmap_block_available(ctx, pba)), ctx->rev_flush_lock);
+	spin_unlock(&ctx->rev_flush_lock);
 }
 
 static void remove_sit_blk_kv_store(struct work_struct *w)
@@ -2651,7 +2634,6 @@ void remove_tm_entry_kv_store(struct ctx *ctx, u64 lba)
 {
 	u64 blknr = lba / TM_ENTRIES_BLK;
 	struct rb_node *parent = NULL;
-	struct rb_root *rb_root = &ctx->tm_rb_root;
 	struct page *page;
 	struct tm_page *new;
 
@@ -2664,56 +2646,43 @@ void remove_tm_entry_kv_store(struct ctx *ctx, u64 lba)
 	page = new->page;
 
 	printk(KERN_ERR "\n %s .....!", __func__);
-	spin_lock(&ctx->tm_flush_lock);
-	if (!test_bit(PG_dirty, &page->flags)) {
-		rb_erase(&new->rb, &ctx->tm_rb_root);
-		kmem_cache_free(ctx->tm_page_cache, new);
-		__free_pages(page, 0);
-	}
-	spin_unlock(&ctx->tm_flush_lock);
+		spin_lock(&ctx->tm_flush_lock);
+		if (!test_bit(PG_dirty, &page->flags)) {
+			rb_erase(&new->rb, &ctx->tm_rb_root);
+			kmem_cache_free(ctx->tm_page_cache, new);
+			__free_pages(page, 0);
+		}
+		spin_unlock(&ctx->tm_flush_lock);
 	/*----------------------------------------------*/
 	up(&ctx->tm_kv_store_lock);
 	//printk(KERN_ERR "\n %s Done!", __func__);
 	return;
 }
 
-/* Called asynchronously and can sleep in down_interruptible.
- * remove the page from RB tree and reduce the total
- * count, through the remove_tm_blk_kv_store()
+/* We have already removed the node from the RB tree
+ * kv store
  */
-void remove_tm_blk_kv_store(struct ctx * ctx, sector_t blknr)
+void remove_tm_blk_kv_store(struct work_struct *w)
 {
-	struct rb_node *parent = NULL;
+	struct ctx *ctx;
 	struct page *page;
-	struct tm_page *new;
+	struct tm_page_write_ctx *tm_page_write_ctx = container_of(w, struct tm_page_write_ctx, work);
+	struct tm_page *tm_page = tm_page_write_ctx->tm_page;
 
 	//printk(KERN_ERR "\n %s in progress!", __func__);
 
-	down_interruptible(&ctx->tm_kv_store_lock);
-	/*----------------------------------------------*/
-	new = search_tm_kv_store(ctx, blknr, &parent);
-	if (!new) {
-		up(&ctx->tm_kv_store_lock);
-		printk(KERN_ERR "\n %s Done! 1", __func__);
+	if (!tm_page) {
+		panic("tm_page cannot be null now! ");
 		return;
 	}
-
-	page = new->page;
+	page = tm_page->page;
 	if (!page) {
 		panic("Page cannot be null now! ");
 		return;
 	}
-
-	//printk(KERN_ERR "\n %s .....!", __func__);
-	spin_lock(&ctx->tm_flush_lock);
-	if (!test_bit(PG_dirty, &page->flags)) {
-		rb_erase(&new->rb, &ctx->tm_rb_root);
-		kmem_cache_free(ctx->tm_page_cache, new);
-		__free_pages(page, 0);
-	}
-	spin_unlock(&ctx->tm_flush_lock);
-	/*----------------------------------------------*/
-	up(&ctx->tm_kv_store_lock);
+	kmem_cache_free(ctx->tm_page_cache, tm_page);
+	__free_pages(page, 0);
+	kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 	//printk(KERN_ERR "\n %s Done!", __func__);
 	return;
 }
@@ -2810,17 +2779,20 @@ void free_sit_pages(struct ctx *ctx)
 
 /*
  * Note: 
- * When 100 translation pages collect in memory, they are
- * flushed to disk. This flushing function also holds the
- * tm_flush_lock at certain points when it checks the page
- * flag status.
+ * When some translation pages collect in memory, they are
+ * flushed to disk. Currently, we also remove every page after it has
+ * been flushed!
  */
 void write_tmbl_complete(struct bio *bio)
 {
 	struct ctx *ctx;
+	struct tm_page_write_ctx *tm_page_write_ctx;
+	struct page *page;
 
 	cant_sleep();
-	ctx = (struct ctx *) bio->bi_private;
+	tm_page_write_ctx = (struct tm_page_write_ctx *) bio->bi_private;
+	ctx = tm_page_write_ctx->ctx;
+	page = tm_page_write_ctx->tm_page->page;
 
 	/* We notify all those reverse map pages that are stuck on
 	 * these respective refcounts
@@ -2835,6 +2807,8 @@ void write_tmbl_complete(struct bio *bio)
 	}
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
+	__free_pages(page, 0);
+	kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 	atomic_dec(&ctx->tm_ref);
 	wake_up(&ctx->tmq);
 	return;
@@ -2843,16 +2817,13 @@ void write_tmbl_complete(struct bio *bio)
 /* We don't wait for the bios to complete 
  * flushing. We only initiate the flushing
  */
-void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
+void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 {
 	struct page *page; 
-	struct tm_page *tm_page;
 	u64 pba;
 	struct bio * bio;
-
-	tm_page = rb_entry(node, struct tm_page, rb);
-	if (!tm_page)
-		return;
+	struct tm_page_write_ctx *tm_page_write_ctx;
+	loff_t disk_size;
 
 	page = tm_page->page;
 	if (!page)
@@ -2861,6 +2832,13 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	if (!PageDirty(tm_page->page))
 		return;
 
+	tm_page_write_ctx = kmem_cache_alloc(ctx->tm_page_write_ctx_cache, GFP_KERNEL);
+	if (!tm_page_write_ctx) {
+		return;
+	}
+
+	tm_page_write_ctx->ctx = ctx;
+	tm_page_write_ctx->tm_page = tm_page;
 
 	//printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
 
@@ -2868,12 +2846,14 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
+		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		return;
 	}
 	
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		bio_put(bio);
+		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
 		return;
 	}
@@ -2881,16 +2861,21 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 	 * We convert it to sector number as bio_submit expects that.
 	 */
 	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
-	printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu blknr:%llu", __func__,  page_address(page), pba, tm_page->blknr);
+
+	disk_size = i_size_read(ctx->dev->bdev->bd_inode);
+	printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu disk_size: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  disk_size, tm_page->blknr, ctx->sb->revmap_bm_pba - ctx->sb->tm_pba + 1);
+	BUG_ON(pba > disk_size/SECTOR_SIZE);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_iter.bi_sector = pba;
-	bio->bi_private = ctx;
+	bio->bi_private = tm_page_write_ctx;
 	bio->bi_end_io = write_tmbl_complete;
 	/* The next code is related to synchronizing at dtr() time.
 	 */
 	atomic_inc(&ctx->tm_ref);
-	submit_bio(bio);
+	//submit_bio(bio);
+	bio->bi_status = BLK_STS_OK;
+	write_tmbl_complete(bio);
 	//printk(KERN_INFO "\n 2. Leaving %s! flushed dirty page! \n", __func__);
 	return;
 }
@@ -2898,15 +2883,40 @@ void flush_tm_node_page(struct ctx *ctx, struct rb_node *node)
 
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 {
+	struct tm_page * tm_page; 
+	struct rb_node *left, *right;
+
+	down_interruptible(&ctx->tm_kv_store_lock);
 	if (!node) {
+		up(&ctx->tm_kv_store_lock);
 		printk(KERN_INFO "\n %s No tm node found! returning!", __func__);
 		return;
 	}
-	flush_tm_node_page(ctx, node);
-	if (node->rb_left)
-		flush_tm_nodes(node->rb_left, ctx);
-	if (node->rb_right)
-		flush_tm_nodes(node->rb_right, ctx);
+
+	printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
+	/* Flush starts the whole process of removing the node and
+	 * flushing a page. We remove first, under the kvlock, so that
+	 * there is no race between add, remove and flush. The next
+	 * flush won't see this node.
+	 */
+	tm_page = rb_entry(node, struct tm_page, rb);
+	if (!tm_page) {
+		up(&ctx->tm_kv_store_lock);
+		return;
+	}
+	left = node->rb_left;
+	right = node->rb_right;
+	/*----------------------*/
+	if (node)
+		rb_erase(node, &ctx->tm_rb_root);
+	/*----------------------*/
+	printk(KERN_ERR "%s DONE!", __func__);
+	//flush_tm_node_page(ctx, tm_page);
+	up(&ctx->tm_kv_store_lock);
+	if (left)
+		flush_tm_nodes(left, ctx);
+	if (right)
+		flush_tm_nodes(right, ctx);
 	return;
 }
 
@@ -2950,9 +2960,12 @@ void flush_translation_blocks(struct work_struct *w)
 }
 
 void flush_count_tm_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
-{	
-	if (flush) {
-		flush_tm_node_page(ctx, node);
+{
+	struct tm_page * tm_page;
+
+	if (flush && node) {
+		tm_page = rb_entry(node, struct tm_page, rb);
+		flush_tm_node_page(ctx, tm_page);
 		if (*count == nrscan)
 			return;
 	}
@@ -3185,7 +3198,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	 * parallel thread! */
 	clear_bit(PG_dirty, &new_tmpage->page->flags);
 
-	printk("\n %s: lba: %lu blknr: %lu  NR_SECTORS_IN_BLK * TM_ENTRIES_BLK: %d \n", __func__, lba, blknr, NR_SECTORS_IN_BLK * TM_ENTRIES_BLK);
+	//printk("\n %s: lba: %llu blknr: %llu  NR_SECTORS_IN_BLK * TM_ENTRIES_BLK: %ld \n", __func__, lba, blknr, NR_SECTORS_IN_BLK * TM_ENTRIES_BLK);
 	/* We do not read extents from block because at boot time we
 	 * have created the extent tree for the entire disk. We add tm
 	 * page kv store only when we have to update, which happens in
@@ -3225,9 +3238,9 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 		/* Only one flush operation at a time 
 		* but we dont want to wait.
 		*/
-
-		//INIT_WORK(&ctx->tb_work, flush_translation_blocks);
-		//queue_work(ctx->writes_wq, &ctx->tb_work);
+		printk(KERN_ERR "%s About to to flush translation blocks! Nr tm pages: %d \n", __func__, atomic_read(&ctx->nr_tm_pages));
+		INIT_WORK(&ctx->tb_work, flush_translation_blocks);
+		queue_work(ctx->writes_wq, &ctx->tb_work);
 	}
 	return new_tmpage;
 }
@@ -3266,26 +3279,29 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 				//printk(KERN_ERR "\n %s ptr: %p ptr->extents[%d].len: 0 ", __func__, ptr, j);
 				continue;
 			}
+			printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
 			down_interruptible(&ctx->tm_kv_store_lock);
 			blknr = lba/TM_ENTRIES_BLK;
 			tm_page = search_tm_kv_store(ctx, blknr, &parent);
 			if (!tm_page) {
 				tm_page = add_tm_page_kv_store(ctx, lba);
-				/*
 				if (!tm_page) {
 					up(&ctx->tm_kv_store_lock);
 					printk(KERN_ERR "%s NO memory! ", __func__);
 					return -ENOMEM;
 				}
 				if (len < 8) {
-					printk(KERN_ERR "\n len cannot be less than 8! ");
+					panic("len cannot be less than 8! ");
 				}
-				*/
 			}
-			up(&ctx->tm_kv_store_lock);
-			printk(KERN_ERR "\n Adding TM entry: ptr: %p ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", ptr, lba, pba, len);
+			/* Call this under the kv store lock, else it
+			 * will race with removal/flush code
+			 */
 			add_translation_entry(ctx, tm_page->page, lba, pba, len);
-			remove_tm_entry_kv_store(ctx, lba);
+			up(&ctx->tm_kv_store_lock);
+			printk(KERN_ERR "%s DONE!", __func__);
+			//printk(KERN_ERR "\n Adding TM entry: ptr: %p ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", ptr, lba, pba, len);
+			//remove_tm_entry_kv_store(ctx, lba);
 		}
 		ptr = ptr + 1;
 		i++;
@@ -3461,12 +3477,13 @@ void revmap_blk_flushed(struct bio *bio)
 	INIT_WORK(&revmap_bio_ctx->process_tm_work, process_tm_entries);
 	queue_work(ctx->writes_wq, &revmap_bio_ctx->process_tm_work);
 	
-	atomic_dec(&ctx->nr_pending_writes);
-	/* Wakeup waiters waiting on the block barrier after the
-	 * process_tm_entries work is queued.
-	 * */
-	wake_up(&ctx->rev_blk_flushq);
-
+	if (revmap_bio_ctx->wait) {
+		atomic_dec(&ctx->nr_pending_writes);
+		/* Wakeup waiters waiting on the block barrier after the
+		 * process_tm_entries work is queued.
+		 * */
+		wake_up(&ctx->rev_blk_flushq);
+	}
 }
 
 
@@ -3480,7 +3497,7 @@ void revmap_blk_flushed(struct bio *bio)
  * pba: pba from the lba-pba map! We send this here, because we want
  *  to identify if this is the last pba of the zone.
  */
-int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
+int flush_revmap_block_disk(struct ctx * ctx, struct page *page, u32 wait)
 {
 	struct bio * bio;
 	struct revmap_bioctx *revmap_bio_ctx;
@@ -3509,6 +3526,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	revmap_bio_ctx->page = page;
 	revmap_bio_ctx->revmap_pba = ctx->revmap_pba;
 	revmap_bio_ctx->retrial = 0;
+	revmap_bio_ctx->wait = wait;
 
 	bio->bi_iter.bi_sector = ctx->revmap_pba;
 	//printk(KERN_ERR "%s Flushing revmap blk at pba:%llu ctx->revmap_pba: %llu", __func__, bio->bi_iter.bi_sector, ctx->revmap_pba);
@@ -3517,8 +3535,10 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_private = revmap_bio_ctx;
-	atomic_inc(&ctx->nr_pending_writes);
-	printk(KERN_ERR "\n flushing revmap at pba: %llu", bio->bi_iter.bi_sector);
+	if (wait) {
+		atomic_inc(&ctx->nr_pending_writes);
+	}
+	//printk(KERN_ERR "\n flushing revmap at pba: %llu", bio->bi_iter.bi_sector);
 	
 	submit_bio(bio);
 
@@ -3532,16 +3552,19 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page)
 void flush_revmap_entries(struct ctx *ctx)
 {
 	struct page *page = ctx->revmap_page;
+	u32 wait = 1;
 
 	if (!page) {
 		printk(KERN_ERR "\n No revmap page!! ");
 		return;
 	}
 
-	flush_revmap_block_disk(ctx, page);
+	atomic_set(&ctx->nr_pending_writes, 1);
+	flush_revmap_block_disk(ctx, page, wait);
+	atomic_dec(&ctx->nr_pending_writes);
 	//trace_printk("%s waiting on block barrier ", __func__);
 	/* We wait for translation entries to be added! */
-	wait_on_block_barrier(ctx);
+	wait_event(ctx->rev_blk_flushq, 0 >= atomic_read(&ctx->nr_pending_writes));
 	//trace_printk("%s revmap entries are on disk, wait is over!", __func__);
 }
 
@@ -3697,7 +3720,7 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 			if (NR_SECTORS_PER_BLK == (sector_nr + 1)) {
 				page = ctx->revmap_page;
 				BUG_ON(page == NULL);
-				flush_revmap_block_disk(ctx, page);
+				flush_revmap_block_disk(ctx, page, 0);
 				/* we do not wait for the write to
 				 * complete as we are in the write
 				 * context
@@ -4901,6 +4924,7 @@ static struct lsdm_shrinker {
 
 static void destroy_caches(struct ctx *ctx)
 {	
+	kmem_cache_destroy(ctx->app_read_ctx_cache);
 	kmem_cache_destroy(ctx->gc_extents_cache);
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
 	kmem_cache_destroy(ctx->tm_page_cache);
@@ -4953,8 +4977,14 @@ static int create_caches(struct ctx *ctx)
 		goto destroy_gc_extents_cache;
 	}
 	//trace_printk("\n app_read_ctx_cache initialized to address: %p", ctx->app_read_ctx_cache);
+	ctx->tm_page_write_ctx_cache = kmem_cache_create("tmem_write_ctx_cache", sizeof(struct tm_page_write_ctx), 0, SLAB_ACCOUNT, NULL);
+	if (!ctx->tm_page_write_ctx_cache) {
+		goto destroy_app_read_ctx_cache;
+	}
 	return 0;
 /* failed case */
+destroy_app_read_ctx_cache:
+	kmem_cache_destroy(ctx->app_read_ctx_cache);
 destroy_gc_extents_cache:
 	kmem_cache_destroy(ctx->gc_extents_cache);
 destroy_subbio_ctx_cache:
@@ -5198,10 +5228,11 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	INIT_WORK(&ctx->tb_work, flush_translation_blocks);
 	flush_translation_blocks(&ctx->tb_work);
 	wait_event(ctx->tmq, (!atomic_read(&ctx->tm_ref)));
+	flush_workqueue(ctx->writes_wq);
 	/* Wait for the ALL the translation pages to be flushed to the
 	 * disk. The removal work is queued.
 	 */
-	free_translation_pages(ctx);	
+	//free_translation_pages(ctx);	
 	//printk(KERN_ERR "\n translation blocks flushed! ");
 	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
 	do_checkpoint(ctx);
