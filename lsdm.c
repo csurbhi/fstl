@@ -2597,7 +2597,7 @@ struct page * read_block(struct ctx *ctx, u64 blknr, u64 base)
 		bio_free_pages(bio);
 		bio_put(bio);
 		return NULL;
-	}
+	} 
 	/* bio_alloc() hence bio_put() */
 	bio_put(bio);
 	return page;
@@ -2629,35 +2629,6 @@ struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node *
 		}
 	}
 	return NULL;
-}
-
-void remove_tm_entry_kv_store(struct ctx *ctx, u64 lba)
-{
-	u64 blknr = lba / TM_ENTRIES_BLK;
-	struct rb_node *parent = NULL;
-	struct page *page;
-	struct tm_page *new;
-
-	down_interruptible(&ctx->tm_kv_store_lock);
-	/*----------------------------------------------*/
-	new = search_tm_kv_store(ctx, blknr, &parent);
-	if (!new)
-		return;
-
-	page = new->page;
-
-	printk(KERN_ERR "\n %s .....!", __func__);
-		spin_lock(&ctx->tm_flush_lock);
-		if (!test_bit(PG_dirty, &page->flags)) {
-			rb_erase(&new->rb, &ctx->tm_rb_root);
-			kmem_cache_free(ctx->tm_page_cache, new);
-			__free_pages(page, 0);
-		}
-		spin_unlock(&ctx->tm_flush_lock);
-	/*----------------------------------------------*/
-	up(&ctx->tm_kv_store_lock);
-	//printk(KERN_ERR "\n %s Done!", __func__);
-	return;
 }
 
 /* We have already removed the node from the RB tree
@@ -2706,18 +2677,23 @@ void remove_translation_pages(struct ctx *ctx, struct rb_node *node)
 
 	left = node->rb_left;
 	right = node->rb_right;
+	if (tm_page->flag == NEEDS_NO_FLUSH) {
+		printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
+		down_interruptible(&ctx->tm_kv_store_lock);
+/*-------------------------------------------------------------*/
+		rb_erase(node, &ctx->tm_rb_root);
+		__free_pages(tm_page->page, 0);
+		printk(KERN_ERR "\n %s: Page freed! ", __func__);
+		kmem_cache_free(ctx->tm_page_cache, tm_page);
+/*-------------------------------------------------------------*/
+		up(&ctx->tm_kv_store_lock);
+		printk(KERN_ERR "%s DONE!", __func__);
+		return;
+	}
 
-	rb_erase(&tm_page->rb, &ctx->tm_rb_root);
-	kmem_cache_free(ctx->tm_page_cache, tm_page);
-	__free_pages(page, 0);
-	printk(KERN_ERR "\n %s: Page freed! ", __func__);
-
-	if (node->rb_left)
-		remove_translation_pages(ctx, left);
-	if (node->rb_right)
-		remove_translation_pages(ctx, right);
+	remove_translation_pages(ctx, left);
+	remove_translation_pages(ctx, right);
 	return;
-
 }
 
 void free_translation_pages(struct ctx *ctx)
@@ -2808,9 +2784,6 @@ void write_tmbl_complete(struct bio *bio)
 	}
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
-	/* called a get_page(), hence a put_page() */
-	put_page(page);
-	__free_pages(page, 0);
 	kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 	atomic_dec(&ctx->tm_ref);
 	wake_up(&ctx->tmq);
@@ -2832,15 +2805,8 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	if (!page)
 		return;
 
-	if (!PageDirty(tm_page->page)) {
-		put_page(page);
-		__free_pages(page, 0);
-		return;
-	}
-
 	tm_page_write_ctx = kmem_cache_alloc(ctx->tm_page_write_ctx_cache, GFP_KERNEL);
 	if (!tm_page_write_ctx) {
-		put_page(page);
 		__free_pages(page, 0);
 		return;
 	}
@@ -2850,11 +2816,8 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 
 	//printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
 
-	clear_bit(PG_dirty, &page->flags);
-
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
-		put_page(page);
 		__free_pages(page, 0);
 		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		return;
@@ -2862,13 +2825,14 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
-		put_page(page);
 		__free_pages(page, 0);
 		bio_put(bio);
 		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
 		return;
 	}
+
+	tm_page->flag = NEEDS_NO_FLUSH;
 	/* blknr is the relative blknr within the translation blocks.
 	 * We convert it to sector number as bio_submit expects that.
 	 */
@@ -2885,9 +2849,8 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	/* The next code is related to synchronizing at dtr() time.
 	 */
 	atomic_inc(&ctx->tm_ref);
-	//submit_bio(bio);
+	submit_bio(bio);
 	bio->bi_status = BLK_STS_OK;
-	write_tmbl_complete(bio);
 	//printk(KERN_INFO "\n 2. Leaving %s! flushed dirty page! \n", __func__);
 	return;
 }
@@ -2899,32 +2862,21 @@ void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 	struct rb_node *left, *right;
 
 	if (!node) {
-		printk(KERN_INFO "\n %s No tm node found! returning!", __func__);
+		//printk(KERN_INFO "\n %s No tm node found! returning!", __func__);
+		return;
+	}
+
+	tm_page = rb_entry(node, struct tm_page, rb);
+	if (!tm_page) {
 		return;
 	}
 
 	flush_tm_nodes(node->rb_left, ctx);
 	flush_tm_nodes(node->rb_right, ctx);
-
-	printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
-	down_interruptible(&ctx->tm_kv_store_lock);
-	tm_page = rb_entry(node, struct tm_page, rb);
-	if (!tm_page) {
-		up(&ctx->tm_kv_store_lock);
-		return;
+	
+	if(tm_page->flag == NEEDS_FLUSH) {
+		flush_tm_node_page(ctx, tm_page);
 	}
-	/* Flush starts the whole process of removing the node and
-	 * flushing a page. We remove first, under the kvlock, so that
-	 * there is no race between add, remove and flush. The next
-	 * flush won't see this node.
-	 */
-
-	/*----------------------*/
-	rb_erase(&tm_page->rb, &ctx->tm_rb_root);
-	/*----------------------*/
-	flush_tm_node_page(ctx, tm_page);
-	up(&ctx->tm_kv_store_lock);
-	printk(KERN_ERR "%s DONE!", __func__);
 	return;
 }
 
@@ -2938,18 +2890,19 @@ void flush_translation_blocks(struct work_struct *w)
 {
 	struct ctx * ctx = container_of(w, struct ctx, tb_work);
 	struct rb_root *root = &ctx->tm_rb_root;
-	struct rb_node *node = NULL;
 	//struct blk_plug plug;
-
-	node = root->rb_node;
-	if (!node) {
-		printk(KERN_ERR "\n %s tm node is NULL!", __func__);
-		return;
-	}
 
 	if (!mutex_trylock(&ctx->tm_lock)) {
 			return;
 	}
+
+	if (!root->rb_node) {
+		mutex_unlock(&ctx->tm_lock);
+		printk(KERN_ERR "\n %s tm node is NULL!", __func__);
+		return;
+	}
+
+	remove_translation_pages(ctx, root->rb_node);
 
 	/* We flush these sequential pages
 	 * together so that they can be 
@@ -2959,7 +2912,7 @@ void flush_translation_blocks(struct work_struct *w)
 
 	printk(KERN_ERR "\n %s nr_tm_pages: %d", __func__, atomic_read(&ctx->nr_tm_pages));
 	//blk_start_plug(&plug);
-	flush_tm_nodes(node, ctx);
+	flush_tm_nodes(root->rb_node, ctx);
 	mutex_unlock(&ctx->tm_lock);
 	//blk_finish_plug(&plug);	
 	atomic_dec(&ctx->tm_ref);
@@ -3204,6 +3157,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	RB_CLEAR_NODE(&new_tmpage->rb);
 
 	//printk("\n %s blknr: %d tm_pba: %llu", __func__, blknr, ctx->sb->tm_pba);
+	
 	new_tmpage->page = read_block(ctx, blknr, ctx->sb->tm_pba);
 	if (!new_tmpage->page) {
 		printk(KERN_ERR "\n %s read_block  failed! could not allocate page! \n", __func__);
@@ -3222,15 +3176,6 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	atomic_inc(&ctx->nr_tm_pages);
     	atomic_inc(&ctx->tm_flush_count);
 	
-	/* We get a reference to this page, so that it is not freed
-	 * underneath us. We put the reference in the flush tm page
-	 * code, just before freeing it.
-	 */
-	get_page(new_tmpage->page);
-	/* This is a new page, cannot be dirty, dont flush from a
-	 * parallel thread! */
-	clear_bit(PG_dirty, &new_tmpage->page->flags);
-
 	return new_tmpage;
 }
 
@@ -3271,8 +3216,9 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 			if (len % 8 != 0) {
 				panic("len has to be a multiple of 8");
 			}
-			printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
+			//printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
 			down_interruptible(&ctx->tm_kv_store_lock);
+/*-------------------------------------------------------------*/
 			tm_page = add_tm_page_kv_store(ctx, lba);
 			if (!tm_page) {
 				up(&ctx->tm_kv_store_lock);
@@ -3280,14 +3226,15 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 				return -ENOMEM;
 			}
 			 
+			tm_page->flag = NEEDS_FLUSH;
 			/* Call this under the kv store lock, else it
 			 * will race with removal/flush code
 			 */
 			//add_translation_entry(ctx, tm_page->page, lba, pba, len);
+/*-------------------------------------------------------------*/
 			up(&ctx->tm_kv_store_lock);
-			printk(KERN_ERR "%s DONE!", __func__);
+			//printk(KERN_ERR "%s DONE!", __func__);
 			//printk(KERN_ERR "\n Adding TM entry: ptr: %p ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", ptr, lba, pba, len);
-			//remove_tm_entry_kv_store(ctx, lba);
 		}
 		ptr = ptr + 1;
 		i++;
@@ -3300,7 +3247,8 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 		*/
 		printk(KERN_ERR "%s About to to flush translation blocks! Nr tm pages: %d \n", __func__, atomic_read(&ctx->nr_tm_pages));
 		INIT_WORK(&ctx->tb_work, flush_translation_blocks);
-		queue_work(ctx->writes_wq, &ctx->tb_work);
+		//queue_work(ctx->writes_wq, &ctx->tb_work);
+		flush_translation_blocks(&ctx->tb_work);
 	}
 	//printk(KERN_ERR "\n %s BYE lba: %llu pba: %llu len: %d!", __func__, lba, pba, len);
 	return 0;
@@ -4182,7 +4130,7 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %u", sb->ckpt2_pba);
 	ckpt2 = read_checkpoint(ctx, sb->ckpt2_pba);
 	if (!ckpt2) {
-			put_page(page1);
+		free_pages(page1, 0);
 		return NULL;
 	}
 	printk(KERN_INFO "\n %s ckpt versions: %lld %lld", __func__, ckpt1->version, ckpt2->version);
@@ -4840,7 +4788,7 @@ int read_metadata(struct ctx * ctx)
 	ret = read_revmap_bitmap(ctx);
 	if (ret) {
 		put_page(ctx->sb_page);
-		put_page(ctx->ckpt_page);
+		free_pages(ctx->ckpt_page, 0);
 		return -1;
 	}
 	//printk(KERN_ERR "\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
@@ -4849,8 +4797,8 @@ int read_metadata(struct ctx * ctx)
 	ret = read_translation_map(ctx);
 	if (0 > ret) {
 		put_page(ctx->sb_page);
-		put_page(ctx->ckpt_page);
-		put_page(ctx->revmap_bm);
+		free_pages(ctx->ckpt_page, 0);
+		free_pages(ctx->revmap_bm, 0);
 		printk(KERN_ERR "\n read_extent_map failed! cannot read the metadata ");
 		return ret;
 	}
@@ -4876,8 +4824,8 @@ int read_metadata(struct ctx * ctx)
 		printk(KERN_ERR "\n SIT and checkpoint does not match!");
 		do_recovery(ctx);
 		put_page(ctx->sb_page);
-		put_page(ctx->ckpt_page);
-		put_page(ctx->revmap_bm);
+		free_pages(ctx->ckpt_page, 0);
+		free_pages(ctx->revmap_bm, 0);
 		return -1;
 	}
 	printk(KERN_ERR "\n Metadata read! \n");
@@ -5171,11 +5119,11 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 free_metadata_pages:
 	printk(KERN_ERR "\n freeing metadata pages!");
 	if (ctx->revmap_bm)
-		put_page(ctx->revmap_bm);
+		free_pages(ctx->revmap_bm, 0);
 	if (ctx->sb_page)
 		put_page(ctx->sb_page);
 	if (ctx->ckpt_page)
-		put_page(ctx->ckpt_page);
+		free_pages(ctx->ckpt_page, 0);
 	/* TODO : free extent page
 	 * and segentries page */
 destroy_cache:
@@ -5221,14 +5169,14 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * that the wait_on_revmap_block_availability does try another
 	 * flush_translation_blocks path!
 	 */
+	flush_workqueue(ctx->writes_wq);
 	INIT_WORK(&ctx->tb_work, flush_translation_blocks);
 	flush_translation_blocks(&ctx->tb_work);
 	wait_event(ctx->tmq, (!atomic_read(&ctx->tm_ref)));
-	flush_workqueue(ctx->writes_wq);
 	/* Wait for the ALL the translation pages to be flushed to the
 	 * disk. The removal work is queued.
 	 */
-	//free_translation_pages(ctx);	
+	free_translation_pages(ctx);	
 	//printk(KERN_ERR "\n translation blocks flushed! ");
 	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
 	do_checkpoint(ctx);
@@ -5245,11 +5193,11 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	/* TODO : free extent page
 	 * and segentries page */
 	if (ctx->revmap_bm)
-		put_page(ctx->revmap_bm);
+		free_pages(ctx->revmap_bm, 0);
 	if (ctx->sb_page)
 		put_page(ctx->sb_page);
 	if (ctx->ckpt_page)
-		put_page(ctx->ckpt_page);
+		free_pages(ctx->ckpt_page, 0);
 	//trace_printk("\n metadata pages freed! \n");
 	/* timer based gc invocation for later
 	 * del_timer_sync(&ctx->timer_list);

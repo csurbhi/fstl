@@ -30,6 +30,8 @@
 #define GC_CB 2
 #define BG_GC 1
 #define FG_GC 2
+#define NEEDS_FLUSH 1
+#define NEEDS_NO_FLUSH 0
 
 struct gc_read_ctx {
 	struct ctx *ctx;
