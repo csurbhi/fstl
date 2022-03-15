@@ -2614,6 +2614,7 @@ struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node *
 
 	struct tm_page *node_ent;
 
+	*parent = NULL;
 	node = root->rb_node;
 	while(node) {
 		*parent = node;
@@ -2807,6 +2808,8 @@ void write_tmbl_complete(struct bio *bio)
 	}
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
+	/* called a get_page(), hence a put_page() */
+	put_page(page);
 	__free_pages(page, 0);
 	kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 	atomic_dec(&ctx->tm_ref);
@@ -2829,11 +2832,16 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	if (!page)
 		return;
 
-	if (!PageDirty(tm_page->page))
+	if (!PageDirty(tm_page->page)) {
+		put_page(page);
+		__free_pages(page, 0);
 		return;
+	}
 
 	tm_page_write_ctx = kmem_cache_alloc(ctx->tm_page_write_ctx_cache, GFP_KERNEL);
 	if (!tm_page_write_ctx) {
+		put_page(page);
+		__free_pages(page, 0);
 		return;
 	}
 
@@ -2846,12 +2854,16 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
+		put_page(page);
+		__free_pages(page, 0);
 		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		return;
 	}
 	
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
+		put_page(page);
+		__free_pages(page, 0);
 		bio_put(bio);
 		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
@@ -2863,7 +2875,7 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
 
 	disk_size = i_size_read(ctx->dev->bdev->bd_inode);
-	printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu disk_size: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  disk_size, tm_page->blknr, ctx->sb->revmap_bm_pba - ctx->sb->tm_pba + 1);
+	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu disk_size: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  disk_size, tm_page->blknr, ctx->sb->revmap_bm_pba - ctx->sb->tm_pba + 1);
 	BUG_ON(pba > disk_size/SECTOR_SIZE);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
@@ -2886,37 +2898,33 @@ void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 	struct tm_page * tm_page; 
 	struct rb_node *left, *right;
 
-	down_interruptible(&ctx->tm_kv_store_lock);
 	if (!node) {
-		up(&ctx->tm_kv_store_lock);
 		printk(KERN_INFO "\n %s No tm node found! returning!", __func__);
 		return;
 	}
 
+	flush_tm_nodes(node->rb_left, ctx);
+	flush_tm_nodes(node->rb_right, ctx);
+
 	printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
-	/* Flush starts the whole process of removing the node and
-	 * flushing a page. We remove first, under the kvlock, so that
-	 * there is no race between add, remove and flush. The next
-	 * flush won't see this node.
-	 */
+	down_interruptible(&ctx->tm_kv_store_lock);
 	tm_page = rb_entry(node, struct tm_page, rb);
 	if (!tm_page) {
 		up(&ctx->tm_kv_store_lock);
 		return;
 	}
-	left = node->rb_left;
-	right = node->rb_right;
+	/* Flush starts the whole process of removing the node and
+	 * flushing a page. We remove first, under the kvlock, so that
+	 * there is no race between add, remove and flush. The next
+	 * flush won't see this node.
+	 */
+
 	/*----------------------*/
-	if (node)
-		rb_erase(node, &ctx->tm_rb_root);
+	rb_erase(&tm_page->rb, &ctx->tm_rb_root);
 	/*----------------------*/
-	printk(KERN_ERR "%s DONE!", __func__);
-	//flush_tm_node_page(ctx, tm_page);
+	flush_tm_node_page(ctx, tm_page);
 	up(&ctx->tm_kv_store_lock);
-	if (left)
-		flush_tm_nodes(left, ctx);
-	if (right)
-		flush_tm_nodes(right, ctx);
+	printk(KERN_ERR "%s DONE!", __func__);
 	return;
 }
 
@@ -3159,7 +3167,7 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned i
 struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 {
 	struct rb_root *root = &ctx->tm_rb_root;
-	struct rb_node *parent = NULL;
+	struct rb_node *parent = NULL, **link;
 	struct tm_page *new_tmpage, *parent_ent;
 	/* convert the sector lba to a blknr and then find out the relative
 	 * blknr where we find the translation entry from the first
@@ -3167,11 +3175,25 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	 *
 	 */
 	u64 blknr = lba/TM_ENTRIES_BLK;
-	int var;
 	
 	new_tmpage = search_tm_kv_store(ctx, blknr, &parent);
 	if (new_tmpage) {
 		return new_tmpage;
+	}
+
+	if (parent) {
+		parent_ent = rb_entry(parent, struct tm_page, rb);
+		BUG_ON (blknr == parent_ent->blknr);
+		if (blknr < parent_ent->blknr) {
+			/* Attach new node to the left of parent */
+			link = &parent->rb_left;
+		}
+		else { 
+			/* Attach new node to the right of parent */
+			link = &parent->rb_right;
+		}
+	} else {
+		link = &root->rb_node;
 	}
 
 	new_tmpage = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
@@ -3189,6 +3211,17 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 		return NULL;
 	}
 	new_tmpage->blknr = blknr;
+	//printk("\n %s: lba: %llu blknr: %llu  NR_SECTORS_IN_BLK * TM_ENTRIES_BLK: %ld \n", __func__, lba, blknr, NR_SECTORS_IN_BLK * TM_ENTRIES_BLK);
+	/* Add this page to a RB tree based KV store.
+	 * Key is: blknr for this corresponding block
+	 */
+
+	rb_link_node(&new_tmpage->rb, parent, link);
+	/* Balance the tree after node is addded to it */
+	rb_insert_color(&new_tmpage->rb, root);
+	atomic_inc(&ctx->nr_tm_pages);
+    	atomic_inc(&ctx->tm_flush_count);
+	
 	/* We get a reference to this page, so that it is not freed
 	 * underneath us. We put the reference in the flush tm page
 	 * code, just before freeing it.
@@ -3198,50 +3231,6 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	 * parallel thread! */
 	clear_bit(PG_dirty, &new_tmpage->page->flags);
 
-	//printk("\n %s: lba: %llu blknr: %llu  NR_SECTORS_IN_BLK * TM_ENTRIES_BLK: %ld \n", __func__, lba, blknr, NR_SECTORS_IN_BLK * TM_ENTRIES_BLK);
-	/* We do not read extents from block because at boot time we
-	 * have created the extent tree for the entire disk. We add tm
-	 * page kv store only when we have to update, which happens in
-	 * memory first and then gets flushed to the disk.
-	 *
-	 * tm_entry = (struct tm_entry *) page_address(new_tmpage->page);
-	 * read_extents_from_block(ctx, tm_entry, TM_ENTRIES_BLK, 0);
-	 */
-
-	/* Add this page to a RB tree based KV store.
-	 * Key is: blknr for this corresponding block
-	 */
-	if (parent) {
-		parent_ent = rb_entry(parent, struct tm_page, rb);
-		if (blknr < parent_ent->blknr) {
-			/* Attach new node to the left of parent */
-			rb_link_node(&new_tmpage->rb, parent, &parent->rb_left);
-		}
-		else { 
-			/* Attach new node to the right of parent */
-			rb_link_node(&new_tmpage->rb, parent, &parent->rb_right);
-		}
-		//printk(KERN_ERR "%s parent is not null, added page! ", __func__);
-	} else {
-		//printk(KERN_ERR "%s parent is NULL, added page! ", __func__);
-		rb_link_node(&new_tmpage->rb, parent, &root->rb_node);
-	}
-	/* Balance the tree after node is addded to it */
-	rb_insert_color(&new_tmpage->rb, root);
-	atomic_inc(&ctx->nr_tm_pages);
-	var = atomic_read(&ctx->nr_tm_pages);
-	//printk(KERN_ERR "\n %s nr_tm_pages: %d", __func__, var);
-	atomic_inc(&ctx->tm_flush_count);
-	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_PAGES) {
-		/*---------------------------------------------*/
-		atomic_set(&ctx->tm_flush_count, 0);
-		/* Only one flush operation at a time 
-		* but we dont want to wait.
-		*/
-		printk(KERN_ERR "%s About to to flush translation blocks! Nr tm pages: %d \n", __func__, atomic_read(&ctx->nr_tm_pages));
-		INIT_WORK(&ctx->tb_work, flush_translation_blocks);
-		queue_work(ctx->writes_wq, &ctx->tb_work);
-	}
 	return new_tmpage;
 }
 
@@ -3279,25 +3268,22 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 				//printk(KERN_ERR "\n %s ptr: %p ptr->extents[%d].len: 0 ", __func__, ptr, j);
 				continue;
 			}
+			if (len % 8 != 0) {
+				panic("len has to be a multiple of 8");
+			}
 			printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
 			down_interruptible(&ctx->tm_kv_store_lock);
-			blknr = lba/TM_ENTRIES_BLK;
-			tm_page = search_tm_kv_store(ctx, blknr, &parent);
+			tm_page = add_tm_page_kv_store(ctx, lba);
 			if (!tm_page) {
-				tm_page = add_tm_page_kv_store(ctx, lba);
-				if (!tm_page) {
-					up(&ctx->tm_kv_store_lock);
-					printk(KERN_ERR "%s NO memory! ", __func__);
-					return -ENOMEM;
-				}
-				if (len < 8) {
-					panic("len cannot be less than 8! ");
-				}
+				up(&ctx->tm_kv_store_lock);
+				printk(KERN_ERR "%s NO memory! ", __func__);
+				return -ENOMEM;
 			}
+			 
 			/* Call this under the kv store lock, else it
 			 * will race with removal/flush code
 			 */
-			add_translation_entry(ctx, tm_page->page, lba, pba, len);
+			//add_translation_entry(ctx, tm_page->page, lba, pba, len);
 			up(&ctx->tm_kv_store_lock);
 			printk(KERN_ERR "%s DONE!", __func__);
 			//printk(KERN_ERR "\n Adding TM entry: ptr: %p ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %d", ptr, lba, pba, len);
@@ -3305,6 +3291,16 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 		}
 		ptr = ptr + 1;
 		i++;
+	}
+	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_PAGES) {
+		/*---------------------------------------------*/
+		atomic_set(&ctx->tm_flush_count, 0);
+		/* Only one flush operation at a time 
+		* but we dont want to wait.
+		*/
+		printk(KERN_ERR "%s About to to flush translation blocks! Nr tm pages: %d \n", __func__, atomic_read(&ctx->nr_tm_pages));
+		INIT_WORK(&ctx->tb_work, flush_translation_blocks);
+		queue_work(ctx->writes_wq, &ctx->tb_work);
 	}
 	//printk(KERN_ERR "\n %s BYE lba: %llu pba: %llu len: %d!", __func__, lba, pba, len);
 	return 0;
