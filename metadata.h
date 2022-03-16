@@ -83,6 +83,7 @@ struct sit_page {
 	struct rb_node rb;
 	sector_t blknr;
 	struct page *page;
+	int flag;
 };
 
 struct lsdm_bioctx {
@@ -213,7 +214,6 @@ struct ctx {
 	int               n_extents;      /* map size */
 	int		  n_sit_extents;
 
-	mempool_t        *extent_pool;
 	mempool_t        *page_pool;
 	struct bio_set   * bs;
 
@@ -248,6 +248,7 @@ struct ctx {
        	atomic_t revmap_sector_nr;
        	atomic_t revmap_entry_nr;
 	struct kmem_cache * bioctx_cache;
+	struct kmem_cache * extent_cache;
 	struct kmem_cache * subbio_ctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
@@ -260,7 +261,6 @@ struct ctx {
 	struct kmem_cache *app_read_ctx_cache;
 	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_ref_lock;
-	spinlock_t sit_flush_lock;
 	spinlock_t tm_flush_lock;
 	spinlock_t rev_flush_lock;
 	spinlock_t ckpt_lock;
@@ -276,7 +276,7 @@ struct ctx {
 	struct page * revmap_page;
 	struct mutex gc_lock;
 	struct mutex tm_lock;
-	struct mutex sit_lock;
+	struct mutex sit_flush_lock;
 	struct semaphore sit_kv_store_lock;
 	struct semaphore tm_kv_store_lock;
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
