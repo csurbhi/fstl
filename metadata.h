@@ -305,13 +305,9 @@ struct ctx {
 	struct work_struct tb_work;
 };
 
-/* total size = xx bytes (64b). fits in 1 cache line 
-   for 32b is xx bytes, fits in ARM cache line */
 struct extent {
 	struct rb_node rb;	/* 20 bytes */
 	sector_t lba;		/* 512B LBA */
 	sector_t pba;		
 	u32      len;
-	atomic_t refs[3];
-	atomic_t total_refs;
-}; /* xx bytes including padding after 'rb', xx on 32-bit */
+}; 

@@ -4933,7 +4933,7 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->tm_page_write_ctx_cache) {
 		goto destroy_app_read_ctx_cache;
 	}
-	ctx->extent_cache = kmem_cache_create("lsdm_extent_cache", sizeof(struct extent_entry), 0, SLAB_ACCOUNT, NULL);
+	ctx->extent_cache = kmem_cache_create("lsdm_extent_cache", sizeof(struct extent), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->extent_cache) {
 		goto destroy_tm_page_write_ctx_cache;
 	}
