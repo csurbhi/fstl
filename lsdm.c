@@ -3222,7 +3222,7 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 				continue;
 			}
 			if (len % 8) {
-				printk(KERN_ERR "\n Len is: %d \n", len);
+				printk(KERN_ERR "\n  %s lba: %llu, pba: %llu, len: %d \n", __func__, lba, pba, len);
 				printk(KERN_ERR "\n");
 				panic("len has to be a multiple of 8");
 			}
@@ -4216,7 +4216,7 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned i
 			continue;
 			
 		}
-		printk(KERN_ERR "\n %s TM-BLKNR: %llu entry->lba: %llu entry->pba: %llu", __func__, pba, entry->lba, entry->pba);
+		//printk(KERN_ERR "\n %s TM-BLKNR: %llu entry->lba: %llu entry->pba: %llu", __func__, pba, entry->lba, entry->pba);
 		/* TODO: right now everything should be zeroed out */
 		//panic("Why are there any already mapped extents?");
 		down_write(&ctx->metadata_update_lock);
@@ -4502,6 +4502,7 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	/* We are essentially adding a new node here */
 	new = kmem_cache_alloc(ctx->gc_rb_node_cache, GFP_KERNEL);
 	if (!new) {
+		printk(KERN_ERR "\n %s could not allocate memory for gc_rb_node \n", __func__);
 		return -ENOMEM;
 	}
 	RB_CLEAR_NODE(&new->rb);
@@ -4526,8 +4527,10 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 			rb_erase(&e->rb, root);
 			kmem_cache_free(ctx->gc_rb_node_cache, e);
 			//printk(KERN_ERR "\n %s Found the zone: %d and deleted it, will read again later! ", __func__, zonenr);
-			link = &parent;
-			break;
+			link = &root->rb_node;
+			parent = NULL;
+			continue;
+			
 		}
 		if (cb_cost == e->cb_cost) {
 			/* We prefer older segments when the cost is the same
@@ -4560,7 +4563,10 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
 	write_unlock(&ctx->sit_rb_lock);
+
 	//printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
+	zonenr = select_zone_to_clean(ctx, BG_GC);
+	printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
 	return 0;
 }
 
@@ -5114,10 +5120,10 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	 * Will work with timer based invocation later
 	 * init_timer(ctx->timer);
 	 */
-	//ret = lsdm_gc_thread_start(ctx);
-	//if (ret) {
-	//	goto free_metadata_pages;
-	//}
+	ret = lsdm_gc_thread_start(ctx);
+	if (ret) {
+		goto free_metadata_pages;
+	}
 
 	/*
 	if (register_shrinker(lsdm_shrinker))
@@ -5179,7 +5185,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * that the wait_on_revmap_block_availability does try another
 	 * flush_translation_blocks path!
 	 */
-	flush_workqueue(ctx->writes_wq);
+	//flush_workqueue(ctx->writes_wq);
 	INIT_WORK(&ctx->tb_work, flush_translation_blocks);
 	flush_translation_blocks(&ctx->tb_work);
 	printk(KERN_ERR "\n %s translation blocks flushed process started! ");
@@ -5215,8 +5221,8 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * del_timer_sync(&ctx->timer_list);
 	 */
 	//trace_printk("\n caches destroyed! \n");
-	//lsdm_gc_thread_stop(ctx);
-	//trace_printk("\n gc thread stopped! \n");
+	lsdm_gc_thread_stop(ctx);
+	printk(KERN_ERR "\n gc thread stopped! \n");
 	bioset_exit(ctx->bs);
 	//trace_printk("\n exited from bioset \n");
 	kfree(ctx->bs);
