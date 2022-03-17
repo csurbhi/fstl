@@ -592,6 +592,7 @@ static void lsdm_free_rb_mappings(struct ctx *ctx)
 
 static inline int is_lsdm_ioidle(struct ctx *ctx)
 {
+	printk(KERN_ERR "\n %s nr_writes: %lu", __func__, atomic_read(&ctx->nr_writes));
 	return atomic_read(&ctx->ioidle);
 }
 
@@ -974,7 +975,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 			printk(KERN_ERR "\n Found NULL! ");
 			break;
 		}
-		printk(KERN_ERR "\n %s Found e, PBA: %llu, LBA: %llu, len: %u", __func__, e->lba, e->pba, e->len);
+		printk(KERN_ERR "\n %s Found e, PBA: %llu, LBA: %llu, len: %lu", __func__, e->lba, e->pba, e->len);
 		/* In a reverse table extent, e->lba is actually the
 		 * PBA and e->pba is actually the LBA. This was done
 		 * for code reusability.
@@ -1194,13 +1195,17 @@ static int gc_thread_fn(void * data)
 		 * and for idle time GC mode mutex_trylock()
 		 * You need some check for is_idle()
 		 * */
-		
-		//if(!is_lsdm_ioidle(ctx)) {
+		printk(KERN_ERR "\n %s flushing workqueue ..... \n", __func__);
+		flush_workqueue(ctx->writes_wq);
+		printk(KERN_ERR "\n %s flushing workqueue done ..... \n", __func__);
+		if(!is_lsdm_ioidle(ctx)) {
 			/* increase sleep time */
-		//	wait_ms = wait_ms * 2;
+			printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
+			wait_ms = wait_ms * 2;
 			/* unlock mutex */
-		//	continue;
-		//}
+			continue;
+		}
+		printk(KERN_ERR "\n %s ioidle = 1! \n ", __func__);
 		zonenr = select_zone_to_clean(ctx, BG_GC);
 		printk(KERN_ERR "\n Selecting zonenr: %d ", zonenr);
 		/* Doing this for now! ret part */
@@ -1282,7 +1287,7 @@ void invoke_gc(unsigned long ptr)
 }
 
 
-void lsdm_is_ioidle(struct kref *kref)
+void lsdm_ioidle(struct kref *kref)
 {
 	struct ctx *ctx;
 
@@ -1316,7 +1321,7 @@ void lsdm_subread_done(struct bio *clone)
 	bio = read_ctx->bio;
 
 	bio_endio(bio);
-	//kref_put(&ctx->ongoing_iocount, lsdm_is_ioidle);
+	kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 	bio_put(clone);
 	kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
 }
@@ -3754,8 +3759,8 @@ void write_done(struct kref *kref)
 	count ++;
 	//printk(KERN_ERR "\n %s bioctx released to bioctx_cache, %p count:%d", __func__, lsdm_bioctx, count);
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
-	//kref_put(&ctx->ongoing_iocount, lsdm_is_ioidle);
-	//atomic_dec(&ctx->nr_writes);
+	kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
+	atomic_dec(&ctx->nr_writes);
 }
 
 
@@ -4565,8 +4570,8 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	write_unlock(&ctx->sit_rb_lock);
 
 	//printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
-	zonenr = select_zone_to_clean(ctx, BG_GC);
-	printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
+	//zonenr = select_zone_to_clean(ctx, BG_GC);
+	//printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
 	return 0;
 }
 
