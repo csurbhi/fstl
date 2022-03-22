@@ -221,7 +221,7 @@ struct ctx {
 
 	atomic_t          io_count;
 
-	atomic_t          n_reads;
+	atomic_t          nr_reads;
 	sector_t          target;	/* in our case now points to the segment getting GCed */
 	unsigned          sectors_copied;
 	atomic_t          pages_alloced;

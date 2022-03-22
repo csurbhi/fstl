@@ -593,6 +593,7 @@ static void lsdm_free_rb_mappings(struct ctx *ctx)
 static inline int is_lsdm_ioidle(struct ctx *ctx)
 {
 	printk(KERN_ERR "\n %s nr_writes: %lu", __func__, atomic_read(&ctx->nr_writes));
+	printk(KERN_ERR "\n %s nr_reads: %lu", __func__, atomic_read(&ctx->nr_reads));
 	return atomic_read(&ctx->ioidle);
 }
 
@@ -636,20 +637,33 @@ static int select_zone_to_clean(struct ctx *ctx, int mode)
 static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 {
 	struct gc_extents *gc_extent;
+	int maxlen = BIO_MAX_PAGES << NR_SECTORS_IN_BLK;
+	int temp = 0;
 
-	gc_extent = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
-	if (!gc_extent) {
-		return -ENOMEM;
+	while (1) {
+		temp = 0;
+		if (e->len > maxlen) {
+			temp = e->len - maxlen;
+			e->len = maxlen;
+		}
+		gc_extent = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
+		if (!gc_extent) {
+			return -ENOMEM;
+		}
+		gc_extent->e.lba = e->lba;
+		gc_extent->e.pba = e->pba;
+		gc_extent->e.len = e->len;
+		printk(KERN_ERR "\n %s lba: %llu, pba: %llu e->len: %ld", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+		INIT_LIST_HEAD(&gc_extent->list);
+		/* 
+		 * We always want to add the extents in a PBA increasing order
+		 */
+		list_add_tail(&ctx->gc_extents->list, &gc_extent->list);
+		if (temp == 0) {
+			break;
+		}
+		e->len = temp;
 	}
-	gc_extent->e.lba = e->lba;
-	gc_extent->e.pba = e->pba;
-	gc_extent->e.len = e->len;
-	printk(KERN_ERR "\n %s lba: %llu, pba: %llu e->len: %ld", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
-	INIT_LIST_HEAD(&gc_extent->list);
-	/* 
-	 * We always want to add the extents in a PBA increasing order
-	 */
-	list_add_tail(&ctx->gc_extents->list, &gc_extent->list);
 	return 0;
 }
 
@@ -704,6 +718,8 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	 * to the nr_pages calculation
 	 */
 	nr_pages = (s8 >> 3);
+
+
 	/* bio_add_page sets the bi_size for the bio */
 	printk(KERN_ERR "\n %s nr_pages: %d, gc_extent->e.len: %ld s8: %d", __func__, nr_pages, gc_extent->e.len, s8);
 	BUG_ON(nr_pages == 0);
@@ -926,6 +942,8 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	int ret;
 	static int count = 0;
 	struct lsdm_ckpt *ckpt = NULL;
+	struct lsdm_gc_thread *gc_th = ctx->gc_th;
+	wait_queue_head_t *wq = &gc_th->lsdm_gc_wait_queue;
 
 	printk(KERN_ERR "\n GC thread polling after every few seconds, zone_to_clean: %u", zone_to_clean);
 	
@@ -1020,6 +1038,16 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		pba = temp.pba + temp.len;
 	}
 	up_write(&ctx->metadata_update_lock);
+
+	if (gc_flag == BG_GC) {
+		/* Wait here till the system becomes IO Idle, if system is
+		 * iodle don't wait */
+		wait_event_interruptible_timeout(*wq, is_lsdm_ioidle(ctx) ||
+			kthread_should_stop() || freezing(current) ||
+			gc_th->gc_wake,
+			msecs_to_jiffies(gc_th->urgent_sleep_time));
+	}
+
 	/* This segment has valid extents, thus there should be
 	 * atleast one node in the gc list. An empty list indicates
 	 * the reverse translation map does not match with the segment
@@ -1030,6 +1058,15 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	 * order
 	 */
 	read_gc_extents(ctx);
+
+	if (gc_flag == BG_GC) {
+		/* Wait here till the system becomes IO Idle, if system is
+		 * iodle don't wait */
+		wait_event_interruptible_timeout(*wq, is_lsdm_ioidle(ctx) ||
+			kthread_should_stop() || freezing(current) ||
+			gc_th->gc_wake,
+			msecs_to_jiffies(gc_th->urgent_sleep_time));
+	}
 
 	printk(KERN_ERR "%s:%d All GC extents read! \n", __func__, __LINE__);
 
@@ -1205,6 +1242,21 @@ static int gc_thread_fn(void * data)
 			/* unlock mutex */
 			continue;
 		}
+		/* We sleep again and see if we are still idle, then
+		 * we declare "io idleness" and perform BG GC
+		 */
+		wait_event_interruptible_timeout(*wq,
+			kthread_should_stop() || freezing(current) ||
+			gc_th->gc_wake,
+			msecs_to_jiffies(gc_th->urgent_sleep_time));
+
+		if(!is_lsdm_ioidle(ctx)) {
+			/* increase sleep time */
+			printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
+			wait_ms = wait_ms * 2;
+			/* unlock mutex */
+			continue;
+		}
 		printk(KERN_ERR "\n %s ioidle = 1! \n ", __func__);
 		zonenr = select_zone_to_clean(ctx, BG_GC);
 		printk(KERN_ERR "\n Selecting zonenr: %d ", zonenr);
@@ -1293,7 +1345,7 @@ void lsdm_ioidle(struct kref *kref)
 
 	ctx = container_of(kref, struct ctx, ongoing_iocount);
 	atomic_set(&ctx->ioidle, 1);
-	//trace_printk("\n Stl is io idle!");
+	printk(KERN_ERR "\n Stl is io idle!", __func__);
 	/* Add the initialized timer to the global list */
 	/* TODO: We start the timer only when there is some work to do.
 	 * We dont want GC to be invoked for no reason!
@@ -1304,13 +1356,15 @@ void lsdm_ioidle(struct kref *kref)
 	 * when read/write invoked, if timer_enabled: disable_timer.
 	 */
 	/*
-	kref_init(kref);
 	ctx->timer.function = invoke_gc;
 	ctx->timer.data = (unsigned long) ctx;
 	ctx->timer.expired = TIME_IDLE_JIFFIES;
 	add_timer(ctx->timer);
 	*/
 }
+
+
+void no_op(struct kref *kref) { }
 
 void lsdm_subread_done(struct bio *clone)
 {
@@ -1354,7 +1408,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 	}
 
-	atomic_inc(&ctx->n_reads);
+	atomic_set(&ctx->ioidle, 0);
 	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
 		printk(KERN_ERR "\n %s could not allocate memory to clone", __func__);
@@ -1405,6 +1459,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 				printk(KERN_ERR "\n e is not null,  e->lba: %llu, e->pba: %llu, e->len: %lu \n", e->lba, e->pba, e->len);
 			}*/
 			zero_fill_bio(clone);
+			atomic_inc(&ctx->nr_reads);
 			kref_get(&ctx->ongoing_iocount);
 			clone->bi_private = read_ctx;
 			clone->bi_end_io = lsdm_subread_done;
@@ -1439,6 +1494,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 				 *  should be calling bio_endio(clone)
 				 */
 				clone->bi_status = BLK_STS_RESOURCE;
+				atomic_inc(&ctx->nr_reads);
 				kref_get(&ctx->ongoing_iocount);
 				bio->bi_status = -ENOMEM;
 				clone->bi_private = read_ctx;
@@ -1473,6 +1529,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 					 *  should be calling bio_endio(clone)
 					 */
 					clone->bi_status = BLK_STS_RESOURCE;
+					atomic_inc(&ctx->nr_reads);
 					kref_get(&ctx->ongoing_iocount);
 					bio->bi_status = -ENOMEM;
 					clone->bi_private = read_ctx;
@@ -1499,9 +1556,9 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			 * be submitted once this is
 			 * submitted
 			 */
-			atomic_set(&ctx->ioidle, 0);
 			split = clone;
 			kref_get(&ctx->ongoing_iocount);
+			atomic_inc(&ctx->nr_reads);
 			split->bi_private = read_ctx;
 			split->bi_end_io = lsdm_subread_done;
 			read_ctx->clone = clone;
@@ -3760,7 +3817,6 @@ void write_done(struct kref *kref)
 	//printk(KERN_ERR "\n %s bioctx released to bioctx_cache, %p count:%d", __func__, lsdm_bioctx, count);
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
-	atomic_dec(&ctx->nr_writes);
 }
 
 
@@ -3910,7 +3966,6 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	}
 	count++;
 	//printk(KERN_ERR "\n %s bioctx allocated from bioctx_cache, ptr: %p count: %d" , __func__, bioctx, count);
-	atomic_inc(&ctx->nr_writes);
 	bioctx->orig = bio;
 	bioctx->ctx = ctx;
 	/* TODO: Initialize refcount in bioctx and increment it every
@@ -3967,9 +4022,9 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 
 		/* Next we fetch the LBA that our DM got */
 		lba = bio->bi_iter.bi_sector;
-		atomic_set(&ctx->ioidle, 0);
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
+		atomic_inc(&ctx->nr_writes);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
@@ -5033,7 +5088,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	spin_lock_init(&ctx->ckpt_lock);
 
 	atomic_set(&ctx->io_count, 0);
-	atomic_set(&ctx->n_reads, 0);
+	atomic_set(&ctx->nr_reads, 0);
 	atomic_set(&ctx->pages_alloced, 0);
 	atomic_set(&ctx->nr_writes, 0);
 	atomic_set(&ctx->nr_failed_writes, 0);
@@ -5097,6 +5152,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	}
 
 	kref_init(&ctx->ongoing_iocount);
+	kref_put(&ctx->ongoing_iocount, no_op);
 	//trace_printk("\n About to read metadata! 5 ! \n");
 
     	ret = read_metadata(ctx);
