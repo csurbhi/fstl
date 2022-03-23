@@ -41,6 +41,7 @@
 
 #include "metadata.h"
 #define DM_MSG_PREFIX "lsdm"
+#define BIO_BUG_ON	1
 
 
 /* TODO:
@@ -637,7 +638,7 @@ static int select_zone_to_clean(struct ctx *ctx, int mode)
 static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 {
 	struct gc_extents *gc_extent;
-	int maxlen = BIO_MAX_PAGES << NR_SECTORS_IN_BLK;
+	int maxlen = (BIO_MAX_PAGES * NR_SECTORS_IN_BLK);
 	int temp = 0;
 
 	while (1) {
@@ -648,12 +649,13 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 		}
 		gc_extent = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 		if (!gc_extent) {
+			printk(KERN_ERR "\n Could not allocate memory to gc_extent! ");
 			return -ENOMEM;
 		}
 		gc_extent->e.lba = e->lba;
 		gc_extent->e.pba = e->pba;
 		gc_extent->e.len = e->len;
-		printk(KERN_ERR "\n %s lba: %llu, pba: %llu e->len: %ld", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+		printk(KERN_ERR "\n %s lba: %llu, pba: %llu e->len: %ld maxlen: %ld temp: %d", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, (maxlen), temp);
 		INIT_LIST_HEAD(&gc_extent->list);
 		/* 
 		 * We always want to add the extents in a PBA increasing order
@@ -662,6 +664,8 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 		if (temp == 0) {
 			break;
 		}
+		e->lba = e->lba + maxlen;
+		e->pba = e->pba + maxlen;
 		e->len = temp;
 	}
 	return 0;
@@ -984,6 +988,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	last_pba = get_last_pba_for_zone(ctx, zonenr);
 
 	printk(KERN_ERR "\n %s first_pba: %llu last_pba: %llu", __func__, pba, last_pba);
+
 	
 	down_write(&ctx->metadata_update_lock);
 	while(pba <= last_pba) {
@@ -1206,7 +1211,7 @@ static int gc_thread_fn(void * data)
 	unsigned int wait_ms;
 	int zonenr, newzone;
 
-	wait_ms = gc_th->min_sleep_time;
+	wait_ms = gc_th->min_sleep_time * 10;
 	mutex_init(&ctx->gc_lock);
 	printk(KERN_ERR "\n %s executing! ", __func__);
 	set_freezable();
@@ -1273,9 +1278,9 @@ static int gc_thread_fn(void * data)
 }
 
 #define DEF_GC_THREAD_URGENT_SLEEP_TIME 500     /* 500 ms */
-#define DEF_GC_THREAD_MIN_SLEEP_TIME    30000   /* milliseconds */
-#define DEF_GC_THREAD_MAX_SLEEP_TIME    60000
-#define DEF_GC_THREAD_NOGC_SLEEP_TIME   120000  /* wait 2 min */
+#define DEF_GC_THREAD_MIN_SLEEP_TIME    90000   /* milliseconds */
+#define DEF_GC_THREAD_MAX_SLEEP_TIME    120000
+#define DEF_GC_THREAD_NOGC_SLEEP_TIME   150000  /* wait 2 min */
 #define LIMIT_INVALID_BLOCK     40 /* percentage over total user space */
 #define LIMIT_FREE_BLOCK        40 /* percentage over invalid + free space */
 
@@ -1345,7 +1350,7 @@ void lsdm_ioidle(struct kref *kref)
 
 	ctx = container_of(kref, struct ctx, ongoing_iocount);
 	atomic_set(&ctx->ioidle, 1);
-	printk(KERN_ERR "\n Stl is io idle!", __func__);
+	//printk(KERN_ERR "\n Stl is io idle!", __func__);
 	/* Add the initialized timer to the global list */
 	/* TODO: We start the timer only when there is some work to do.
 	 * We dont want GC to be invoked for no reason!
