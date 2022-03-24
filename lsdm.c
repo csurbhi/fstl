@@ -931,7 +931,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr);
  * remaining blocks from this zone and write to the destn_zone.
  *
  */
-static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_flag)
+static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_mode, int err_flag)
 {
 	int zonenr;
 	sector_t pba, last_pba;
@@ -940,7 +940,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	struct gc_extents *gc_extent, *new, *temp_ptr;
 	struct list_head *list_head;
 	sector_t diff;
-	sector_t nr_sectors, s8;
+	sector_t nr_sectors, s8, s8_new;
 	struct bio *split, *bio;
 	struct rb_node *node;
 	int ret;
@@ -964,9 +964,10 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		printk(KERN_ERR "\n GC is already running! zone_to_clean: %u count: %d", zone_to_clean, count);
 		dump_stack();
 		return -1;
-	} 
+	}
 	count = 1;
 	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u count: %d ", zone_to_clean, count);
+again:
 	BUG_ON(!list_empty(&ctx->gc_extents->list));
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
 
@@ -998,7 +999,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 			printk(KERN_ERR "\n Found NULL! ");
 			break;
 		}
-		printk(KERN_ERR "\n %s Found e, PBA: %llu, LBA: %llu, len: %lu", __func__, e->lba, e->pba, e->len);
+		printk(KERN_ERR "\n %s Found e, PBA: %llu, LBA: %llu, len: %u", __func__, e->lba, e->pba, e->len);
 		/* In a reverse table extent, e->lba is actually the
 		 * PBA and e->pba is actually the LBA. This was done
 		 * for code reusability.
@@ -1044,7 +1045,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	}
 	up_write(&ctx->metadata_update_lock);
 
-	if (gc_flag == BG_GC) {
+	if (gc_mode == BG_GC) {
 		/* Wait here till the system becomes IO Idle, if system is
 		 * iodle don't wait */
 		wait_event_interruptible_timeout(*wq, is_lsdm_ioidle(ctx) ||
@@ -1064,7 +1065,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	 */
 	read_gc_extents(ctx);
 
-	if (gc_flag == BG_GC) {
+	if (gc_mode == BG_GC) {
 		/* Wait here till the system becomes IO Idle, if system is
 		 * iodle don't wait */
 		wait_event_interruptible_timeout(*wq, is_lsdm_ioidle(ctx) ||
@@ -1120,6 +1121,14 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 		 */
 		nr_sectors = bio_sectors(gc_extent->bio);
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+		s8_new = round_up(gc_extent->e.len, NR_SECTORS_IN_BLK);
+		/* if the size in the extent is reduced because of the
+		 * overwrite, we need to take care of that
+		 */
+		if (s8 > s8_new) {
+			bio_trim(bio, 0, s8_new);
+			s8 = s8_new;
+		}
 		BUG_ON(nr_sectors != s8);
 		if (s8 > ctx->free_sectors_in_gc_wf){
 			//trace_printk("SPLITTING!!!!!!!! s8: %d ctx->free_sectors_in_wf: %d", s8, ctx->free_sectors_in_wf);
@@ -1178,7 +1187,7 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_flag, int err_fla
 	/* Zone gets freed when the valid blocks count is adjusted and
 	 * becomes zero. This happens on writes.
 	 */
-	/* TODO: Mode: FG_GC */
+
 done1:
 	//printk(KERN_ERR "\n %s ctx:%llu, &ctx->gc_lock:%llu ", ctx, &ctx->gc_lock);
 	node = rb_first(&ctx->gc_rb_root);
@@ -1187,6 +1196,16 @@ done1:
 		kmem_cache_free(ctx->gc_rb_node_cache, node);
 	}
 	printk(KERN_ERR "\n %s removed zone from the gc_rb_root tree", __func__);
+
+	/* TODO: Mode: FG_GC */
+	if (gc_mode == FG_GC) {
+		/* check if you have hit w1 or else keep cleaning */
+		if (ctx->nr_freezones <= ctx->w1) {
+			zone_to_clean = select_zone_to_clean(ctx, FG_GC);	
+			goto again;
+		}
+
+	}
 /* Remove the zone from the gc_rb_root */
 
 done:
@@ -1894,11 +1913,13 @@ try_again:
 	zone_nr = get_next_freezone_nr(ctx);
 	if (zone_nr < 0) {
 		toclean = select_zone_to_clean(ctx, FG_GC);
-		printk(KERN_ERR "\n Could not find a clean zone for writing. Calling lsdm_gc on zonenr: %u", toclean);
-		lsdm_gc(ctx, toclean, FG_GC, 0);
-		if (0 == trial) {
-			trial++;
-			goto try_again;
+		if (toclean != -1) {
+			printk(KERN_ERR "\n Could not find a clean zone for writing. Calling lsdm_gc on zonenr: %u", toclean);
+			lsdm_gc(ctx, toclean, FG_GC, 0);
+			if (0 == trial) {
+				trial++;
+				goto try_again;
+			}
 		}
 		printk(KERN_INFO "No more disk space available for writing!");
 		mark_disk_full(ctx);
@@ -1906,6 +1927,12 @@ try_again:
 		return (ctx->app_write_frontier);
 	}
 
+	if (ctx->nr_freezones <= ctx->w2) {
+		toclean = select_zone_to_clean(ctx, FG_GC);
+		if (toclean != -1) {
+			lsdm_gc(ctx, toclean, FG_GC, 0);
+		}
+	}
 
 	/* get_next_freezone_nr() starts from 0. We need to adjust
 	 * the pba with that of the actual first PBA of data segment 0
@@ -5173,6 +5200,15 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 		dm_target->error = "dm-lsdm: Invalid max pba found on sb";
 		goto free_metadata_pages;
 	}
+
+	if (ctx->sb->zone_count < SMALL_NR_ZONES) {
+		ctx->w1 = ctx->sb->zone_count / 10; /* 10% */
+		ctx->w2 = ctx->w1 << 1; /* 20% */
+	} else {
+		ctx->w1 = ctx->sb->zone_count / 5; /* 5% */
+		ctx->w2 = ctx->w1 << 1; /* 2.5% */
+	}
+
 
 	//trace_printk("\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
 	ctx->gc_extents = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);

@@ -33,6 +33,11 @@
 #define NEEDS_FLUSH 1
 #define NEEDS_NO_FLUSH 0
 
+/* The next is quite random; it is used for deciding how much do we
+ * clean in a FG GC run
+ */
+#define SMALL_NR_ZONES 1000 /* 25 GB */
+
 struct gc_read_ctx {
 	struct ctx *ctx;
 	refcount_t *ref;
@@ -235,6 +240,8 @@ struct ctx {
 	struct lsdm_ckpt *ckpt;
 	char *freezone_bitmap;
 	int 	nr_freezones;
+	int 	w1;
+	int	w2;
 	char *gc_zone_bitmap;
 	int nr_gc_zones;
 	int	bitmap_bytes;
