@@ -20,11 +20,11 @@
 
 
 #define REVMAP_PRIV_MAGIC 0x5
-#define MAX_ZONE_REVMAP 2
+#define MAX_ZONE_REVMAP 1
 #define BLOCKS_IN_ZONE 65536
 #define SUBBIOCTX_MAGIC 0x2
-#define MAX_TM_PAGES 2
-#define MAX_SIT_PAGES 2
+#define MAX_TM_PAGES 1
+#define MAX_SIT_PAGES 1
 #define NSTL_MAGIC 0xF2F52010
 #define GC_GREEDY 1
 #define GC_CB 2
@@ -201,10 +201,10 @@ struct ctx {
 	int               max_pba;
 
 	spinlock_t        lock;
-	sector_t          app_write_frontier; /* LBA, protected by lock */
-	sector_t          gc_write_frontier; /* LBA, protected by lock */
-	sector_t          app_wf_end;
-	sector_t          gc_wf_end;
+	sector_t          hot_wf_pba; /* LBA, protected by lock */
+	sector_t          warm_gc_wf_pba; /* LBA, protected by lock */
+	sector_t          hot_wf_end;
+	sector_t          warm_gc_wf_end;
 	sector_t          free_sectors_in_wf;  /* Indicates the free sectors in the current write frontier */
 	sector_t          free_sectors_in_gc_wf;  /* Indicates the free sectors in the current gc  write frontier */
 	int		  n_gc_candidates;

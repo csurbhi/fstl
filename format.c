@@ -507,13 +507,13 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	ckpt->version = 0;
 	ckpt->user_block_count = sb->zone_count_main << (sb->log_zone_size - sb->log_block_size);
 	ckpt->nr_invalid_zones = 0;
-	ckpt->cur_frontier_pba = get_current_frontier(sb);
-	ckpt->cur_gc_frontier_pba = get_current_gc_frontier(sb, fd);
+	ckpt->hot_frontier_pba = get_current_frontier(sb);
+	ckpt->warm_gc_frontier_pba = get_current_gc_frontier(sb, fd);
 	ckpt->nr_free_zones = sb->zone_count_main - 2; //1 for the current frontier and gc frontier
 	ckpt->elapsed_time = 0;
 	ckpt->clean = 1;  /* 1 indicates clean datastructures */
 	ckpt->crc = 0;
-	printf("\n checkpoint: cur_frontier_pba: %lld", ckpt->cur_frontier_pba);
+	printf("\n checkpoint: cur_frontier_pba: %lld", ckpt->hot_frontier_pba);
 	/*
 	prepare_cur_seg_entry(&ckpt->cur_seg_entry);
 	prepare_prev_seg_entry(&ckpt->cur_seg_entry);
@@ -542,7 +542,7 @@ void read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	}
 
 	ret = read(fd, ckpt, BLK_SZ);
-	printf("\n Read checkpoint, ckpt->cur_frontier_pba: %lld", ckpt->cur_frontier_pba);
+	printf("\n Read checkpoint, ckpt->hot_frontier_pba: %lld", ckpt->hot_frontier_pba);
 	free(ckpt);
 }
 

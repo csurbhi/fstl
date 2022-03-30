@@ -890,7 +890,7 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
-	bio->bi_iter.bi_sector = ctx->gc_write_frontier;
+	bio->bi_iter.bi_sector = ctx->warm_gc_wf_pba;
 	nrsectors = bio_sectors(bio);
 	s8 = round_up(nrsectors, NR_SECTORS_IN_BLK);
 	BUG_ON (nrsectors != s8);
@@ -1158,7 +1158,7 @@ again:
 			list_add(&new->list, &gc_extent->list);
 		}
 		// else we do nothing
-		gc_extent->e.pba = ctx->gc_write_frontier;
+		gc_extent->e.pba = ctx->warm_gc_wf_pba;
 		write_gc_extent(ctx, gc_extent);
 		move_gc_write_frontier(ctx, s8);
 		printk(KERN_ERR "\n %s write pointer adjusted! ", __func__);
@@ -1923,8 +1923,8 @@ try_again:
 		}
 		printk(KERN_INFO "No more disk space available for writing!");
 		mark_disk_full(ctx);
-		ctx->app_write_frontier = -1;
-		return (ctx->app_write_frontier);
+		ctx->hot_wf_pba = -1;
+		return (ctx->hot_wf_pba);
 	}
 
 	if (ctx->nr_freezones <= ctx->w2) {
@@ -1937,18 +1937,18 @@ try_again:
 	/* get_next_freezone_nr() starts from 0. We need to adjust
 	 * the pba with that of the actual first PBA of data segment 0
 	 */
-	ctx->app_write_frontier = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
-	ctx->app_wf_end = zone_end(ctx, ctx->app_write_frontier);
-	//printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d app_write_frontier: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->app_write_frontier, ctx->app_wf_end);
-	if (ctx->app_write_frontier > ctx->app_wf_end) {
+	ctx->hot_wf_pba = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
+	ctx->hot_wf_end = zone_end(ctx, ctx->hot_wf_pba);
+	//printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d hot_wf_pba: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->hot_wf_pba, ctx->hot_wf_end);
+	if (ctx->hot_wf_pba > ctx->hot_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %lld", ctx->free_sectors_in_wf );
 	}
-	ctx->free_sectors_in_wf = ctx->app_wf_end - ctx->app_write_frontier + 1;
+	ctx->free_sectors_in_wf = ctx->hot_wf_end - ctx->hot_wf_pba + 1;
 	ctx->nr_freezones--;
 	//printk(KERN_ERR "\n %s ctx->nr_freezones: %llu", __func__, ctx->nr_freezones);
 	mark_zone_occupied(ctx, zone_nr);
-	add_ckpt_new_wf(ctx, ctx->app_write_frontier);
-	return ctx->app_write_frontier;
+	add_ckpt_new_wf(ctx, ctx->hot_wf_pba);
+	return ctx->hot_wf_pba;
 }
 
 
@@ -1965,22 +1965,22 @@ static int get_new_gc_zone(struct ctx *ctx)
 	if (zone_nr < 0) {
 		mark_disk_full(ctx);
 		printk(KERN_INFO "No more disk space available for writing!");
-		ctx->app_write_frontier = -1;
-		return (ctx->app_write_frontier);
+		ctx->hot_wf_pba = -1;
+		return (ctx->hot_wf_pba);
 	}
 
 	/* get_next_freezone_nr() starts from 0. We need to adjust
 	 * the pba with that of the actual first PBA of data segment 0
 	 */
-	ctx->gc_write_frontier = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
-	ctx->gc_wf_end = zone_end(ctx, ctx->gc_write_frontier);
-	printk("\n !!!!!!!!!!!!!!! get_new_gc_zone():: zone0_pba: %u zone_nr: %ld gc_write_frontier: %llu, gc_wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->gc_write_frontier, ctx->gc_wf_end);
-	if (ctx->gc_write_frontier > ctx->gc_wf_end) {
+	ctx->warm_gc_wf_pba = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
+	ctx->warm_gc_wf_end = zone_end(ctx, ctx->warm_gc_wf_pba);
+	printk("\n !!!!!!!!!!!!!!! get_new_gc_zone():: zone0_pba: %u zone_nr: %ld warm_gc_wf_pba: %llu, gc_wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
+	if (ctx->warm_gc_wf_pba > ctx->warm_gc_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %llu", ctx->free_sectors_in_wf );
 	}
-	ctx->free_sectors_in_gc_wf = ctx->gc_wf_end - ctx->gc_write_frontier + 1;
-	add_ckpt_new_gc_wf(ctx, ctx->gc_write_frontier);
-	return ctx->gc_write_frontier;
+	ctx->free_sectors_in_gc_wf = ctx->warm_gc_wf_end - ctx->warm_gc_wf_pba + 1;
+	add_ckpt_new_gc_wf(ctx, ctx->warm_gc_wf_pba);
+	return ctx->warm_gc_wf_pba;
 }
 
 /*
@@ -2018,13 +2018,13 @@ static int get_new_gc_zone(struct ctx *ctx)
 static void add_ckpt_new_wf(struct ctx * ctx, sector_t wf)
 {
 	struct lsdm_ckpt *ckpt = ctx->ckpt;
-	ckpt->cur_frontier_pba = wf;
+	ckpt->hot_frontier_pba = wf;
 }
 
 static void add_ckpt_new_gc_wf(struct ctx * ctx, sector_t wf)
 {
 	struct lsdm_ckpt *ckpt = ctx->ckpt;
-	ckpt->cur_gc_frontier_pba = wf;
+	ckpt->warm_gc_frontier_pba = wf;
 }
 
 /*
@@ -2268,9 +2268,9 @@ void update_checkpoint(struct ctx *ctx)
 	ckpt->version += 1;
 	printk(KERN_ERR "\n %s ckpt->user_block_count = %lld version: %d ", __func__, ctx->user_block_count, ckpt->version);
 	ckpt->nr_invalid_zones = ctx->nr_invalid_zones;
-	ckpt->cur_frontier_pba = ctx->app_write_frontier;
-	//trace_printk("\n %s, ckpt->cur_frontier_pba: %llu version: %lld", __func__, ckpt->cur_frontier_pba, ckpt->version);
-	ckpt->cur_gc_frontier_pba = ctx->gc_write_frontier;
+	ckpt->hot_frontier_pba = ctx->hot_wf_pba;
+	//trace_printk("\n %s, ckpt->hot_frontier_pba: %llu version: %lld", __func__, ckpt->hot_frontier_pba, ckpt->version);
+	ckpt->warm_gc_frontier_pba = ctx->warm_gc_wf_pba;
 	ckpt->nr_free_zones = ctx->nr_freezones;
 	//printk(KERN_ERR "\n %s ckpt->nr_free_zones: %llu, ctx->nr_freezones: %llu", __func__, ckpt->nr_free_zones, ctx->nr_freezones);
 	ckpt->elapsed_time = get_elapsed_time(ctx);
@@ -2291,17 +2291,17 @@ void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 		panic("Wrong manipulation of wf; used unavailable sectors in a log");
 	}
 
-	ctx->app_write_frontier = ctx->app_write_frontier + sectors_s8;
+	ctx->hot_wf_pba = ctx->hot_wf_pba + sectors_s8;
 	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
 	ctx->user_block_count -= sectors_s8 / NR_SECTORS_IN_BLK;
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
 		//printk(KERN_INFO "Num of free sect.: %llu, about to call get_new_zone() \n", ctx->free_sectors_in_wf);
-		if ((ctx->app_write_frontier - 1) != ctx->app_wf_end) {
-			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->app_write_frontier, ctx->app_wf_end);
-			BUG_ON(ctx->app_write_frontier != (ctx->app_wf_end + 1));
+		if ((ctx->hot_wf_pba - 1) != ctx->hot_wf_end) {
+			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->hot_wf_pba, ctx->hot_wf_end);
+			BUG_ON(ctx->hot_wf_pba != (ctx->hot_wf_end + 1));
 		}
 		get_new_zone(ctx);
-		if (ctx->app_write_frontier < 0) {
+		if (ctx->hot_wf_pba < 0) {
 			panic("No more disk space available for writing!");
 		}
 	}
@@ -2319,15 +2319,15 @@ void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 		panic("Wrong manipulation of gc wf; used unavailable sectors in a log");
 	}	
 	
-	ctx->gc_write_frontier = ctx->gc_write_frontier + sectors_s8;
+	ctx->warm_gc_wf_pba = ctx->warm_gc_wf_pba + sectors_s8;
 	ctx->free_sectors_in_gc_wf = ctx->free_sectors_in_gc_wf - sectors_s8;
 	if (ctx->free_sectors_in_gc_wf < NR_SECTORS_IN_BLK) {
-		if ((ctx->gc_write_frontier - 1) != ctx->gc_wf_end) {
-			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->gc_write_frontier, ctx->gc_wf_end);
-			BUG_ON(ctx->gc_write_frontier != (ctx->gc_wf_end + 1));
+		if ((ctx->warm_gc_wf_pba - 1) != ctx->warm_gc_wf_end) {
+			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
+			BUG_ON(ctx->warm_gc_wf_pba != (ctx->warm_gc_wf_end + 1));
 		}
 		get_new_gc_zone(ctx);
-		if (ctx->gc_write_frontier < 0) {
+		if (ctx->warm_gc_wf_pba < 0) {
 			panic("No more disk space available for writing!");
 		}
 	}
@@ -2468,8 +2468,8 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	 * the older cost which is stored in the tree. The newer ones
 	 * on the other hand are used to modify the tree
 	 */
-	if ((zonenr != get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba)) &&
-                    (zonenr != get_zone_nr(ctx, ctx->ckpt->cur_gc_frontier_pba))) {
+	if ((zonenr != get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) &&
+                    (zonenr != get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
 		// printk(KERN_ERR "\n updating gc rb zonenr: %d nrblks: %d", ptr->vblocks);
 		/* add mtime here */
 		ptr->mtime = get_elapsed_time(ctx);
@@ -4004,7 +4004,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	 * time bio is split or padded */
 	kref_init(&bioctx->ref);
 
-	//printk(KERN_ERR "\n write frontier: %llu free_sectors_in_wf: %llu", ctx->app_write_frontier, ctx->free_sectors_in_wf);
+	//printk(KERN_ERR "\n write frontier: %llu free_sectors_in_wf: %llu", ctx->hot_wf_pba, ctx->free_sectors_in_wf);
 
 	blk_start_plug(&plug);
 	
@@ -4021,7 +4021,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		//trace_printk("\n subbio_ctx: %llu", subbio_ctx);
 		spin_lock(&ctx->lock);
 		/*-------------------------------*/
-		wf = ctx->app_write_frontier;
+		wf = ctx->hot_wf_pba;
 		
 		/* room_in_zone should be same as
 		 * ctx->nr_free_sectors_in_wf
@@ -4141,7 +4141,7 @@ struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 		return NULL;
 
        	ckpt = (struct lsdm_ckpt *) page_address(page);
-	//printk(KERN_INFO "\n ** blknr: %llu, ckpt->magic: %u, ckpt->cur_frontier_pba: %lld", blknr, ckpt->magic, ckpt->cur_frontier_pba);
+	//printk(KERN_INFO "\n ** blknr: %llu, ckpt->magic: %u, ckpt->hot_frontier_pba: %lld", blknr, ckpt->magic, ckpt->hot_frontier_pba);
 	if (ckpt->magic == 0) {
 		__free_pages(page, 0);
 		return NULL;
@@ -4254,7 +4254,7 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	ctx->user_block_count = ckpt->user_block_count;
 	printk(KERN_ERR "\n %s Nr of free blocks: %d \n",  __func__, ctx->user_block_count);
 	ctx->nr_invalid_zones = ckpt->nr_invalid_zones;
-	ctx->app_write_frontier = ckpt->cur_frontier_pba;
+	ctx->hot_wf_pba = ckpt->hot_frontier_pba;
 	ctx->elapsed_time = ckpt->elapsed_time;
 	/* TODO: Do recovery if necessary */
 	//do_recovery(ckpt);
@@ -4680,11 +4680,11 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
 	//trace_printk("\n Number of seg entries: %u", nr_seg_entries);
-	//trace_printk("\n cur_frontier_pba: %llu, frontier zone: %u", ctx->ckpt->cur_frontier_pba, get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba));
+	//trace_printk("\n hot_frontier_pba: %llu, frontier zone: %u", ctx->ckpt->hot_frontier_pba, get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
 
 	while (i < nr_seg_entries) {
-		if ((*zonenr == get_zone_nr(ctx, ctx->ckpt->cur_frontier_pba)) ||
-		    (*zonenr == get_zone_nr(ctx, ctx->ckpt->cur_gc_frontier_pba))) {
+		if ((*zonenr == get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) ||
+		    (*zonenr == get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
 			//trace_printk("\n zonenr: %d is our cur_frontier! not marking it free!", *zonenr);
 			spin_lock(&ctx->lock);
 			mark_zone_occupied(ctx , *zonenr);
@@ -4877,20 +4877,20 @@ int read_metadata(struct ctx * ctx)
 	//printk(KERN_ERR "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
 	//printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
 
-	ctx->app_write_frontier = ctx->ckpt->cur_frontier_pba;
-	//printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
-	ctx->app_wf_end = zone_end(ctx, ctx->app_write_frontier);
-	//printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->app_wf_end);
+	ctx->hot_wf_pba = ctx->ckpt->hot_frontier_pba;
+	//printk(KERN_ERR "\n %s %d ctx->hot_wf_pba: %llu\n", __func__, __LINE__, ctx->hot_wf_pba);
+	ctx->hot_wf_end = zone_end(ctx, ctx->hot_wf_pba);
+	//printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->hot_wf_end);
 	//printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
-	ctx->free_sectors_in_wf = ctx->app_wf_end - ctx->app_write_frontier + 1;
+	ctx->free_sectors_in_wf = ctx->hot_wf_end - ctx->hot_wf_pba + 1;
 	//printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
 	
-	ctx->gc_write_frontier = ctx->ckpt->cur_gc_frontier_pba;
-	//printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
-	ctx->gc_wf_end = zone_end(ctx, ctx->gc_write_frontier);
-	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->app_wf_end);
+	ctx->warm_gc_wf_pba = ctx->ckpt->warm_gc_frontier_pba;
+	//printk(KERN_ERR "\n %s %d ctx->hot_wf_pba: %llu\n", __func__, __LINE__, ctx->hot_wf_pba);
+	ctx->warm_gc_wf_end = zone_end(ctx, ctx->warm_gc_wf_pba);
+	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->hot_wf_end);
 	printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
-	ctx->free_sectors_in_gc_wf = ctx->gc_wf_end - ctx->gc_write_frontier + 1;
+	ctx->free_sectors_in_gc_wf = ctx->warm_gc_wf_end - ctx->warm_gc_wf_pba + 1;
 
 	ret = read_revmap_bitmap(ctx);
 	if (ret) {

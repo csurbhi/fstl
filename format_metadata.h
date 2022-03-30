@@ -105,7 +105,8 @@ __u8 valid_map[VBLK_MAP_SIZE];
 #define TM_ENTRIES_BLK 		(BLK_SIZE/sizeof(struct tm_entry))
 
 struct lsdm_seg_entry {
-	__le32 vblocks;
+	unsigned char temp;
+	__le16 vblocks;  /* maximum vblocks currently are 65536 */
 	__le64 mtime;
 	/* We do not store any valid map here
 	 * as an extent map is stored separately
@@ -158,8 +159,8 @@ struct lsdm_ckpt {
 	__le64 version;
 	__le64 user_block_count;
 	__le32 nr_invalid_zones;	/* zones that have errors in them */
-	__le64 cur_frontier_pba;
-	__le64 cur_gc_frontier_pba;
+	__le64 hot_frontier_pba;
+	__le64 warm_gc_frontier_pba;
 	__le64 nr_free_zones;
 	__le64 elapsed_time;		/* records the time elapsed since all the mounts */
 	__u8 clean;			/* becomes 0 in ctr and 1 in dtr. Used to identify crash */
@@ -170,10 +171,6 @@ struct lsdm_ckpt {
 struct lsdm_revmap_bitmaps {
 	unsigned char bitmap0[4096];
 } __attribute__((packed));
-
-struct lsdm_sit_cache {
-
-}__attribute__((packed));
 
 
 #define STL_SB_SIZE 4096
