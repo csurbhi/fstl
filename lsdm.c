@@ -3231,7 +3231,6 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	 * translation block.
 	 *
 	 */
-	return;
 	u64 blknr = lba/TM_ENTRIES_BLK;
 	
 	new_tmpage = search_tm_kv_store(ctx, blknr, &parent);
@@ -3256,6 +3255,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 
 	new_tmpage = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
 	if (!new_tmpage) {
+		printk(KERN_ERR "\n %s cannot allocate new_tmpage ", __func__);
 		return NULL;
 	}
 	
@@ -4035,6 +4035,10 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 			if (s8 <= 0) {
 				panic("Should always have atleast a block left ");
 			}
+			move_write_frontier(ctx, s8);
+		/*-------------------------------*/
+			spin_unlock(&ctx->lock);
+			/* We cannot call bio_split with spinlock held! */
 			if (!(split = bio_split(clone, s8, GFP_NOIO, ctx->bs))){
 				//trace_printk("\n failed at bio_split! ");
 				kmem_cache_free(ctx->subbio_ctx_cache, subbio_ctx);
@@ -4049,10 +4053,10 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 			 * translation map, not padded entry
 			 */
 			subbio_ctx->extent.len = nr_sectors;
-		}
-		move_write_frontier(ctx, s8);
+			move_write_frontier(ctx, s8);
 		/*-------------------------------*/
-		spin_unlock(&ctx->lock);
+			spin_unlock(&ctx->lock);
+		}
     		
 
 		/* Next we fetch the LBA that our DM got */
@@ -4723,10 +4727,8 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 				ctx->min_mtime = entry->mtime;
 			if (ctx->max_mtime < entry->mtime)
 				ctx->max_mtime = entry->mtime;
-			/*
 			if (!update_gc_rb_tree(ctx, *zonenr, entry->vblocks, entry->mtime))
 				panic("Memory error, write a memory shrinker!");
-			*/
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
