@@ -13,6 +13,7 @@ all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules EXTRA_CFLAGS="$(MY_CFLAGS)"
 	gcc write_zones.c -o writezones
 	gcc read_verify.c -o readverify
+	gcc format.c -o format
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean

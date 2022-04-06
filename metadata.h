@@ -198,7 +198,7 @@ struct gc_extents {
 */
 struct ctx {
 	sector_t          nr_lbas_in_zone;	/* in 512B LBAs */
-	int               max_pba;
+	u64		  max_pba;
 
 	spinlock_t        lock;
 	sector_t          hot_wf_pba; /* LBA, protected by lock */

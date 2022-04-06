@@ -182,23 +182,23 @@ struct lsdm_sb {
 	__le32 log_block_size;		/* log2 block size in bytes */
 	__le32 log_zone_size;		/* log2 zone size in bytes */
 	__le32 checksum_offset;		/* checksum offset inside super block */
-	__le32 zone_count;		/* total # of segments */
-	__le32 blk_count_revmap;	/* # of blocks for storing reverse mapping */
-	__le32 blk_count_ckpt;		/* # of blocks for checkpoint */
-	__le32 blk_count_revmap_bm;	/* # of blocks for storing the bitmap of revmap blks availabilty */
-	__le32 blk_count_tm;		/* # of segments for Translation map */
-	__le32 blk_count_sit;		/* # of segments for SIT */
-	__le32 zone_count_reserved;	/* # CMR zones that are reserved */
-	__le32 zone_count_main;		/* # of segments for main area */
-	__le32 revmap_pba;		/* start block address of revmap*/
-	__le32 tm_pba;			/* start block address of translation map */
-	__le32 revmap_bm_pba;		/* start block address of reverse map bitmap */
-	__le32 ckpt1_pba;		/* start address of checkpoint 1 */
-        __le32 ckpt2_pba;		/* start address of checkpoint 2 */
-	__le32 sit_pba;			/* start block address of SIT */
+	__le64 zone_count;		/* total # of segments */
+	__le64 blk_count_revmap;	/* # of blocks for storing reverse mapping */
+	__le64 blk_count_ckpt;		/* # of blocks for checkpoint */
+	__le64 blk_count_revmap_bm;	/* # of blocks for storing the bitmap of revmap blks availabilty */
+	__le64 blk_count_tm;		/* # of segments for Translation map */
+	__le64 blk_count_sit;		/* # of segments for SIT */
+	__le64 zone_count_reserved;	/* # CMR zones that are reserved */
+	__le64 zone_count_main;		/* # of segments for main area */
+	__le64 revmap_pba;		/* start block address of revmap*/
+	__le64 tm_pba;			/* start block address of translation map */
+	__le64 revmap_bm_pba;		/* start block address of reverse map bitmap */
+	__le64 ckpt1_pba;		/* start address of checkpoint 1 */
+        __le64 ckpt2_pba;		/* start address of checkpoint 2 */
+	__le64 sit_pba;			/* start block address of SIT */
 	__le32 order_revmap_bm;		/* log of number of blocks used for revmap bitmap */
-	__le32 zone0_pba;		/* start block address of segment 0 */
-	__le32 max_pba;                 /* The last lba in the disk */
+	__le64 zone0_pba;		/* start block address of segment 0 */
+	__le64 max_pba;                 /* The last lba in the disk */
 	//__u8 uuid[16];			/* 128-bit uuid for volume */
 	//__le16 volume_name[MAX_VOLUME_NAME];	/* volume name */
 	__le32 crc;			/* checksum of superblock */
