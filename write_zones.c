@@ -5,7 +5,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define NR_ZONES 1
+#define NR_ZONES 50
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
 
@@ -82,6 +82,7 @@ int main(int argc, char *argv[])
 	close(fd);
 
 	sync();
+	return 0;
 
 	printf("\n Conducting overwrites verification! .......");
 

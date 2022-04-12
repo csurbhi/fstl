@@ -2677,11 +2677,11 @@ struct page * read_block(struct ctx *ctx, u64 base, u64 sectornr)
 	submit_bio_wait(bio);
 	//printk(KERN_ERR "\n read a block from pba: %llu", pba);
 	if (bio->bi_status != BLK_STS_OK) {
-		printk(KERN_DEBUG "\n Could not read the block");
+		printk(KERN_ERR "\n Could not read the block");
 		bio_free_pages(bio);
 		bio_put(bio);
 		return NULL;
-	} 
+	}
 	/* bio_alloc() hence bio_put() */
 	bio_put(bio);
 	return page;
@@ -2833,8 +2833,8 @@ void remove_sit_pages(struct ctx *ctx, struct rb_node *node)
 	if (!page)
 		return;
 
-	rb_erase(node, &ctx->tm_rb_root);
 	__free_pages(page, 0);
+	rb_erase(&sit_page->rb, &ctx->tm_rb_root);
 	kmem_cache_free(ctx->sit_page_cache, sit_page);
 /*-------------------------------------------------------------*/
 	up(&ctx->sit_kv_store_lock);
@@ -3849,9 +3849,8 @@ void write_done(struct kref *kref)
 
 	ctx = lsdm_bioctx->ctx;
 	count ++;
-	//printk(KERN_ERR "\n %s bioctx released to bioctx_cache, %p count:%d", __func__, lsdm_bioctx, count);
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
-	kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
+	//kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 }
 
 
@@ -3864,15 +3863,21 @@ void sub_write_done(struct work_struct * w)
 	sector_t lba, pba;
 	unsigned int len;
 	static int count = 0;
+	struct bio * bio;
 
 	subbioctx = container_of(w, struct lsdm_sub_bioctx, work);
+	bio = subbioctx->bioctx->orig;
 	bioctx = subbioctx->bioctx;
-	ctx = bioctx->ctx;
 	kref_put(&bioctx->ref, write_done);
+	ctx = bioctx->ctx;
 	/* Task completed successfully */
 	lba = subbioctx->extent.lba;
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
+
+	if (bio->bi_status != BLK_STS_OK) {
+		printk(KERN_ERR "\n %s bio failed lba: %llu pba: %llu bio->bi_status: %d", __func__, lba, pba, bio->bi_status);
+	}
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 
 	/* for now updating the metadata in the write request itself
@@ -3880,13 +3885,11 @@ void sub_write_done(struct work_struct * w)
 	 */
 	count++;
 	//printk(KERN_ERR "\n %s done; %llu at %llu len: %lu count: %d", __func__, lba, pba, len, count);
-	down_write(&ctx->metadata_update_lock);
+	//down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
-	add_revmap_entries(ctx, lba, pba, len);
-	lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
-	lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
+	//add_revmap_entries(ctx, lba, pba, len);
 	/*-------------------------------*/
-	up_write(&ctx->metadata_update_lock);
+	//up_write(&ctx->metadata_update_lock);
 
 	//printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu done \n", __func__, lba);
 	return;
@@ -4073,7 +4076,13 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		split->bi_end_io = lsdm_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
 		submit_bio(split);
-		//printk(KERN_ERR "\n %s Submitted bio, lba: %llu, pba: %llu", __func__, lba, wf);
+		//printk(KERN_ERR "\n lba: %llu, pba: %llu", lba, wf);
+		down_write(&ctx->metadata_update_lock);
+		/*------------------------------- */
+		lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, wf, subbio_ctx->extent.len);
+		lsdm_update_range(ctx, &ctx->rev_tbl_root, wf, lba, subbio_ctx->extent.len);
+		/*-------------------------------*/
+		up_write(&ctx->metadata_update_lock);
 	} while (split != clone);
 
 	/* We might need padding when the original request is not block
@@ -4572,6 +4581,11 @@ unsigned int get_cb_cost(struct ctx *ctx , u32 nrblks, u64 mtime)
 	struct lsdm_sb *sb = ctx->sb;
 
 	u = (nrblks * 100) >> (sb->log_zone_size - sb->log_block_size);
+
+	if (!(ctx->max_mtime - ctx->min_mtime)) {
+		dump_stack();
+		return u;
+	}
 	age = 100 - div_u64(100 * (mtime - ctx->min_mtime),
 				ctx->max_mtime - ctx->min_mtime);
 
@@ -4609,6 +4623,7 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	static int count = 0;
 
 	BUG_ON(nrblks == 0);
+	return 0;
 
 	/* We are essentially adding a new node here */
 	new = kmem_cache_alloc(ctx->gc_rb_node_cache, GFP_KERNEL);
@@ -4635,6 +4650,8 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 		 */
 		if (zonenr == e->zonenr) {
 			parent = rb_parent(&e->rb);
+			if (&e->cb_cost == cb_cost)
+				return 0;
 			rb_erase(&e->rb, root);
 			kmem_cache_free(ctx->gc_rb_node_cache, e);
 			//printk(KERN_ERR "\n %s Found the zone: %d and deleted it, will read again later! ", __func__, zonenr);
@@ -4675,7 +4692,7 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	rb_insert_color(&new->rb, root);
 	write_unlock(&ctx->sit_rb_lock);
 
-	//printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
+	printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
 	//zonenr = select_zone_to_clean(ctx, BG_GC);
 	//printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
 	return 0;
@@ -4698,13 +4715,13 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 	sb = ctx->sb;
 
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
-	//trace_printk("\n Number of seg entries: %u", nr_seg_entries);
-	//trace_printk("\n hot_frontier_pba: %llu, frontier zone: %u", ctx->ckpt->hot_frontier_pba, get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
+	//printk("\n Number of seg entries: %u", nr_seg_entries);
+	//printk("\n hot_frontier_pba: %llu, frontier zone: %u", ctx->ckpt->hot_frontier_pba, get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
 
 	while (i < nr_seg_entries) {
 		if ((*zonenr == get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) ||
 		    (*zonenr == get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
-			//trace_printk("\n zonenr: %d is our cur_frontier! not marking it free!", *zonenr);
+			printk(KERN_ERR "\n zonenr: %d vblocks: %llu is our cur_frontier! not marking it free!", *zonenr, entry->vblocks);
 			spin_lock(&ctx->lock);
 			mark_zone_occupied(ctx , *zonenr);
 			spin_unlock(&ctx->lock);
@@ -4721,7 +4738,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			spin_unlock(&ctx->lock);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
-			//trace_printk("\n *segnr: %u", *zonenr);
+			printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
 			mark_zone_gc_candidate(ctx, *zonenr);
 			if (ctx->min_mtime > entry->mtime)
 				ctx->min_mtime = entry->mtime;
@@ -4785,16 +4802,17 @@ int read_seg_info_table(struct ctx *ctx)
 	ctx->max_mtime = get_elapsed_time(ctx);
 	nrblks = sb->blk_count_sit;
 	sectornr = 0;
-	printk(KERN_ERR "\n %s Read seginfo from pba: %llu zone0_pba: %llu", __func__, sb->sit_pba, ctx->sb->zone0_pba);
 	printk(KERN_ERR "\n ctx->ckpt->hot_frontier_pba: %llu", ctx->ckpt->hot_frontier_pba);
 	printk(KERN_ERR "\n ctx->ckpt->warm_gc_frontier_pba: %llu", ctx->ckpt->warm_gc_frontier_pba);
+	printk(KERN_ERR "\n get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba): %u", get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
+	printk(KERN_ERR "\n %s Read seginfo from pba: %llu sectornr: %d zone0_pba: %llu", __func__, sb->sit_pba, sectornr, ctx->sb->zone0_pba);
 	while (zonenr < sb->zone_count_main) {
 		//trace_printk("\n zonenr: %u", zonenr);
 		if ((sectornr + sb->sit_pba) > ctx->sb->zone0_pba) {
 			printk(KERN_ERR "\n Seg entry blknr cannot be bigger than the data blknr");
 			return -1;
 		}
-		sit_page = read_block(ctx, sb->sit_pba, sectornr);
+		sit_page = read_block(ctx, 244209024, 0);
 		if (!sit_page) {
 			kfree(ctx->freezone_bitmap);
 			kfree(ctx->gc_zone_bitmap);
@@ -5247,13 +5265,12 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	/*
 	 * Will work with timer based invocation later
 	 * init_timer(ctx->timer);
-	 */
+	 *
 	ret = lsdm_gc_thread_start(ctx);
 	if (ret) {
 		goto free_metadata_pages;
 	}
 
-	/*
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
 	*/
@@ -5270,7 +5287,7 @@ free_metadata_pages:
 	if (ctx->sb_page)
 		__free_pages(ctx->sb_page, 0);
 	if (ctx->ckpt_page)
-		free_pages(ctx->ckpt_page, 0);
+		__free_pages(ctx->ckpt_page, 0);
 	/* TODO : free extent page
 	 * and segentries page */
 destroy_cache:
@@ -5316,7 +5333,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	//flush_workqueue(ctx->writes_wq);
 	INIT_WORK(&ctx->tb_work, flush_translation_blocks);
 	flush_translation_blocks(&ctx->tb_work);
-	printk(KERN_ERR "\n %s translation blocks flushed process started! ");
+	printk(KERN_ERR "\n %s translation blocks flushed process started! ", __func__);
 	wait_event(ctx->tmq, (!atomic_read(&ctx->tm_ref)));
 	/* Wait for the ALL the translation pages to be flushed to the
 	 * disk. The removal work is queued.
@@ -5349,7 +5366,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * del_timer_sync(&ctx->timer_list);
 	 */
 	//trace_printk("\n caches destroyed! \n");
-	lsdm_gc_thread_stop(ctx);
+	//lsdm_gc_thread_stop(ctx);
 	printk(KERN_ERR "\n gc thread stopped! \n");
 	bioset_exit(ctx->bs);
 	//trace_printk("\n exited from bioset \n");
