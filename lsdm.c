@@ -43,6 +43,8 @@
 #define DM_MSG_PREFIX "lsdm"
 #define BIO_BUG_ON	1
 
+// for now: 
+#define ZONE_SZ (256 * 1024 * 1024)
 
 /* TODO:
  * 1) Convert the STL in a block mapped STL rather
@@ -1664,6 +1666,8 @@ void remove_partial_entries(struct ctx *ctx, struct bio * bio)
 void mark_disk_full(struct ctx *ctx)
 {
 	struct lsdm_ckpt *ckpt = ctx->ckpt;
+	dump_stack();
+	printk(KERN_ERR "\n Marking disk full!! ");
 	ckpt->nr_free_zones  = 0;
 }
 
@@ -1812,6 +1816,8 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	if (unlikely(NULL == ctx)) {
 		panic("This is a ctx bug");
 	}
+
+	spin_lock(&ctx->lock);
 		
 	bitmap = ctx->freezone_bitmap;
 	bytenr = zonenr / BITS_IN_BYTE;
@@ -1838,6 +1844,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
+	spin_unlock(&ctx->lock);
 	//printk(KERN_ERR "\n %s ctx->nr_freezones: %llu", __func__, ctx->nr_freezones);
 }
 
@@ -1923,7 +1930,7 @@ try_again:
 		}
 		printk(KERN_INFO "No more disk space available for writing!");
 		mark_disk_full(ctx);
-		ctx->app_write_frontier = -1;
+		ctx->app_write_frontier = 0; 
 		return (ctx->app_write_frontier);
 	}
 
@@ -1939,12 +1946,11 @@ try_again:
 	 */
 	ctx->app_write_frontier = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	ctx->app_wf_end = zone_end(ctx, ctx->app_write_frontier);
-	//printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d app_write_frontier: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->app_write_frontier, ctx->app_wf_end);
+	printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d app_write_frontier: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->app_write_frontier, ctx->app_wf_end);
 	if (ctx->app_write_frontier > ctx->app_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %lld", ctx->free_sectors_in_wf );
 	}
 	ctx->free_sectors_in_wf = ctx->app_wf_end - ctx->app_write_frontier + 1;
-	ctx->nr_freezones--;
 	//printk(KERN_ERR "\n %s ctx->nr_freezones: %llu", __func__, ctx->nr_freezones);
 	mark_zone_occupied(ctx, zone_nr);
 	add_ckpt_new_wf(ctx, ctx->app_write_frontier);
@@ -2301,7 +2307,7 @@ void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 			BUG_ON(ctx->app_write_frontier != (ctx->app_wf_end + 1));
 		}
 		get_new_zone(ctx);
-		if (ctx->app_write_frontier < 0) {
+		if (ctx->app_write_frontier == 0) {
 			panic("No more disk space available for writing!");
 		}
 	}
@@ -2481,9 +2487,20 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		//printk(KERN_ERR "\n %s done! vblocks: %d pba: %lu, index: %d , ptr: %p", __func__, ptr->vblocks, pba, index, ptr);
 	}
 	if (!ptr->vblocks) {
-		spin_lock(&ctx->lock);
-		mark_zone_free(ctx , zonenr);
-		spin_unlock(&ctx->lock);
+		sector_t sector_pba;
+		int ret;
+		/* we need to reset the  zone that we are about to use */
+		sector_pba = get_first_pba_for_zone(ctx, zonenr);
+		ret = blkdev_reset_zones(ctx->dev->bdev, sector_pba, (1<< (ctx->sb->log_zone_size - ctx->sb->log_sector_size)),GFP_NOIO);
+		if (!ret) {
+			mark_zone_free(ctx , zonenr);
+		} else {
+		       printk(KERN_ERR "\n Zone reset for zonenr: %llu failed! ");
+		       /* This zone cannot be reused, hence we do not
+			* mark it free 
+			*/
+		}
+
 	}
 	up(&ctx->sit_kv_store_lock);
 
@@ -3838,14 +3855,12 @@ void write_done(struct kref *kref)
 	struct bio *bio;
 	struct lsdm_bioctx * lsdm_bioctx;
 	struct ctx *ctx;
-	static int count = 0;
 
 	lsdm_bioctx = container_of(kref, struct lsdm_bioctx, ref);
 	bio = lsdm_bioctx->orig;
 	bio_endio(bio);
 
 	ctx = lsdm_bioctx->ctx;
-	count ++;
 	//printk(KERN_ERR "\n %s bioctx released to bioctx_cache, %p count:%d", __func__, lsdm_bioctx, count);
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
@@ -3857,33 +3872,21 @@ void sub_write_done(struct work_struct * w)
 
 	struct lsdm_sub_bioctx *subbioctx = NULL;
 	struct lsdm_bioctx * bioctx;
-	struct ctx *ctx;
 	sector_t lba, pba;
 	unsigned int len;
-	static int count = 0;
 
 	subbioctx = container_of(w, struct lsdm_sub_bioctx, work);
 	bioctx = subbioctx->bioctx;
-	ctx = bioctx->ctx;
-	kref_put(&bioctx->ref, write_done);
 	/* Task completed successfully */
 	lba = subbioctx->extent.lba;
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+	//kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 
 	/* for now updating the metadata in the write request itself
 	 * (part of debug)
 	 */
-	count++;
 	//printk(KERN_ERR "\n %s done; %llu at %llu len: %lu count: %d", __func__, lba, pba, len, count);
-	down_write(&ctx->metadata_update_lock);
-	/*------------------------------- */
-	add_revmap_entries(ctx, lba, pba, len);
-	lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, pba, len);
-	lsdm_update_range(ctx, &ctx->rev_tbl_root, pba, lba, len);
-	/*-------------------------------*/
-	up_write(&ctx->metadata_update_lock);
 
 	//printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu done \n", __func__, lba);
 	return;
@@ -3905,16 +3908,20 @@ void lsdm_clone_endio(struct bio * clone)
 	struct lsdm_sub_bioctx *subbioctx = NULL;
 	struct bio *bio = NULL;
 	struct ctx *ctx;
+	struct lsdm_bioctx * bioctx;
 
 	subbioctx = clone->bi_private;
-	ctx = subbioctx->bioctx->ctx;
-	bio = subbioctx->bioctx->orig;
+	bioctx = subbioctx->bioctx;
+	ctx = bioctx->ctx;
+	bio = bioctx->orig;
 	if (bio && bio->bi_status == BLK_STS_OK) {
 		bio->bi_status = clone->bi_status;
 	} 
 	bio_put(clone);
-	INIT_WORK(&subbioctx->work, sub_write_done);
-	queue_work(ctx->writes_wq, &subbioctx->work);
+	kref_put(&bioctx->ref, write_done);
+	//INIT_WORK(&subbioctx->work, sub_write_done);
+	//queue_work(ctx->writes_wq, &subbioctx->work);
+	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 	return;
 }
 
@@ -4037,15 +4044,9 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 				kmem_cache_free(ctx->subbio_ctx_cache, subbio_ctx);
 				goto fail;
 			}
-			subbio_ctx->extent.len = s8;
 		} 
 		else {
 			split = clone;
-			/* s8 might be bigger than nr_sectors. We want
-			 * to maintain the exact length in the
-			 * translation map, not padded entry
-			 */
-			subbio_ctx->extent.len = nr_sectors;
 		}
 		move_write_frontier(ctx, s8);
 		/*-------------------------------*/
@@ -4053,6 +4054,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
     		
 
 		/* Next we fetch the LBA that our DM got */
+		subbio_ctx->extent.len = s8;
 		lba = bio->bi_iter.bi_sector;
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
@@ -4066,6 +4068,14 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		split->bi_end_io = lsdm_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
 		submit_bio(split);
+		down_write(&ctx->metadata_update_lock);
+		/*------------------------------- */
+		//add_revmap_entries(ctx, lba, pba, len);
+		lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, wf, s8);
+		lsdm_update_range(ctx, &ctx->rev_tbl_root, wf, lba, s8);
+		/*-------------------------------*/
+		up_write(&ctx->metadata_update_lock);
+
 		//printk(KERN_ERR "\n %s Submitted bio, lba: %llu, pba: %llu", __func__, lba, wf);
 	} while (split != clone);
 
@@ -4116,7 +4126,7 @@ fail:
    argv[2] = zone size (LBAs)
    argv[3] = max pba
    */
-#define BS_NR_POOL_PAGES 128
+#define BS_NR_POOL_PAGES 4096 
 
 /* TODO: IMPLEMENT */
 void put_free_zone(struct ctx *ctx, u64 pba)
@@ -5084,6 +5094,8 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	}
 
 	dm_target->private = ctx;
+	dm_target->max_io_len = ZONE_SZ;
+
 
 	ret = dm_get_device(dm_target, argv[0], dm_table_get_mode(dm_target->table), &ctx->dev);
     	if (ret) {
@@ -5166,7 +5178,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	if (!ctx->bs)
 		goto destroy_page_pool;
 
-	if(bioset_init(ctx->bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS|BIOSET_NEED_RESCUER) == -ENOMEM) {
+	if(bioset_init(ctx->bs, BS_NR_POOL_PAGES, 0, 0) == -ENOMEM) {
 		//trace_printk("\n bioset_init failed!");
 		goto free_bioset;
 	}
@@ -5342,40 +5354,6 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	return;
 }
 
-int lsdm_zone_reset(struct ctx *ctx, struct bio *bio)
-{
-	struct block_device *bdev;
-	sector_t sector;
-	sector_t nr_sectors;
-	//int ret;
-
-	bdev = ctx->dev->bdev;
-	sector = bio->bi_iter.bi_sector;
-	nr_sectors = bio_sectors(bio);
-
-	/* TODO: Adjust the segentries, number of free blocks,
-	 * number of free zones, etc
-	 * If that zone has 0 blocks then nothing much needs to be
-	 * done. After that call:
-	 * do_checkpoint();
-	 */
-
-	/*ret  = blkdev_reset_zones(bdev, sector, nr_sectors, GFP_KERNEL);
-	if (ret)
-		return ret;
-	*/
-	return 0;
-}
-
-/*
- * TODO: IMPLEMENT
- *
- */
-int lsdm_zone_reset_all(struct ctx *ctx, struct bio *bio)
-{
-	return 0;
-}
-
 int ls_dm_dev_map_io(struct dm_target *dm_target, struct bio *bio)
 {
 	struct ctx *ctx;
@@ -5386,6 +5364,7 @@ int ls_dm_dev_map_io(struct dm_target *dm_target, struct bio *bio)
 		return 0;
 	}
 
+	bio_set_dev(bio, ctx->dev->bdev);
 	ctx = dm_target->private;
 
 	if(unlikely(bio == NULL)) {

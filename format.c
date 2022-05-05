@@ -1,4 +1,6 @@
 #include <stdio.h>
+#define _LARGEFILE_SOURCE
+#define _FILE_OFFSET_BITS 64
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -14,8 +16,6 @@
 #include <assert.h>
 #include <sys/ioctl.h>
 
-#define _LARGEFILE_SOURCE
-#define _FILE_OFFSET_BITS 64
 
 
 #define ZONE_SZ (256 * 1024 * 1024)
@@ -592,6 +592,84 @@ void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_
 	}
 	free(buf);
 }
+
+
+void report_zone(unsigned int fd, unsigned long zonenr, struct blk_zone * bzone)
+{
+	int ret;
+	long i = 0;
+	struct blk_zone_report *bzr;
+
+
+	printf("\n-----------------------------------");
+	printf("\n %s Zonenr: %ld ", __func__, zonenr);
+	bzr = malloc(sizeof(struct blk_zone_report) + sizeof(struct blk_zone));
+	bzr->sector = bzone->start;
+	bzr->nr_zones = 1;
+
+	ret = ioctl(fd, BLKREPORTZONE, bzr);
+	if (ret) {
+		fprintf(stderr, "\n blkreportzone for zonenr: %d ioctl failed, ret: %d ", zonenr, ret);
+		perror("\n blkreportzone failed because: ");
+		return;
+	}
+	assert(bzr->nr_zones == 1);
+	printf("\n start: %ld ", bzr->zones[0].start);
+	printf("\n len: %ld ", bzr->zones[0].len);
+	printf("\n state: %d ", bzr->zones[0].cond);
+	printf("\n reset recommendation: %d ", bzr->zones[0].reset);
+	assert(bzr->zones[0].reset == 0);
+	printf("\n wp: %llu ", bzr->zones[0].wp);
+	assert(bzr->zones[0].wp == bzr->zones[0].start);
+	printf("\n non_seq: %d ", bzr->zones[0].non_seq);
+	printf("\n-----------------------------------\n"); 
+	return;	
+}
+
+void reset_shingled_zones(int fd)
+{
+	int ret;
+	long i = 0;
+	long zone_count = 0;
+	struct blk_zone_report * bzr;
+	struct blk_zone_range bz_range;
+
+
+	zone_count = get_zone_count(fd);
+
+	bzr = malloc(sizeof(struct blk_zone_report) + sizeof(struct blk_zone) * zone_count);
+
+	bzr->sector = 0;
+	bzr->nr_zones = zone_count;
+
+	ret = ioctl(fd, BLKREPORTZONE, bzr);
+	if (ret) {
+		fprintf(stdout, "\n blkreportzone for zonenr: %d ioctl failed, ret: %d ", 0, ret);
+		perror("\n blkreportzone failed because: ");
+		return;
+	}
+
+	printf("\n nr of zones reported: %d", bzr->nr_zones);
+	assert(bzr->nr_zones == zone_count);
+
+
+	for (i=0; i<bzr->nr_zones; i++) {
+		if ((bzr->zones[i].type == BLK_ZONE_TYPE_SEQWRITE_PREF)  || 
+		   (bzr->zones[i].type == BLK_ZONE_TYPE_SEQWRITE_REQ)) {
+			bz_range.sector = bzr->zones[i].start;
+			bz_range.nr_sectors = bzr->zones[i].len;
+			ret = ioctl(fd, BLKRESETZONE, &bz_range); 
+			if (ret) {
+				fprintf(stdout, "\n Could not reset zonenr with sector: %ld", bz_range.sector);
+				perror("\n blkresetzone failed because: ");
+			}
+			report_zone(fd, i, &bzr->zones[i]);
+		} else {
+			printf("\n zonenr: %d is a sequential zone! ", i);
+		}
+	}
+}
+
 
 /*
  *
