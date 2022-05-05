@@ -5,12 +5,18 @@
 #include <unistd.h>
 #include <stddef.h>
 #include <linux/types.h>
+#include <linux/fs.h>
 #include "format_metadata.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 //#include <zlib.h>
 #include <assert.h>
+#include <sys/ioctl.h>
+
+#define _LARGEFILE_SOURCE
+#define _FILE_OFFSET_BITS 64
+
 
 #define ZONE_SZ (256 * 1024 * 1024)
 #define BLK_SZ 4096
@@ -38,6 +44,7 @@ int open_disk(char *dname)
 		perror("Could not open the disk: ");
 		exit(errno);
 	}
+	printf("\n %s opened with fd: %d ", dname, fd);
 	return fd;
 }
 
@@ -63,14 +70,24 @@ int write_to_disk(int fd, char *buf, int len, int sectornr)
 
 
 
-__le32 get_zone_count()
+__le32 get_zone_count(int fd)
 {
 	__le32 zone_count = 0;
+	char str[400];
+    	__u64 capacity = 0;
+
+	if (ioctl(fd, BLKGETSIZE64, &capacity) < 0) {
+		sprintf(str, "Get capacity failed %d (%s)\n", errno, strerror(errno));
+		perror(str);
+	}
+	printf("\n capacity: %llu", capacity);
 	/* Use zone queries and find this eventually
 	 * Doing this manually for now for a 20GB 
 	 * harddisk and 256MB zone size.
 	 */
-	zone_count = 80;
+	zone_count = capacity/ZONE_SZ;
+	printf("\n Number of zones: %d ", zone_count);
+	printf("\n");
 	return zone_count;
 }
 
@@ -371,9 +388,9 @@ unsigned long long get_current_frontier(struct lsdm_sb *sb)
 	return (sit_zone_nr + 1) * (1 << (sb->log_zone_size - sb->log_sector_size));
 }
 
-unsigned long long get_current_gc_frontier(struct lsdm_sb *sb)
+unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
 {
-	int zonenr = get_zone_count();
+	int zonenr = get_zone_count(fd);
 
 	zonenr = zonenr - 20;
 	return (zonenr) * (1 << (sb->log_zone_size - sb->log_sector_size));
@@ -396,7 +413,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba)
 	sb->log_block_size = 12;
 	sb->log_zone_size = 28;
 	sb->checksum_offset = offsetof(struct lsdm_sb, crc);
-	sb->zone_count = get_zone_count(sb);
+	sb->zone_count = get_zone_count(fd);
 	printf("\n sb->zone_count: %d", sb->zone_count);
     	sb->zone_count_reserved = get_reserved_zone_count(sb);
 	printf("\n sb->zone_count_reserved: %d", sb->zone_count_reserved);
@@ -491,7 +508,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	ckpt->user_block_count = sb->zone_count_main << (sb->log_zone_size - sb->log_block_size);
 	ckpt->nr_invalid_zones = 0;
 	ckpt->cur_frontier_pba = get_current_frontier(sb);
-	ckpt->cur_gc_frontier_pba = get_current_gc_frontier(sb);
+	ckpt->cur_gc_frontier_pba = get_current_gc_frontier(sb, fd);
 	ckpt->nr_free_zones = sb->zone_count_main - 2; //1 for the current frontier and gc frontier
 	ckpt->elapsed_time = 0;
 	ckpt->clean = 1;  /* 1 indicates clean datastructures */
@@ -620,12 +637,12 @@ int main()
 	free(sb1);
 	close(fd);
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
-	unsigned long zone_lbas = 524288;
-	unsigned long data_zones = 28000;
+	unsigned long zone_lbas = 524288; /* nr of sectors in a zone */
+	unsigned long data_zones = 75;
 	char * tgtname = "TL1";
 	//volume_size = data_zones * zone_lbas;
-	unsigned long volume_size = 39321600;
-	unsigned long data_end = 41418752;
+	unsigned long volume_size = data_zones * zone_lbas;
+	unsigned long data_end = volume_size;
 	sprintf(cmd, "/sbin/dmsetup create TL1 --table '0 %ld lsdm %s %s %ld %ld'",
             volume_size, blkdev, tgtname, zone_lbas, 
 	    data_end);
