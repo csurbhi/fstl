@@ -192,7 +192,7 @@ __le32 get_main_zone_count(struct lsdm_sb *sb)
 {
 	__le32 main_zone_count = 0;
 	/* we are not subtracting reserved zones from here */
-	main_zone_count = sb->zone_count - get_metadata_zone_count(sb);
+	main_zone_count = sb->zone_count - get_metadata_zone_count(sb) - sb->zone_count_reserved;
 	return main_zone_count;
 }
 
@@ -593,6 +593,7 @@ void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_
 	free(buf);
 }
 
+/*
 
 void report_zone(unsigned int fd, unsigned long zonenr, struct blk_zone * bzone)
 {
@@ -669,6 +670,7 @@ void reset_shingled_zones(int fd)
 		}
 	}
 }
+*/
 
 
 /*
@@ -716,7 +718,7 @@ int main()
 	close(fd);
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 524288; /* nr of sectors in a zone */
-	unsigned long data_zones = 75;
+	unsigned long data_zones = 200;
 	char * tgtname = "TL1";
 	//volume_size = data_zones * zone_lbas;
 	unsigned long volume_size = data_zones * zone_lbas;

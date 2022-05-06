@@ -4249,6 +4249,7 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	printk(KERN_INFO "\n %s ckpt versions: %lld %lld", __func__, ckpt1->version, ckpt2->version);
 	if (ckpt1->version >= ckpt2->version) {
 		ckpt = ckpt1;
+		/* free ckpt2->page */
 		__free_pages(ctx->ckpt_page, 0);
 		ctx->ckpt_page = page1;
 		ctx->ckpt_pba = ctx->sb->ckpt2_pba;
@@ -4884,19 +4885,19 @@ int read_metadata(struct ctx * ctx)
 		ret = do_recovery(ctx);
 		return ret;
 	} */
-	//printk(KERN_ERR "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
-	//printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
+	printk(KERN_ERR "\n sb->blk_count_revmap_bm: %d", ctx->sb->blk_count_revmap_bm);
+	printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
 
 	ctx->app_write_frontier = ctx->ckpt->cur_frontier_pba;
-	//printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
+	printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
 	ctx->app_wf_end = zone_end(ctx, ctx->app_write_frontier);
-	//printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->app_wf_end);
-	//printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
+	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->app_wf_end);
+	printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
 	ctx->free_sectors_in_wf = ctx->app_wf_end - ctx->app_write_frontier + 1;
-	//printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
+	printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
 	
 	ctx->gc_write_frontier = ctx->ckpt->cur_gc_frontier_pba;
-	//printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
+	printk(KERN_ERR "\n %s %d ctx->app_write_frontier: %llu\n", __func__, __LINE__, ctx->app_write_frontier);
 	ctx->gc_wf_end = zone_end(ctx, ctx->gc_write_frontier);
 	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->app_wf_end);
 	printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
