@@ -13,7 +13,7 @@
 #include <sys/ioctl.h>
 
 
-#define NR_ZONES 80
+#define NR_ZONES 20
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
 
@@ -171,7 +171,6 @@ retry:
 				printf("\n");
 				return errno;
 			}
-			/*
 			for(k=0; k<BLKSZ; k++) {
 				if (buff[k] != ch) {
 					printf("\n 1) write could not be verified, lba: %llu content is not %c ", (i*NR_BLKS_IN_ZONE * 8) + (j * 8), ch);
@@ -179,7 +178,7 @@ retry:
 					printf("\n zone_nr: %d, blknr: %d k: %d buff[k]: %d \n", i, j, k, buff[k]);
 					return -1;
 				}
-			} */
+			} 
 		}
 	}
 
@@ -250,21 +249,6 @@ retry:
 				printf("\n");
 				return errno;
 			}
-			/*
-			for(k=0; k<BLKSZ; k++) {
-				if (buff[k] != ch) {
-					printf("\n Expected val: %c  and found: %d for zonenr: %d  blknr: %d, k: %d", ch, buff[k], i, j, k);
-					printf("\n");
-					return -1;
-				}
-			} */
-			ret = read(fd, buff, BLKSZ);
-			if (ret < 0) {
-				perror("\n Could not read to file because: ");
-				printf("\n");
-				return errno;
-			}
-			/*
 			for(k=0; k<BLKSZ; k++) {
 				if (buff[k] != 2) {
 					printf("\n b) Expected val: %d and found: %d for zonenr: %d  blknr: %d, k: %d", 2, buff[k], i, j, k);
@@ -272,8 +256,21 @@ retry:
 					return -1;
 				}
 			}
-			*/
-
+			 
+			ret = read(fd, buff, BLKSZ);
+			if (ret < 0) {
+				perror("\n Could not read to file because: ");
+				printf("\n");
+				return errno;
+			}
+		
+			for(k=0; k<BLKSZ; k++) {
+				if (buff[k] != ch) {
+					printf("\n Expected val: %c  and found: %d for zonenr: %d  blknr: %d, k: %d", ch, buff[k], i, j, k);
+					printf("\n");
+					return -1;
+				}
+			}
 		}
 	}
 	printf("\n");

@@ -1401,12 +1401,25 @@ void lsdm_subread_done(struct bio *clone)
 	struct ctx *ctx = read_ctx->ctx;
 	struct bio * bio = read_ctx->bio;
 
-	bio = read_ctx->bio;
-
 	bio_endio(bio);
 	//kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 	bio_put(clone);
 	kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
+}
+
+static int zero_fill_clone(struct ctx *ctx, struct app_read_ctx *read_ctx, struct bio *clone) 
+{
+	bio_set_dev(clone, ctx->dev->bdev);
+	zero_fill_bio(clone);
+	clone->bi_private = read_ctx;
+	clone->bi_end_io = lsdm_subread_done;
+	/* This bio could be the parent of other
+	 * chained bios. Its necessary to call
+	 * bio_endio and not the endio function
+	 * directly
+	 */
+	bio_endio(clone);
+	atomic_inc(&ctx->nr_reads);
 }
 
 /*
@@ -1437,6 +1450,9 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 	}
 
+	read_ctx->ctx = ctx;
+	read_ctx->bio = bio;
+
 	atomic_set(&ctx->ioidle, 0);
 	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
@@ -1447,182 +1463,84 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 	}
 
-	read_ctx->ctx = ctx;
-	read_ctx->bio = bio;
-
-
+	bio_set_dev(clone, ctx->dev->bdev);
 	nr_sectors = bio_sectors(clone);
-
 	split = NULL;
-	lba = clone->bi_iter.bi_sector;
-	e = lsdm_rb_geq(ctx, lba, print);
 
-#if 0
-	/* For debug purpose */
-	zero_fill_bio(clone);
-	atomic_inc(&ctx->nr_reads);
-	//kref_get(&ctx->ongoing_iocount);
-	clone->bi_private = read_ctx;
-	clone->bi_end_io = lsdm_subread_done;
-	read_ctx->clone = clone;
-	read_ctx->bio = bio;
-	/* This bio could be the parent of other
-	 * chained bios. Its necessary to call
-	 * bio_endio and not the endio function
-	 * directly
-	 */
-	bio_endio(clone);
-	return 0;
-	/* debug purpose until here */
-#endif 
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
 		lba = clone->bi_iter.bi_sector;
+		e = lsdm_rb_geq(ctx, lba, print);
 
-		/* note that beginning of extent is >= start of bio */
-		/* [----bio-----] [eeeeeee] a
-		 *
-		 * eeeeeeeeeeeeee		eeeeeeeeeeeee
-		 * 	bbbbbbbbbbbbbbbbbbb
-		 *
-		 * bio will be split. The second part of the bio will
-		 * fall in this next case; it will be zerofilled.
-		 * But we do not want to rush to call end_io yet,
-		 * till the first portion has completed.
-		 *
-		 * However the case could might as well be:
-		 *
-		 * Where the entire bio did not have a single split
-		 * and no overlap either:
-		 *
-		 *		eeeeeeeeeeee
-		 * bbbbbb
-		 *
+		/* case of no overlap, technically, e->lba + e->len cannot be less than lba
+		 * because of the lsdm_rb_geq() design
 		 */
-		if ((e == NULL) || (e->lba >= lba + nr_sectors) || (e->lba + e->len == lba))  {
-			/*
-			printk(KERN_ERR "\n %s lba: %llu, nrsectors: %lu", __func__, bio->bi_iter.bi_sector, nr_sectors);
-			printk(KERN_ERR "\n %s did not find a matching extent, e: %s , so zero filling! ", __func__, ((e != NULL) ?  "not null" : "null"));
-			if (e) {
-				printk(KERN_ERR "\n e is not null,  e->lba: %llu, e->pba: %llu, e->len: %lu \n", e->lba, e->pba, e->len);
-			} */
-			zero_fill_bio(clone);
-			atomic_inc(&ctx->nr_reads);
-			//kref_get(&ctx->ongoing_iocount);
-			clone->bi_private = read_ctx;
-			clone->bi_end_io = lsdm_subread_done;
-			read_ctx->clone = clone;
-			read_ctx->bio = bio;
-			/* This bio could be the parent of other
-			 * chained bios. Its necessary to call
-			 * bio_endio and not the endio function
-			 * directly
-			 */
-			bio_endio(clone);
+		if ((e == NULL) || (e->lba >= lba + nr_sectors) || (e->lba + e->len <= lba))  {
+			zero_fill_clone(ctx, read_ctx, clone);
 			break;
 		}
-		if (e->lba + e->len < lba) {
-			/* case of no overlap!, e should have been
-			 * NULL
-			 */
-			printk(KERN_ERR "\n **** %s e->lba + e->len <lba! e->lba: %llu e->len: %u lba: %llu nr_sectors: %d \n", __func__, e->lba, e->len, lba, nr_sectors);
-			panic("e cannot be lesser than lba! ");
-		}
 		//printk(KERN_ERR "\n %s Searching: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu", __func__, lba, nr_sectors, e->lba, e->pba, e->len);
-
+		/* Case of Overlap, e always overlaps with bio */
 		if (e->lba > lba) {
-		/*               [eeeeeeeeeeee]
-			       [---------bio------] */
+		/*   		 [eeeeeeeeeeee]
+		 *	[---------bio------] 
+		 */
 			nr_sectors = e->lba - lba;
 			//printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
 			split = bio_split(clone, nr_sectors, GFP_NOIO, ctx->bs);
 			if (!split) {
 				printk(KERN_ERR "\n Could not split the clone! ERR ");
-				/* other bios could have
-				 * been chained to clone. Hence we
-				 *  should be calling bio_endio(clone)
-				 */
-				clone->bi_status = BLK_STS_RESOURCE;
-				atomic_inc(&ctx->nr_reads);
-				//kref_get(&ctx->ongoing_iocount);
 				bio->bi_status = -ENOMEM;
-				clone->bi_private = read_ctx;
-				clone->bi_end_io = lsdm_subread_done;
-				read_ctx->clone = clone;
-				read_ctx->bio = bio;
-				bio_endio(clone);
+				clone->bi_status = BLK_STS_RESOURCE;
+				zero_fill_clone(ctx, read_ctx, clone);
 				return -ENOMEM;
 			}
 			bio_chain(split, clone);
 			zero_fill_bio(split);
 			bio_endio(split);
 			/* bio is front filled with zeroes, but we
-			 * need to compare now with the same e
+			 * need to compare 'clone' now with the same e
 			 */
-			continue;
+			nr_sectors = bio_sectors(clone);
+			lba = clone->bi_iter.bi_sector;
+			/* we fall through as e->lba == lba now */
 		} 
-		else { //(e->lba <= lba) and (e->lba + e->len < lba)
+		//(e->lba <= lba) 
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		 */
-		   /*  [---------bio------] */
-			overlap = e->lba + e->len - lba;
-			diff = lba - e->lba;
-			pba = e->pba + diff;
-			if (overlap < nr_sectors) {
-				/* we need to read more after we read
-				 * in split
-				 */
-				split = bio_split(clone, overlap, GFP_NOIO, ctx->bs);
-				if (!split) {
-					printk(KERN_INFO "\n Could not split the clone! ERR ");
-					/* other bios could have
-					 * been chained to clone. Hence we
-					 *  should be calling bio_endio(clone)
-					 */
-					clone->bi_status = BLK_STS_RESOURCE;
-					atomic_inc(&ctx->nr_reads);
-					//kref_get(&ctx->ongoing_iocount);
-					bio->bi_status = -ENOMEM;
-					clone->bi_private = read_ctx;
-					clone->bi_end_io = lsdm_subread_done;
-					read_ctx->clone = clone;
-					read_ctx->bio = bio;
-					bio_endio(clone);
-					return -ENOMEM;
-				}
-				bio_chain(split, clone);
-				split->bi_iter.bi_sector = pba;
-				bio_set_dev(split, ctx->dev->bdev);
-				//printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
-				submit_bio(split);
-				/* Search for the next lba, as this
-				 * was processed */
-				lba = lba + e->len;
-				e = lsdm_rb_geq(ctx, lba, print);
-				continue;
-			} 
-
-			/* else overlap == nr_sectors, no further splitting
-			 * required!
-			 * All the previous splits are chained
-			 * to this last one. No more bios will
-			 * be submitted once this is
-			 * submitted
-			 */
-			split = clone;
-			//kref_get(&ctx->ongoing_iocount);
+		/*  [---------bio------] */
+		overlap = e->lba + e->len - lba;
+		diff = lba - e->lba;
+		pba = e->pba + diff;
+		if (overlap >= nr_sectors) { 
+		/* e is bigger than bio, so overlap >= nr_sectors, no further
+		 * splitting is required. Previous splits if any, are chained
+		 * to the last one as 'clone' is their parent.
+		 */
 			atomic_inc(&ctx->nr_reads);
-			split->bi_private = read_ctx;
-			split->bi_end_io = lsdm_subread_done;
-			read_ctx->clone = clone;
-			read_ctx->bio = bio;
-
-			split->bi_iter.bi_sector = pba;
-			bio_set_dev(split, ctx->dev->bdev);
-			//printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(split), e->lba, e->pba, e->len);
-			submit_bio(split);
+			clone->bi_private = read_ctx;
+			clone->bi_end_io = lsdm_subread_done;
+			clone->bi_iter.bi_sector = pba;
+			bio_set_dev(clone, ctx->dev->bdev);
+			//printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(clone), e->lba, e->pba, e->len);
+			submit_bio(clone);
 			break;
 		}
+		/* else e is smaller than bio */
+		split = bio_split(clone, overlap, GFP_NOIO, ctx->bs);
+		if (!split) {
+			printk(KERN_INFO "\n Could not split the clone! ERR ");
+			bio->bi_status = -ENOMEM;
+			clone->bi_status = BLK_STS_RESOURCE;
+			zero_fill_clone(ctx, read_ctx, clone);
+			return -ENOMEM;
+		}
+		//printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
+		bio_chain(split, clone);
+		split->bi_iter.bi_sector = pba;
+		bio_set_dev(split, ctx->dev->bdev);
+		submit_bio(split);
+		/* Since e was smaller, we want to search for the next e */
 	}
 	//printk(KERN_INFO "\n %s end", __func__);
 	return 0;
@@ -4129,7 +4047,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		//printk(KERN_ERR "\n %s lba: %llu, pba: %llu", __func__, lba, wf);
 		down_write(&ctx->metadata_update_lock);
 		/*------------------------------- */
-		//lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, wf, subbio_ctx->extent.len);
+		lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, wf, subbio_ctx->extent.len);
 		//lsdm_update_range(ctx, &ctx->rev_tbl_root, wf, lba, subbio_ctx->extent.len);
 		/*-------------------------------*/
 		up_write(&ctx->metadata_update_lock);

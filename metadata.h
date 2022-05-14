@@ -46,7 +46,6 @@ struct gc_read_ctx {
 struct app_read_ctx {
 	struct ctx *ctx;
 	struct bio *bio;
-	struct bio *clone;
 };
 
 struct metadata_read_ctx {
