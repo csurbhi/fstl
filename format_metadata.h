@@ -197,6 +197,8 @@ struct lsdm_sb {
         __le64 ckpt2_pba;		/* start address of checkpoint 2 */
 	__le64 sit_pba;			/* start block address of SIT */
 	__le32 order_revmap_bm;		/* log of number of blocks used for revmap bitmap */
+	__le32 nr_lbas_in_zone;
+	__le64 nr_cmr_zones;
 	__le64 zone0_pba;		/* start block address of segment 0 */
 	__le64 max_pba;                 /* The last lba in the disk */
 	//__u8 uuid[16];			/* 128-bit uuid for volume */

@@ -13,7 +13,7 @@
 #include <sys/ioctl.h>
 
 
-#define NR_ZONES 20
+#define NR_ZONES 10
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
 
@@ -153,6 +153,7 @@ retry:
 	sync();
 	printf("\n Writes done!! \n");
 
+	/*
 
 	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
@@ -182,7 +183,7 @@ retry:
 		}
 	}
 
-	printf("\n Writes verified!! \n");
+	printf("\n Writes verified!! \n"); */
 
 	close(fd);
 	sync();
@@ -226,6 +227,7 @@ retry:
 	close(fd);
 	printf("\n Overwrites done ! \n");
 	sync();
+	return 0;
 	
 	printf("\n Read verifying the writes ......\n");
 	fd = open("/dev/dm-0", O_RDWR);

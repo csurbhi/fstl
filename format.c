@@ -30,10 +30,6 @@
 #define NR_SECTORS_IN_BLK 8
 #define BITS_IN_BYTE 8
 
-/* Our LBA is associated with a block
- * rather than a sector
- */
-
 unsigned int crc32(int d, unsigned char *buf, unsigned int size)
 {
 	return 0;
@@ -298,11 +294,6 @@ __le64 get_sit_pba(struct lsdm_sb *sb)
 	return sb->ckpt2_pba + NR_SECTORS_IN_BLK;
 }
 
-__le64 get_zone0_pba(struct lsdm_sb *sb)
-{
-	return sb->sit_pba + (sb->blk_count_sit * NR_SECTORS_IN_BLK);
-}
-
 void read_sb(int fd, unsigned long sectornr)
 {
 	struct lsdm_sb *sb;
@@ -456,7 +447,7 @@ unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
 }
 
 
-struct lsdm_sb * write_sb(int fd, unsigned long sb_pba)
+struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 {
 	struct lsdm_sb *sb;
 	int ret = 0;
@@ -500,6 +491,10 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba)
 	printf("\n sb->ckpt2_pba: %u", sb->ckpt2_pba);
 	sb->sit_pba = get_sit_pba(sb);
 	printf("\n sb->sit_pba: %u", sb->sit_pba);
+	sb->nr_lbas_in_zone = (1 << (sb->log_zone_size - sb->log_sector_size));
+	printf("\n nr_lbas_in_zone: %llu ", sb->nr_lbas_in_zone);
+	sb->nr_cmr_zones = cmr;
+	printf("\n sb->nr_cmr_zones: %llu", sb->nr_cmr_zones);
 	sb->zone0_pba = get_current_frontier(sb);
 	printf("\n sb->zone0_pba: %d", sb->zone0_pba);
 	sb->zone_count_main = get_main_zone_count(sb);
@@ -744,13 +739,14 @@ void report_zone(unsigned int fd, unsigned long zonenr, struct blk_zone * bzone)
 	return;	
 }
 
-void reset_shingled_zones(int fd)
+long reset_shingled_zones(int fd)
 {
 	int ret;
 	long i = 0;
 	long zone_count = 0;
 	struct blk_zone_report * bzr;
 	struct blk_zone_range bz_range;
+	long cmr = 0;
 
 
 	zone_count = get_zone_count(fd);
@@ -784,8 +780,10 @@ void reset_shingled_zones(int fd)
 			report_zone(fd, i, &bzr->zones[i]);
 		} else {
 			printf("\n zonenr: %d is a sequential zone! ", i);
+			cmr++;
 		}
 	}
+	return cmr;
 }
 
 /*
@@ -801,17 +799,18 @@ int main()
 	char cmd[256];
 	unsigned long nrblks;
 	unsigned int ret = 0;
+	long cmr;
 
 	//char * blkdev = "/dev/vdb";
 	char * blkdev = "/dev/sdb";
 	int fd = open_disk(blkdev);
 
-	reset_shingled_zones(fd);
+	cmr = reset_shingled_zones(fd);
 
-	sb1 = write_sb(fd, 0);
+	sb1 = write_sb(fd, 0, cmr);
 	printf("\n Superblock written at pba: %d", pba);
 	printf("\n sizeof sb: %ld", sizeof(struct lsdm_sb));
-	sb2 = write_sb(fd, 8);
+	sb2 = write_sb(fd, 8, cmr);
 	read_sb(fd, 0);
 	read_sb(fd, 8);
 	printf("\n Superblock written at pba: %d", pba + NR_SECTORS_IN_BLK);

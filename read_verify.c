@@ -4,8 +4,9 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <stdlib.h>
 
-#define NR_ZONES 1
+#define NR_ZONES 101
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
 
@@ -43,7 +44,7 @@ int main(int argc, char *argv[])
 				if (buff[k] != val) {
 					printf("\n Expected val: %d and found: %d for zonenr: %d  blknr: %d, k: %d", val, buff[k], i, j, k);
 					printf("\n");
-					break;
+					exit(-1);
 				}
 			}
 		}
