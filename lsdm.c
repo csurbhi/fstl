@@ -1267,13 +1267,13 @@ static int gc_thread_fn(void * data)
 		/* We sleep again and see if we are still idle, then
 		 * we declare "io idleness" and perform BG GC
 		 */
+		/*
 		wait_event_interruptible_timeout(*wq,
 			kthread_should_stop() || freezing(current) ||
 			gc_th->gc_wake,
 			msecs_to_jiffies(gc_th->urgent_sleep_time));
-
+		*/
 		//if(!is_lsdm_ioidle(ctx)) {
-		//if (0) {
 			/* increase sleep time */
 		//	printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
 		//	wait_ms = wait_ms * 2;
@@ -2775,13 +2775,6 @@ void remove_sit_pages(struct ctx *ctx, struct rb_node *node)
 	left = node->rb_left;
 	right = node->rb_right;
 
-	if (left)
-		remove_sit_pages(ctx, left);
-	if (right)
-		remove_sit_pages(ctx, right);
-
-
-
 	down_interruptible(&ctx->sit_kv_store_lock);
 /*-------------------------------------------------------------*/
 	sit_page = rb_entry(node, struct sit_page, rb);
@@ -2797,15 +2790,22 @@ void remove_sit_pages(struct ctx *ctx, struct rb_node *node)
 	}
 
 	page = sit_page->page;
-	if (!page)
+	if (!page) {
+		up(&ctx->sit_kv_store_lock);
 		return;
-
+	}
+	sit_page->page = NULL;
 	__free_pages(page, 0);
-	rb_erase(&sit_page->rb, &ctx->tm_rb_root);
+	rb_erase(&sit_page->rb, &ctx->sit_rb_root);
 	kmem_cache_free(ctx->sit_page_cache, sit_page);
 /*-------------------------------------------------------------*/
 	up(&ctx->sit_kv_store_lock);
-	
+
+	if (left)
+		remove_sit_pages(ctx, left);
+	if (right)
+		remove_sit_pages(ctx, right);
+
 	printk(KERN_ERR "\n %s: Page freed! ", __func__);
 
 	return;
@@ -2821,6 +2821,7 @@ void free_sit_pages(struct ctx *ctx)
 		return;
 	}
 	remove_sit_pages(ctx, root->rb_node);
+	root->rb_node = NULL;
 }
 
 /*
@@ -2835,7 +2836,7 @@ void write_tmbl_complete(struct bio *bio)
 	struct tm_page_write_ctx *tm_page_write_ctx;
 	struct page *page;
 
-	cant_sleep();
+	//cant_sleep();
 	tm_page_write_ctx = (struct tm_page_write_ctx *) bio->bi_private;
 	ctx = tm_page_write_ctx->ctx;
 	page = tm_page_write_ctx->tm_page->page;
@@ -3042,7 +3043,7 @@ void write_sitbl_complete(struct bio *bio)
 	struct ctx *ctx;
 	struct sit_page_write_ctx *sit_ctx;
 
-	cant_sleep();
+	//cant_sleep();
 	sit_ctx = (struct sit_page_write_ctx *) bio->bi_private;
 	ctx = sit_ctx->ctx;
 
@@ -3733,7 +3734,7 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 	 */
 	entry_nr = atomic_read(&ctx->revmap_entry_nr);
 	sector_nr = atomic_read(&ctx->revmap_sector_nr);
-	printk(KERN_ERR "\n ******* %s entry_nr: %d, sector_nr: %d ctx->revmap_pba: %d ", __func__, entry_nr, sector_nr, ctx->revmap_pba);
+	//printk(KERN_ERR "\n ******* %s entry_nr: %d, sector_nr: %d ctx->revmap_pba: %d ", __func__, entry_nr, sector_nr, ctx->revmap_pba);
 	if ((entry_nr > 0) || (sector_nr > 0)) {
 		page = ctx->revmap_page;
 		ptr = (struct lsdm_revmap_entry_sector *)page_address(page);
@@ -3843,6 +3844,7 @@ void sub_write_done(struct work_struct * w)
 	unsigned int len;
 
 	subbioctx = container_of(w, struct lsdm_sub_bioctx, work);
+	bioctx = subbioctx->bioctx;
 	ctx = bioctx->ctx;
 	/* Task completed successfully */
 	lba = subbioctx->extent.lba;
@@ -3860,8 +3862,6 @@ void sub_write_done(struct work_struct * w)
 	add_revmap_entries(ctx, lba, pba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
-
-	printk(KERN_ERR "\n * (%s) thread ... waiting.... LBA: %llu, PBA: %llu done \n", __func__, lba, pba);
 	return;
 }
 
