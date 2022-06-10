@@ -218,7 +218,7 @@ struct ctx {
 	int               n_extents;      /* map size */
 	int		  n_sit_extents;
 
-	mempool_t        *page_pool;
+	mempool_t        *gc_page_pool;
 	struct bio_set   * bs;
 
 	struct dm_dev    *dev;
