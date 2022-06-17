@@ -47,6 +47,8 @@
 #define BLK_SZ 4096
 #define NR_BLKS_PER_ZONE (ZONE_SZ /BLK_SZ)
 
+long nrpages;
+
 
 
 /* TODO:
@@ -742,11 +744,14 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 				//mempool_free(bv->bv_page, ctx->gc_page_pool);
 				__free_pages(page, 0);
 				printk(KERN_ERR "\n %s could not add page to a bio ", __func__);
+				nrpages--;
+				printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 			}
 			bio_put(bio);
 			return -ENOMEM;
 		}
-		printk(KERN_ERR "\n %s page added to the bio ", __func__);
+		nrpages++;
+		printk(KERN_ERR "\n %s page added to the bio, nrpages: %llu ", __func__, nrpages);
 	}
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
 	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu nr_pages: %d", __func__,  bio->bi_iter.bi_sector, nr_pages);
@@ -773,6 +778,8 @@ static void free_gc_list(struct ctx *ctx)
 			bio_for_each_segment_all(bv, bio, iter_all) {
 				//mempool_free(bv->bv_page, ctx->gc_page_pool);
 				__free_pages(bv->bv_page, 0);
+				nrpages--;
+				printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 			}
 			bio_put(bio);
 		}
@@ -2663,9 +2670,13 @@ struct page * read_block(struct ctx *ctx, u64 base, u64 sectornr)
 	if (!page )
 		return NULL;
 
+	nrpages++;
+	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return NULL;
 	}
 	
@@ -2673,6 +2684,8 @@ struct page * read_block(struct ctx *ctx, u64 base, u64 sectornr)
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		__free_pages(page, 0);
 		bio_put(bio);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return NULL;
 	}
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
@@ -2747,6 +2760,8 @@ void remove_translation_pages(struct ctx *ctx, struct rb_node *node)
 		//printk(KERN_ERR "\n %s: Page freed! ", __func__);
 		kmem_cache_free(ctx->tm_page_cache, tm_page);
 		//printk(KERN_ERR "%s DONE!", __func__);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return;
 	}
 
@@ -2801,6 +2816,8 @@ void remove_sit_pages(struct ctx *ctx, struct rb_node *node)
 	}
 	sit_page->page = NULL;
 	__free_pages(page, 0);
+	nrpages--;
+	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 	rb_erase(&sit_page->rb, &ctx->sit_rb_root);
 	kmem_cache_free(ctx->sit_page_cache, sit_page);
 
@@ -2881,6 +2898,8 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	tm_page_write_ctx = kmem_cache_alloc(ctx->tm_page_write_ctx_cache, GFP_KERNEL);
 	if (!tm_page_write_ctx) {
 		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return;
 	}
 
@@ -2892,6 +2911,8 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		return;
 	}
@@ -2899,6 +2920,8 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
 		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		bio_put(bio);
 		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
@@ -2929,6 +2952,7 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	write_tmbl_complete(bio);
 	bio->bi_status = BLK_STS_OK;
 	//printk(KERN_INFO "\n 2. Leaving %s! flushed dirty page! \n", __func__);
+	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 	return;
 }
 
@@ -3472,6 +3496,8 @@ void process_tm_entries(struct work_struct * w)
 	add_block_based_translation(ctx, page);
 	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
 	__free_pages(page, 0);
+	nrpages--;
+	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 }
 
 
@@ -3793,6 +3819,8 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 			 */
 			panic("Low memory, could not allocate page!");
 		}
+		nrpages++;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		ctx->revmap_page = page;
 		//printk(KERN_ERR "\n revmap_page: %p", page_address(page));
 	}
@@ -4143,6 +4171,8 @@ struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 	printk(KERN_INFO "\n ** sector_nr: %llu, ckpt->magic: %u, ckpt->hot_frontier_pba: %lld", pba, ckpt->magic, ckpt->hot_frontier_pba);
 	if (ckpt->magic == 0) {
 		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return NULL;
 	}
 	ctx->ckpt_page = page;
@@ -4239,6 +4269,8 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	if (ckpt1->version >= ckpt2->version) {
 		ckpt = ckpt1;
 		__free_pages(ctx->ckpt_page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		ctx->ckpt_page = page1;
 		ctx->ckpt_pba = ctx->sb->ckpt2_pba;
 		printk(KERN_ERR "\n Setting ckpt 1 version: %lld ckpt2 version: %lld \n", ckpt1->version, ckpt2->version);
@@ -4248,6 +4280,8 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 		ctx->ckpt_pba = ctx->sb->ckpt1_pba;
 		//page2 is rightly set by read_ckpt();
 		__free_pages(page1, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		printk(KERN_ERR "\n Setting ckpt 1 version: %lld ckpt2 version: %lld \n", ckpt1->version, ckpt2->version);
 	}
 	ctx->user_block_count = ckpt->user_block_count;
@@ -4356,6 +4390,8 @@ int read_translation_map(struct ctx *ctx)
 		read_extents_from_block(ctx, tm_entry, nr_extents_in_blk, blknr);
 		i = i + 1;
 		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		sectornr = sectornr + NR_SECTORS_IN_BLK;
 		blknr = blknr + 1;
 	}
@@ -4452,6 +4488,8 @@ int read_revmap(struct ctx *ctx)
 				}
 				process_revmap_entries_on_boot(ctx, revmap_page);
 				__free_pages(revmap_page, 0);
+				nrpages--;
+				printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 				if (blknr >= nr_revmap_blks)
 					break;
 			}
@@ -4806,6 +4844,8 @@ int read_seg_info_table(struct ctx *ctx)
 		read_seg_entries_from_block(ctx, entry0, nr_seg_entries_read, &zonenr);
 		nr_data_zones = nr_data_zones - nr_seg_entries_read;
 		__free_pages(sit_page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		sectornr = sectornr + 8;
 	}
 	//printk(KERN_ERR "\n %s ctx->nr_freezones (2) : %u zonenr: %llu", __func__, ctx->nr_freezones, zonenr);
@@ -4838,6 +4878,8 @@ struct lsdm_sb * read_superblock(struct ctx *ctx, unsigned long pba)
 	if (sb->magic != STL_SB_MAGIC) {
 		printk(KERN_INFO "\n Wrong superblock!");
 		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return NULL;
 	}
 	printk(KERN_INFO "\n sb->magic: %u", sb->magic);
@@ -4878,6 +4920,8 @@ int read_metadata(struct ctx * ctx)
 		return -1;
 	}
 	__free_pages(page, 0);
+	nrpages--;
+	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 	ctx->sb = sb2;
 	printk(KERN_INFO "\n sb->max_pba: %llu", sb2->max_pba);
 	ctx->max_pba = ctx->sb->max_pba;
@@ -4889,6 +4933,8 @@ int read_metadata(struct ctx * ctx)
 	ckpt = get_cur_checkpoint(ctx);
 	if (NULL == ckpt) {
 		__free_pages(ctx->sb_page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return -1;
 	}	
 	ctx->ckpt = ckpt;
@@ -4920,7 +4966,10 @@ int read_metadata(struct ctx * ctx)
 	ret = read_revmap_bitmap(ctx);
 	if (ret) {
 		__free_pages(ctx->sb_page, 0);
+		nrpages--;
 		free_pages(ctx->ckpt_page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return -1;
 	}
 	printk(KERN_ERR "\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
@@ -4957,8 +5006,12 @@ int read_metadata(struct ctx * ctx)
 		printk(KERN_ERR "\n SIT and checkpoint does not match!");
 		do_recovery(ctx);
 		__free_pages(ctx->sb_page, 0);
+		nrpages--;
 		free_pages(ctx->ckpt_page, 0);
+		nrpages--;
 		__free_pages(ctx->revmap_bm, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return -1;
 	}
 	printk(KERN_ERR "\n Metadata read! \n");
@@ -5274,10 +5327,13 @@ free_metadata_pages:
 	printk(KERN_ERR "\n freeing metadata pages!");
 	if (ctx->revmap_bm)
 		__free_pages(ctx->revmap_bm, 0);
+		nrpages--;
 	if (ctx->sb_page)
 		__free_pages(ctx->sb_page, 0);
+		nrpages--;
 	if (ctx->ckpt_page)
 		__free_pages(ctx->ckpt_page, 0);
+		nrpages--;
 	/* TODO : free extent page
 	 * and segentries page */
 destroy_cache:
@@ -5294,6 +5350,7 @@ put_dev:
 	dm_put_device(dm_target, ctx->dev);
 free_ctx:
 	kfree(ctx);
+	printk(KERN_ERR "\n %s nrpages: %llu", nrpages);
 	return ret;
 }
 
@@ -5344,12 +5401,17 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	//printk(KERN_ERR "\n Nr of free blocks: %lld",  ctx->user_block_count);
 	/* TODO : free extent page
 	 * and segentries page */
-	if (ctx->sb_page)
+	if (ctx->sb_page) {
 		__free_pages(ctx->sb_page, 0);
-	if (ctx->ckpt_page)
+		nrpages--;
+	}
+	if (ctx->ckpt_page) {
 		__free_pages(ctx->ckpt_page, 0);
+		nrpages--;
+	}
 
 	__free_pages(ctx->revmap_bm, 0);
+	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 
 	//trace_printk("\n metadata pages freed! \n");
 	/* timer based gc invocation for later
