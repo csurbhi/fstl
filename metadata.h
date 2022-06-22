@@ -23,8 +23,8 @@
 #define MAX_ZONE_REVMAP 1
 #define BLOCKS_IN_ZONE 65536
 #define SUBBIOCTX_MAGIC 0x2
-#define MAX_TM_PAGES 1
-#define MAX_SIT_PAGES 1
+#define MAX_TM_PAGES 2
+#define MAX_SIT_PAGES 2
 #define NSTL_MAGIC 0xF2F52010
 #define GC_GREEDY 1
 #define GC_CB 2
@@ -173,6 +173,14 @@ struct lsdm_dev_info {
 #define MAX_TIME 5
 
 
+struct lsdm_flush_thread  {
+	struct task_struct *lsdm_flush_task;
+	wait_queue_head_t lsdm_flush_wait_queue;
+        unsigned int sleep_time;
+        unsigned int wake;
+};
+
+
 struct lsdm_gc_thread {
 	struct task_struct *lsdm_gc_task;
 	wait_queue_head_t lsdm_gc_wait_queue;
@@ -233,6 +241,7 @@ struct ctx {
 	char              nodename[32];
   
 	struct lsdm_gc_thread *gc_th;
+	struct lsdm_flush_thread *flush_th;
 	struct page 	*sb_page;
 	struct lsdm_sb 	*sb;
 	struct page 	*ckpt_page;
