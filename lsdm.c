@@ -618,6 +618,7 @@ static inline void * lsdm_malloc(size_t size, gfp_t flags)
 	return addr;
 }
 
+void flush_translation_blocks(struct work_struct * w);
 
 #define DEF_FLUSH_TIME 50 /* (milliseconds) */
 
@@ -643,6 +644,12 @@ static int flush_thread_fn(void * data)
                         continue;
                 }
 		flush_workqueue(ctx->writes_wq);
+		if (atomic_read(&ctx->nr_tm_pages)) {
+			wait_ms = 50;
+			flush_translation_blocks(&ctx->tb_work);
+		} else {
+			wait_ms = 5000;
+		}
 	} while(!kthread_should_stop());
 	return 0;
 }
@@ -2409,7 +2416,6 @@ void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 }
 
 int is_revmap_block_available(struct ctx *ctx, u64 pba);
-void flush_translation_blocks(struct work_struct * w);
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx);
 
 void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
@@ -2545,7 +2551,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	 */
 	if ((zonenr != get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) &&
 		    (zonenr != get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
-		//printk(KERN_ERR "\n updating gc rb zonenr: %d nrblks: %d", zonenr, ptr->vblocks);
+		printk(KERN_ERR "\n updating gc rb zonenr: %d nrblks: %d", zonenr, ptr->vblocks);
 		/* add mtime here */
 		ptr->mtime = get_elapsed_time(ctx);
 		if (ctx->max_mtime < ptr->mtime)
@@ -2710,7 +2716,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	index = (lba/NR_SECTORS_IN_BLK);
 	index = index  %  TM_ENTRIES_BLK;
 	ptr = ptr + index;
-	//printk(KERN_ERR "\n 1. ptr->lba: %llu, ptr->pba: %llu", ptr->lba, ptr->pba);
+	printk(KERN_ERR "\n 1. ptr->lba: %llu, ptr->pba: %llu", ptr->lba, ptr->pba);
 	/*-----------------------------------------------*/
 	//BUG_ON ((ptr->lba == lba) && (ptr->pba == pba))
 	/* lba can be 0, but pba cannot be */
@@ -2718,26 +2724,17 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 		/* decrement vblocks for the segment that has
 		 * the stale block
 		 */
-		//printk(KERN_ERR "\n Overwrite a block at LBA: %llu, PBA: %llu", ptr->lba, ptr->pba);
+		printk(KERN_ERR "\n Overwrite a block at LBA: %llu, PBA: %llu", ptr->lba, ptr->pba);
 		sit_ent_vblocks_decr(ctx, ptr->pba);
 	}
 	ptr->lba = lba;
 	ptr->pba = pba;
-	//printk(KERN_ERR "\n 2. ptr->lba: %llu, ptr->pba: %llu", ptr->lba, ptr->pba);
+	printk(KERN_ERR "\n 2. ptr->lba: %llu, ptr->pba: %llu", ptr->lba, ptr->pba);
 	sit_ent_vblocks_incr(ctx, ptr->pba);
 	if (pba == zone_end(ctx, pba)) {
 		sit_ent_add_mtime(ctx, ptr->pba);
 	}
-	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_PAGES) {
-		if (index == (TM_ENTRIES_BLK - 1)) {
-			atomic_set(&ctx->tm_flush_count, 0);
-			/* Only one flush operation at a time 
-			* but we dont want to wait.
-			*/
-			//printk(KERN_ERR "%s About to to flush translation blocks! Nr tm pages: %d \n", __func__, atomic_read(&ctx->nr_tm_pages));
-			flush_translation_blocks(&ctx->tb_work);
-		}
-	}
+
 	return 0;	
 }
 
@@ -2825,39 +2822,33 @@ struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node *
 	return NULL;
 }
 
-void remove_translation_pages(struct ctx *ctx, struct rb_node *node)
+void remove_translation_pages(struct ctx *ctx)
 {
-	struct rb_node *left=NULL, *right=NULL;
 	struct tm_page *tm_page;
 	struct page *page;
+	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_node *node = root->rb_node;
 
 	//printk(KERN_ERR "\n Inside %s ", __func__);
-
-	tm_page = rb_entry(node, struct tm_page, rb);
-	if (!tm_page)
-		return;
-
-	page = tm_page->page;
-	if (!page) {
-		panic("Page cannot be null now! ");
-		return;
+	
+	while(node) {
+		tm_page = rb_entry(node, struct tm_page, rb);
+		if (!tm_page)
+			return;
+		//if (tm_page->flag == NEEDS_NO_FLUSH) {
+			rb_erase(node, &ctx->tm_rb_root);
+			if (!tm_page->page) {
+				panic("Page cannot be null now! ");
+				return;
+			}
+			__free_pages(tm_page->page, 0);
+			nrpages--;
+			kmem_cache_free(ctx->tm_page_cache, tm_page);
+			atomic_dec(&ctx->nr_tm_pages);
+		//}
+		node = root->rb_node;
 	}
-	left = node->rb_left;
-	right = node->rb_right;
-	remove_translation_pages(ctx, left);
-	remove_translation_pages(ctx, right);
-	if (tm_page->flag == NEEDS_NO_FLUSH) {
-		//printk(KERN_ERR "\n %s waiting for tm_kv_store_lock", __func__);
-		rb_erase(node, &ctx->tm_rb_root);
-		__free_pages(page, 0);
-		atomic_dec(&ctx->nr_tm_pages);
-		//printk(KERN_ERR "\n %s: Page freed! ", __func__);
-		kmem_cache_free(ctx->tm_page_cache, tm_page);
-		//printk(KERN_ERR "%s DONE!", __func__);
-		nrpages--;
-		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
-		return;
-	}
+	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 	return;
 }
 
@@ -2868,11 +2859,11 @@ void free_translation_pages(struct ctx *ctx)
 
 	node = root->rb_node;
 	if (!node) {
-		printk(KERN_ERR "\n %s tm node is NULL!", __func__);
+		//printk(KERN_ERR "\n %s tm node is NULL!", __func__);
 		return;
 	}
 	down_interruptible(&ctx->tm_kv_store_lock);
-	remove_translation_pages(ctx, node);
+	remove_translation_pages(ctx);
 	up(&ctx->tm_kv_store_lock);
 }
 
@@ -3103,8 +3094,11 @@ void flush_translation_blocks(struct work_struct *w)
 
 	//blk_start_plug(&plug);
 	flush_tm_nodes(root->rb_node, ctx);
-	remove_translation_pages(ctx, root->rb_node);
 	mutex_unlock(&ctx->tm_lock);
+
+	down_interruptible(&ctx->tm_kv_store_lock);
+	remove_translation_pages(ctx);
+	up(&ctx->tm_kv_store_lock);
 	//blk_finish_plug(&plug);	
 	atomic_dec(&ctx->tm_ref);
 	printk(KERN_ERR "\n %s nr_tm_pages: %d", __func__, atomic_read(&ctx->nr_tm_pages));
@@ -3437,6 +3431,14 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 		ptr = ptr + 1;
 		i++;
 	}
+	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_PAGES) {
+		atomic_set(&ctx->tm_flush_count, 0);
+		/* Only one flush operation at a time 
+		* but we dont want to wait.
+		*/
+		//printk(KERN_ERR "%s About to to flush translation blocks! Nr tm pages: %d \n", __func__, atomic_read(&ctx->nr_tm_pages));
+		flush_translation_blocks(&ctx->tb_work);
+	}
 	//printk(KERN_ERR "\n %s BYE lba: %llu pba: %llu len: %d!", __func__, lba, pba, len);
 	return 0;
 }
@@ -3574,7 +3576,7 @@ void process_tm_entries(struct work_struct * w)
 	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
 	__free_pages(page, 0);
 	nrpages--;
-	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
+	printk(KERN_ERR "\n %s nrpages: %llu tm_flush_count: %u", __func__, nrpages, atomic_read(&ctx->tm_flush_count));
 }
 
 
@@ -4784,9 +4786,9 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	rb_insert_color(&new->rb, root);
 	write_unlock(&ctx->sit_rb_lock);
 
-	//printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
-	//zonenr = select_zone_to_clean(ctx, BG_GC);
-	//printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
+	printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
+	zonenr = select_zone_to_clean(ctx, BG_GC);
+	printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
 	return 0;
 }
 
