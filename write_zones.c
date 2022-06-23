@@ -13,7 +13,7 @@
 #include <sys/ioctl.h>
 
 
-#define NR_ZONES 10
+#define NR_ZONES 5
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
 

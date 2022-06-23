@@ -2716,7 +2716,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	index = (lba/NR_SECTORS_IN_BLK);
 	index = index  %  TM_ENTRIES_BLK;
 	ptr = ptr + index;
-	printk(KERN_ERR "\n 1. ptr->lba: %llu, ptr->pba: %llu", ptr->lba, ptr->pba);
+	printk(KERN_ERR "\n 1. lba: %llu, ptr->pba: %llu", lba, ptr->pba);
 	/*-----------------------------------------------*/
 	//BUG_ON ((ptr->lba == lba) && (ptr->pba == pba))
 	/* lba can be 0, but pba cannot be */
@@ -2724,12 +2724,11 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 		/* decrement vblocks for the segment that has
 		 * the stale block
 		 */
-		printk(KERN_ERR "\n Overwrite a block at LBA: %llu, PBA: %llu", ptr->lba, ptr->pba);
+		printk(KERN_ERR "\n Overwrite a block at LBA: %llu, PBA: %llu", lba, ptr->pba);
 		sit_ent_vblocks_decr(ctx, ptr->pba);
 	}
-	ptr->lba = lba;
 	ptr->pba = pba;
-	printk(KERN_ERR "\n 2. ptr->lba: %llu, ptr->pba: %llu", ptr->lba, ptr->pba);
+	printk(KERN_ERR "\n 2. ptr->lba: %llu, ptr->pba: %llu", lba, ptr->pba);
 	sit_ent_vblocks_incr(ctx, ptr->pba);
 	if (pba == zone_end(ctx, pba)) {
 		sit_ent_add_mtime(ctx, ptr->pba);
@@ -3292,7 +3291,7 @@ void flush_count_sit_blocks(struct ctx *ctx, bool flush, int nrscan)
 		blk_finish_plug(&plug);
 }
 
-int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned int nr_extents, u64 pba);
+int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba);
 
 /*
  * lba: from the LBA-PBA pair of a data block.
@@ -4402,26 +4401,33 @@ void mark_zone_occupied(struct ctx *ctx , int zonenr)
 	//printk(KERN_ERR "\n %s ctx->nr_freezones (2) : %u", __func__, ctx->nr_freezones);
 }
 
-int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned int nr_extents, u64 pba)
+/*
+ *
+ * lba: starting lba corresponding to the pba recorded in this block
+ *
+ */
+int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 {
 	int i = 0;
+	int nr_extents = TM_ENTRIES_BLK;
 
 	while (i <= nr_extents) {
 		i++;
 		/* If there are no more recorded entries on disk, then
 		 * dont add an entries further
 		 */
-		if ((entry->lba == 0) && (entry->pba == 0)) {
+		if (entry->pba == 0) {
 			continue;
 			
 		}
-		//printk(KERN_ERR "\n %s TM-BLKNR: %llu entry->lba: %llu entry->pba: %llu", __func__, pba, entry->lba, entry->pba);
+		//printk(KERN_ERR "\n %s entry->lba: %llu entry->pba: %llu", __func__, lba, entry->pba);
 		/* TODO: right now everything should be zeroed out */
 		//panic("Why are there any already mapped extents?");
 		down_write(&ctx->metadata_update_lock);
-		lsdm_update_range(ctx, &ctx->extent_tbl_root, entry->lba, entry->pba, NR_SECTORS_IN_BLK);
-		lsdm_update_range(ctx, &ctx->rev_tbl_root, entry->pba, entry->lba, NR_SECTORS_IN_BLK);
+		lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, entry->pba, NR_SECTORS_IN_BLK);
+		lsdm_update_range(ctx, &ctx->rev_tbl_root, entry->pba, lba, NR_SECTORS_IN_BLK);
 		up_write(&ctx->metadata_update_lock);
+		lba = lba + 8; /* Every 512 bytes sector has an LBA in a SMR drive */
 		entry = entry + 1;
 	}
 	return 0;
@@ -4440,13 +4446,13 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, unsigned i
  */
 int read_translation_map(struct ctx *ctx)
 {
-	int nr_extents_in_blk = TM_ENTRIES_BLK;
 	unsigned long blknr, sectornr;
 	/* blk_count_tm is 4096 bytes aligned number */
 	unsigned long nrblks = ctx->sb->blk_count_tm;
 	struct page *page;
 	int i = 0;
 	struct tm_entry * tm_entry = NULL;
+	u64 lba = 0;
 
 	printk(KERN_ERR "\n %s Reading TM entries from: %llu, nrblks: %ld", __func__, ctx->sb->tm_pba, nrblks);
 	
@@ -4461,7 +4467,11 @@ int read_translation_map(struct ctx *ctx)
 		 * we should find 0 and break out */
 		//trace_printk("\n pba: %llu", pba);
 		tm_entry = (struct tm_entry *) page_address(page);
-		read_extents_from_block(ctx, tm_entry, nr_extents_in_blk, blknr);
+		read_extents_from_block(ctx, tm_entry, lba);
+		/* Every 512 byte sector has a LBA in SMR drives, the translation map is recorded for every block
+		 * instead. So every translation entry covers 8 sectors or 8 lbas.
+		 */
+		lba = lba + (TM_ENTRIES_BLK * 8);
 		i = i + 1;
 		__free_pages(page, 0);
 		nrpages--;

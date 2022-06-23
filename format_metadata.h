@@ -221,7 +221,6 @@ struct lsdm_sb {
  * block based TM
  */
 struct tm_entry {
-	__le64 lba;
 	__le64 pba;
 } __attribute__((packed));
 
