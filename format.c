@@ -265,26 +265,21 @@ __le32 get_reserved_zone_count()
  * LBA as ZONE_SZ/BLK_SZ
  * The blk adderss is 256MB;
  */
-__le64 get_revmap_pba()
+__le64 get_revmap_bm_pba()
 {
 	return (NR_BLKS_SB * NR_SECTORS_IN_BLK);
 }
 
-__le64 get_tm_pba(struct lsdm_sb *sb)
+__le64 get_revmap_pba(struct lsdm_sb *sb)
 {
-	u64 tm_pba = sb->revmap_pba + ( sb->blk_count_revmap * NR_SECTORS_IN_BLK);
-	return tm_pba;
-}
-
-__le64 get_revmap_bm_pba(struct lsdm_sb *sb)
-{
-	u64 revmap_bm_pba = sb->tm_pba + (sb->blk_count_tm * NR_SECTORS_IN_BLK);
-	return revmap_bm_pba;
+	u64 revmap_pba = sb->revmap_bm_pba + (sb->blk_count_revmap_bm * NR_SECTORS_IN_BLK);
+	//sb->tm_pba + (sb->blk_count_tm * NR_SECTORS_IN_BLK);
+	return revmap_pba;
 }
 
 __le64 get_ckpt1_pba(struct lsdm_sb *sb)
 {
-	u64 cp1_pba  = sb->revmap_bm_pba + (sb->blk_count_revmap_bm * NR_SECTORS_IN_BLK);
+	u64 cp1_pba  = sb->revmap_pba + ( sb->blk_count_revmap * NR_SECTORS_IN_BLK);
 	return cp1_pba;
 }
 
@@ -292,6 +287,12 @@ __le64 get_ckpt1_pba(struct lsdm_sb *sb)
 __le64 get_sit_pba(struct lsdm_sb *sb)
 {
 	return sb->ckpt2_pba + NR_SECTORS_IN_BLK;
+}
+
+__le64 get_tm_pba(struct lsdm_sb *sb)
+{
+	u64 tm_pba = sb->sit_pba + (sb->blk_count_sit * NR_SECTORS_IN_BLK);
+	return tm_pba;
 }
 
 void read_sb(int fd, unsigned long sectornr)
@@ -421,20 +422,20 @@ void write_revmap_bitmap(int fd, sector_t revmap_bm_pba, unsigned nr_blks)
 
 unsigned long long get_current_frontier(struct lsdm_sb *sb)
 {
-	unsigned long sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
-	unsigned long sit_end_blk_nr = sit_end_pba / NR_SECTORS_IN_BLK;
-	unsigned int sit_zone_nr = sit_end_blk_nr / NR_BLKS_PER_ZONE;
-	if (sit_end_blk_nr % NR_BLKS_PER_ZONE > 0) {
-		sit_zone_nr = sit_zone_nr + 1;
+	unsigned long tm_end_pba = sb->tm_pba + sb->blk_count_tm * NR_SECTORS_IN_BLK;
+	unsigned long tm_end_blk_nr = tm_end_pba / NR_SECTORS_IN_BLK;
+	unsigned int tm_end_zone_nr = tm_end_blk_nr / NR_BLKS_PER_ZONE;
+	if (tm_end_blk_nr % NR_BLKS_PER_ZONE > 0) {
+		tm_end_zone_nr = tm_end_zone_nr + 1;
 	}
 	
 	/* The data zones start in the next zone of that of the last
 	 * metadata zone
 	 */
-	printf("\n sit_end_pba: %ld", sit_end_pba);
-	printf("\n sit_end_blk_nr: %ld", sit_end_blk_nr);
-	printf("\n sit_zone_nr: %d", sit_zone_nr);
-	return (sit_zone_nr + 1) * (1 << (sb->log_zone_size - sb->log_sector_size));
+	printf("\n tm_end_pba: %ld", tm_end_pba);
+	printf("\n tm_end_blk_nr: %ld", tm_end_blk_nr);
+	printf("\n tm_end_zone_nr: %d", tm_end_zone_nr);
+	return (tm_end_zone_nr + 1) * (1 << (sb->log_zone_size - sb->log_sector_size));
 }
 
 unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
@@ -462,7 +463,9 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	sb->log_block_size = 12;
 	sb->log_zone_size = 28;
 	sb->checksum_offset = offsetof(struct lsdm_sb, crc);
-	sb->zone_count = get_zone_count(fd);
+	//sb->zone_count = get_zone_count(fd);
+	/* For now we are shunting the 7TB disk to a size of 4TB */
+	sb->zone_count = 16384;
 	printf("\n sb->zone_count: %d", sb->zone_count);
 	sb->max_pba = get_max_pba(sb);
 	printf("\n sb->max_pba: %llu", sb->max_pba);
@@ -478,18 +481,18 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	printf("\n sb->blk_count_ckpt: %d", sb->blk_count_ckpt);
 	sb->blk_count_sit = get_sit_blk_count(sb);
 	printf("\n sb->blk_count_sit: %d", sb->blk_count_sit);
-	sb->revmap_pba = get_revmap_pba(sb);
-	printf("\n sb->revmap_pba: %u", sb->revmap_pba);
-	sb->tm_pba = get_tm_pba(sb);
-	printf("\n sb->tm_pba: %u", sb->tm_pba);
 	sb->revmap_bm_pba = get_revmap_bm_pba(sb);
 	printf("\n sb->revmap_bm_pba: %u", sb->revmap_bm_pba);
+	sb->revmap_pba = get_revmap_pba(sb);
+	printf("\n sb->revmap_pba: %u", sb->revmap_pba);
 	sb->ckpt1_pba = get_ckpt1_pba(sb);
 	printf("\n sb->ckpt1_pba: %u", sb->ckpt1_pba);
 	sb->ckpt2_pba = sb->ckpt1_pba + NR_SECTORS_IN_BLK;
 	printf("\n sb->ckpt2_pba: %u", sb->ckpt2_pba);
 	sb->sit_pba = get_sit_pba(sb);
 	printf("\n sb->sit_pba: %u", sb->sit_pba);
+	sb->tm_pba = get_tm_pba(sb);
+	printf("\n sb->tm_pba: %u", sb->tm_pba);
 	sb->nr_lbas_in_zone = (1 << (sb->log_zone_size - sb->log_sector_size));
 	printf("\n nr_lbas_in_zone: %llu ", sb->nr_lbas_in_zone);
 	sb->nr_cmr_zones = cmr;
@@ -505,8 +508,15 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 
 	printf("\n sb_pba: %ld", sb_pba);
 	ret = write_to_disk(fd, (char *)sb, sb_pba); 
-	if (ret < 0)
+	if (ret < 0) {
+		printf("\n Could not write SB to the disk \n");
 		exit(-1);
+	}
+	ret = write_to_disk(fd, (char *)sb, sb_pba + NR_SECTORS_IN_BLK); 
+	if (ret < 0) {
+		printf("\n Could not write SB to the disk \n");
+		exit(-1);
+	}
 	return sb;
 }
 
@@ -608,7 +618,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	printf("\n-----------------------------------------------------------\n");
 	printf("\n checkpoint written at: %llu cur_frontier_pba: %lld", ckpt_pba, ckpt->hot_frontier_pba);
 
-	u64 offset = ckpt_pba * 512;
+	u64 offset = sb->ckpt1_pba * 512;
 
 	ret = lseek64(fd, offset, SEEK_SET);
 	if (ret < 0) {
@@ -618,14 +628,24 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	}
 	ret = write(fd, ckpt, BLK_SZ);
 	if (ret < 0) {
-		perror("Error while writing: ");
+		perror("Error while writing ckpt1: ");
 		exit(errno);
 	}
 
-
+	offset = sb->ckpt2_pba * 512;
+	ret = lseek64(fd, offset, SEEK_SET);
+	if (ret < 0) {
+		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+		perror("!! (before write) Error in lseek64: \n");
+		exit(errno);
+	}
+	ret = write(fd, ckpt, BLK_SZ);
+	if (ret < 0) {
+		perror("Error while writing ckpt2: ");
+		exit(errno);
+	}
 
 	printf("\n 1) ckpt->nr_free_zones: %llu", ckpt->nr_free_zones);
-	//write_to_disk(fd, (char *) ckpt, ckpt_pba);
 	printf("\n Checkpoint written at pba: %llu", ckpt_pba);
 	printf("\n ckpt->magic: %d ckpt->hot_frontier_pba: %lld", ckpt->magic, ckpt->hot_frontier_pba);
 	printf("\n sb->zone0_pba: %llu", sb->zone0_pba);
@@ -648,7 +668,6 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 		exit(errno);
 	}
 
-	//ckpt1 = read_ckpt(fd, sb, ckpt_pba);
 	printf("\n Read ckpt, ckpt->magic: %d", ckpt1->magic);
 	printf("\n hot_frontier_pba: %llu" , ckpt1->hot_frontier_pba);
 	printf("\n warm_gc_frontier_pba: %llu" , ckpt1->warm_gc_frontier_pba);
@@ -803,35 +822,29 @@ int main()
 	//char * blkdev = "/dev/vdb";
 	char * blkdev = "/dev/sdb";
 	int fd = open_disk(blkdev);
-
 	cmr = reset_shingled_zones(fd);
-
 	sb1 = write_sb(fd, 0, cmr);
 	printf("\n Superblock written at pba: %d", pba);
 	printf("\n sizeof sb: %ld", sizeof(struct lsdm_sb));
-	sb2 = write_sb(fd, 8, cmr);
 	read_sb(fd, 0);
 	read_sb(fd, 8);
 	printf("\n Superblock written at pba: %d", pba + NR_SECTORS_IN_BLK);
-	free(sb2);
+	write_revmap_bitmap(fd, sb1->revmap_bm_pba, sb1->blk_count_revmap_bm);
 	write_revmap(fd, sb1->revmap_pba, sb1->blk_count_revmap);
+	write_ckpt(fd, sb1, sb1->ckpt1_pba);
+	write_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
+	read_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
+	write_tm(fd, sb1->tm_pba, sb1->blk_count_tm);
 	nrblks = get_nr_blks(sb1);
 	printf("\n nrblks: %lu", nrblks);
 	//write_zeroed_blks(fd, 0, nrblks);
 	printf("\n nrblks: %lu", nrblks);
-	write_tm(fd, sb1->tm_pba, sb1->blk_count_tm);
-	write_revmap_bitmap(fd, sb1->revmap_bm_pba, sb1->blk_count_revmap_bm);
-	write_ckpt(fd, sb1, sb1->ckpt1_pba);
 	printf("\n Checkpoint written at offset: %d", sb1->ckpt1_pba);
-	write_ckpt(fd, sb1, sb1->ckpt2_pba);
 	printf("\n Second Checkpoint written at offset: %d", sb1->ckpt2_pba);
 	printf("\n Extent map written");
 	printf("\n sb1->zone_count: %d", sb1->zone_count);
-	write_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
-	read_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
 	printf("\n Segment Information Table written");
 	pba = 0;
-	read_ckpt(fd, sb1, sb1->ckpt1_pba);
 	free(sb1);
 	close(fd);
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */

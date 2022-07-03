@@ -185,19 +185,10 @@ static struct extent * revmap_rb_search_geq(struct ctx *ctx, sector_t pba)
 void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba);
 
 /* TODO: depending on the root decrement the correct nr of extents */
-static void lsdm_rb_remove(struct ctx *ctx, struct rb_root *root, struct extent *e, int revflag)
+static void lsdm_rb_remove(struct ctx *ctx, struct rb_root *root, struct extent *e)
 {
 	rb_erase(&e->rb, root);
 	ctx->n_extents--;
-	/*-----Remove from here later------*/
-	while(e->len && revflag) {
-		printk(KERN_ERR "\n Overwrite a block at LBA: %llu: (old) PBA: %llu ", e->lba, e->pba);
-		sit_ent_vblocks_decr(ctx, e->pba);
-		e->pba = e->pba + 8;
-		e->len = e->len - 8;
-	}
-	/*-----Remove until here later------*/
-
 }
 
 
@@ -312,7 +303,7 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 		if((prev->lba + prev->len) == e->lba) {
 			if ((prev->pba + prev->len) == e->pba) {
 				prev->len += e->len;
-				lsdm_rb_remove(ctx, root, e, 0);
+				lsdm_rb_remove(ctx, root, e);
 				kmem_cache_free(ctx->extent_cache, e);
 				e = prev;
 				ctx->n_extents--;
@@ -327,7 +318,7 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 		if (next->lba == (e->lba + e->len)) {
 			if (next->pba == (e->pba + e->len)) {
 				e->len += next->len;
-				lsdm_rb_remove(ctx, root, next, 0);
+				lsdm_rb_remove(ctx, root, next);
 				kmem_cache_free(ctx->extent_cache, next);
 				ctx->n_extents--;
 			}
@@ -343,7 +334,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba);
  * Returns NULL if the new node code be added.
  * Return overlapping extent otherwise (overlapping node already exists)
  */
-static struct extent * lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new, uint revflag)
+static struct extent * lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, struct extent *new)
 {
 	struct rb_node **link = NULL, *parent = NULL;
 	struct extent *e = NULL;
@@ -389,18 +380,6 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, str
 		printk(KERN_ERR"\n !!!! Corruption while Inserting: lba: %lld pba: %lld len: %d", new->lba, new->pba, new->len);
 		BUG();
 	} */
-
-	/* For now, where translation entry on disk is not actually written */
-	pba = new->pba;
-	while (len && revflag) {
-		sit_ent_vblocks_incr(ctx, pba);
-		if (pba == zone_end(ctx, pba)) {
-			sit_ent_add_mtime(ctx, pba);
-		}
-		len = len - 8;
-		pba = pba + 8;
-	}
-	/* The above snippet should be in add_translation_entry. Keeping here for now */
 	return NULL;
 }
 
@@ -408,7 +387,7 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct rb_root *root, str
 /* Update mapping. Removes any total overlaps, edits any partial
  * overlaps, adds new extent to map.
  */
-static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len, int revflag)
+static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba, sector_t pba, size_t len)
 {
 	struct extent *e = NULL, *new = NULL, *split = NULL, *prev = NULL;
 	struct extent *tmp = NULL;
@@ -432,7 +411,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	RB_CLEAR_NODE(&new->rb);
 	extent_init(new, lba, pba, len);
 
-	e = lsdm_rb_insert(ctx, root, new, revflag);
+	e = lsdm_rb_insert(ctx, root, new);
 	/* No overlapping extent found, inserted new */
 	if (!e)
 		return 0;
@@ -465,7 +444,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 
 		e->len = diff;
 		//printk("\n Case1: Modified: (new->lba: %llu, new->pba: %llu, new->len: %lu) ", e->lba, e->pba, e->len);
-		if (lsdm_rb_insert(ctx, root, new, revflag)) {
+		if (lsdm_rb_insert(ctx, root, new)) {
 			printk(KERN_ERR"\n Corruption in case 1.1, diff: %d !! ", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
@@ -473,7 +452,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
 		} 
-		if (lsdm_rb_insert(ctx, root, split, revflag)) {
+		if (lsdm_rb_insert(ctx, root, split)) {
 			printk(KERN_ERR"\n Corruption in case 1.2!! diff: %d", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff);
@@ -481,16 +460,6 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			printk(KERN_ERR"\n"); 
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
-		}
-		if (revflag == 0)
-			return 0;
-		temppba = e->pba + diff;
-		while (len) {
-			printk(KERN_ERR "\n Overwrite a block at LBA: %llu: (old) PBA: %llu (new) PBA: %llu", lba, temppba, pba);
-			sit_ent_vblocks_decr(ctx, temppba);
-			len = len - 8;
-			temppba = temppba + 8;
-			pba = pba + 8;
 		}
 		return(0);
 	}
@@ -531,17 +500,6 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		diff = e->len - (lba - e->lba);
 		e->len = lba - e->lba;
 		e = lsdm_rb_next(e);
-		/*---------Remove later -----------*/
-		temppba = e->pba + e->len;
-		newpba = pba;
-		while (diff && revflag) {
-			//printk(KERN_ERR "\n Overwrite a block at LBA: %llu: (old) PBA: %llu (new) PBA: %llu", lba, temppba, newpba);
-			sit_ent_vblocks_decr(ctx, pba);
-			temppba = temppba + 8;
-			newpba = newpba + 8;
-			diff = diff - 8;
-		}
-		/*---------Remove later till here -----------*/
 		/*  
 		 *  process the next overlapping segments!
 		 *  Fall through to the next case.
@@ -566,13 +524,13 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 		tmp = lsdm_rb_next(e);
 		diff = e->len;
 		pba = e->pba;
-		lsdm_rb_remove(ctx, root, e, revflag);
+		lsdm_rb_remove(ctx, root, e);
 		//printk("\n Case3, Removed: (e->lba: %llu, e->pba: %llu, e->len: %lu) ", e->lba, e->pba, e->len);
 		kmem_cache_free(ctx->extent_cache, e);
 		e = tmp;
 	}
 	if (!e || (e->lba >= lba + len))  {
-		if (lsdm_rb_insert(ctx, root, new, revflag)) {
+		if (lsdm_rb_insert(ctx, root, new)) {
 			printk(KERN_ERR"\n Corruption in case 3!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
@@ -599,12 +557,12 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 	 */
 	if ((lba <= e->lba) && (lba + len > e->lba) && (lba + len < e->lba + e->len))  {
 		diff = lba + len - e->lba;
-		lsdm_rb_remove(ctx, root, e, revflag);
+		lsdm_rb_remove(ctx, root, e);
 		//printk("\n Case4, Removed: (e->lba: %llu, e->pba: %llu, e->len: %lu) ", e->lba, e->pba, e->len);
 		e->lba = e->lba + diff;
 		e->len = e->len - diff;
 		e->pba = e->pba + diff;
-		if (lsdm_rb_insert(ctx, root, new, revflag)) {
+		if (lsdm_rb_insert(ctx, root, new)) {
 			printk(KERN_ERR"\n Corruption in case 4.1!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
@@ -612,7 +570,7 @@ static int lsdm_update_range(struct ctx *ctx, struct rb_root *root, sector_t lba
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
 		}
-		if (lsdm_rb_insert(ctx, root, e, revflag)) {
+		if (lsdm_rb_insert(ctx, root, e)) {
 			printk(KERN_ERR"\n Corruption in case 4.2!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
 			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
@@ -640,7 +598,7 @@ static void lsdm_free_rb_tree(struct ctx *ctx, struct rb_root *root)
 
 	while(e) {
 		next = lsdm_rb_next(e);
-		lsdm_rb_remove(ctx, root, e, 0);
+		lsdm_rb_remove(ctx, root, e);
 		kmem_cache_free(ctx->extent_cache, e);
 		e = next;
 	}
@@ -1067,8 +1025,8 @@ again:
 	bio_put(bio);
 	move_gc_write_frontier(ctx, s8);
 	printk(KERN_ERR "\n %s write pointer adjusted! ", __func__);
-	ret = lsdm_update_range(ctx, &ctx->extent_tbl_root, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, 1);
-	ret = lsdm_update_range(ctx, &ctx->rev_tbl_root, gc_extent->e.pba, gc_extent->e.lba, gc_extent->e.len, 0);
+	ret = lsdm_update_range(ctx, &ctx->extent_tbl_root, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+	ret = lsdm_update_range(ctx, &ctx->rev_tbl_root, gc_extent->e.pba, gc_extent->e.lba, gc_extent->e.len);
 	add_revmap_entries(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	return 0;
 }
@@ -2790,6 +2748,77 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	return 0;	
 }
 
+/* We are reading the lba from the lsdm tree in memory.
+ * We will have a problem when the tree becomes so big that
+ * it cannot be held in memory
+ * But  for now this works! Will have to convert the the block
+ * based translation entry to an extent based one. 
+ *
+ * TODO: Will have to convert the the block
+ * based translation entry to an extent based one.
+ */
+struct page * read_tm_page(struct ctx * ctx, u64 lba)
+{
+	u64 last_lba;
+	char index = 0;
+	struct page * page;
+	struct tm_entry * ptr;
+	struct extent * e;
+	u64 e_pba = 0;
+	u32 nrsectors = (TM_ENTRIES_BLK * NR_SECTORS_IN_BLK);
+
+    	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
+	if (!page )
+		return NULL;
+
+	nrpages++;
+	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
+
+	ptr = (struct tm_entry *) page_address(page);
+	
+	while (lba <= last_lba) {
+		e = lsdm_rb_geq(ctx, lba, 0);
+		/* Case of no overlap */
+		if ((e == NULL) || (e->lba >= lba + nrsectors) || (e->lba + e->len <= lba))  {
+			while (index < TM_ENTRIES_BLK) {
+				ptr->pba = 0;
+				ptr++;
+				index++;
+				nrsectors = nrsectors - NR_SECTORS_PER_BLK;
+			}
+			break;
+		}
+
+		/* some partial overlap, front part does not have a mapping*/
+		while (e->lba > lba) {
+			ptr->pba = 0;
+			ptr++;
+			lba =  lba + NR_SECTORS_PER_BLK;
+			index = index + NR_SECTORS_PER_BLK;
+			if (index == TM_ENTRIES_BLK) {
+				break;
+			}
+			nrsectors = nrsectors - NR_SECTORS_PER_BLK;
+		}
+
+		/* e->lba <= lba */
+		e_pba = e->pba;
+		while ((e->lba + e->len) > lba) {
+			ptr->pba = e_pba;
+			ptr++;
+			lba = lba + NR_SECTORS_PER_BLK;
+			e_pba = e_pba + NR_SECTORS_PER_BLK;
+			index = index + NR_SECTORS_PER_BLK;
+			if (index == TM_ENTRIES_BLK) {
+				break;
+			}
+			nrsectors = nrsectors - NR_SECTORS_PER_BLK;
+		}
+	}
+
+
+}
+
 /*
  * Note that blknr is 4096 bytes aligned. Whereas our 
  * LBA is 512 bytes aligned. So we convert the blknr
@@ -3400,7 +3429,8 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 
 	//printk("\n %s blknr: %d tm_pba: %llu \n", __func__, blknr, ctx->sb->tm_pba);
 	
-	new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
+	//new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
+	new_tmpage->page = read_tm_page(ctx, lba);
 	if (!new_tmpage->page) {
 		printk(KERN_ERR "\n %s read_block  failed! could not allocate page! \n", __func__);
 		kmem_cache_free(ctx->tm_page_cache, new_tmpage);
@@ -3624,7 +3654,7 @@ void process_tm_entries(struct work_struct * w)
 
 	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
 	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
-	//add_block_based_translation(ctx, page);
+	add_block_based_translation(ctx, page);
 	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
 	__free_pages(page, 0);
 	nrpages--;
@@ -4216,8 +4246,8 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		//printk(KERN_ERR "\n %s lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 		down_write(&ctx->metadata_update_lock);
 		/*------------------------------- */
-		lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, wf, subbio_ctx->extent.len, 1);
-		lsdm_update_range(ctx, &ctx->rev_tbl_root, wf, lba, subbio_ctx->extent.len, 0);
+		lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, wf, subbio_ctx->extent.len);
+		lsdm_update_range(ctx, &ctx->rev_tbl_root, wf, lba, subbio_ctx->extent.len);
 		/*-------------------------------*/
 		up_write(&ctx->metadata_update_lock);
 	} while (split != clone);
@@ -4477,8 +4507,8 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 		/* TODO: right now everything should be zeroed out */
 		//panic("Why are there any already mapped extents?");
 		down_write(&ctx->metadata_update_lock);
-		lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, entry->pba, NR_SECTORS_IN_BLK, 1);
-		lsdm_update_range(ctx, &ctx->rev_tbl_root, entry->pba, lba, NR_SECTORS_IN_BLK, 0);
+		lsdm_update_range(ctx, &ctx->extent_tbl_root, lba, entry->pba, NR_SECTORS_IN_BLK);
+		lsdm_update_range(ctx, &ctx->rev_tbl_root, entry->pba, lba, NR_SECTORS_IN_BLK);
 		up_write(&ctx->metadata_update_lock);
 		lba = lba + 8; /* Every 512 bytes sector has an LBA in a SMR drive */
 		entry = entry + 1;
@@ -4572,8 +4602,8 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page)
 			if (extent[j].pba == 0)
 				continue;
 			down_write(&ctx->metadata_update_lock);
-			lsdm_update_range(ctx, &ctx->extent_tbl_root, extent[j].lba, extent[j].pba, extent[j].len, 1);
-			lsdm_update_range(ctx, &ctx->rev_tbl_root, extent[j].pba, extent[j].lba, extent[j].len, 0);
+			lsdm_update_range(ctx, &ctx->extent_tbl_root, extent[j].lba, extent[j].pba, extent[j].len);
+			lsdm_update_range(ctx, &ctx->rev_tbl_root, extent[j].pba, extent[j].lba, extent[j].len);
 			up_write(&ctx->metadata_update_lock);
 		}
 		entry_sector = entry_sector + 1;
@@ -5112,7 +5142,6 @@ int read_metadata(struct ctx * ctx)
 	printk(KERN_ERR "\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
 	read_revmap(ctx);
 	printk(KERN_INFO "\n Reverse map Read!");
-	/*
 	ret = read_translation_map(ctx);
 	if (0 > ret) {
 		__free_pages(ctx->sb_page, 0);
@@ -5120,7 +5149,7 @@ int read_metadata(struct ctx * ctx)
 		__free_pages(ctx->revmap_bm, 0);
 		printk(KERN_ERR "\n read_extent_map failed! cannot read the metadata ");
 		return ret;
-	}*/
+	}
 	printk(KERN_INFO "\n %s extent_map read!", __func__);
 
 	ctx->nr_freezones = 0;

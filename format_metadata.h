@@ -2,7 +2,7 @@
 
 /*
  * Design:
- * SB1, SB2, Revmap, Translation Map, Revmap Bitmap, CKPT, SIT, Dataa
+ * SB1, SB2, Revmap Bitmap, Revmap, CKPT1, CKPT2, SIT, Translation Map, Data
  *
  * We dont want to keep two revmap entries:
  * 1. We can at max loose 1 sector of entries + 1 page of in memory entries. 
