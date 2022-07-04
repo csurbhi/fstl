@@ -2759,38 +2759,44 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
  */
 struct page * read_tm_page(struct ctx * ctx, u64 lba)
 {
-	u64 last_lba;
-	char index = 0;
+	u64 last_lba; 
+	int index = 0;
 	struct page * page;
 	struct tm_entry * ptr;
-	struct extent * e;
+	struct extent * e = NULL;
 	u64 e_pba = 0;
 	u32 nrsectors = (TM_ENTRIES_BLK * NR_SECTORS_IN_BLK);
+
+	/* blknr = lba / nrsectors */
+	lba = ((lba / nrsectors) * nrsectors);
+	last_lba = lba + nrsectors;
 
     	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
 	if (!page )
 		return NULL;
 
 	nrpages++;
-	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
+	printk(KERN_ERR "\n %s nrpages: %llu lba: %llu \n", __func__, nrpages, lba);
 
 	ptr = (struct tm_entry *) page_address(page);
 	
 	while (lba <= last_lba) {
-		e = lsdm_rb_geq(ctx, lba, 0);
+		/* metadata lock held in the calling function add_revmap_entries */
+		e = _lsdm_rb_geq(&ctx->extent_tbl_root, lba, 0);
 		/* Case of no overlap */
-		if ((e == NULL) || (e->lba >= lba + nrsectors) || (e->lba + e->len <= lba))  {
+		if ((e == NULL) || (e->lba >= lba + nrsectors))  {
 			while (index < TM_ENTRIES_BLK) {
 				ptr->pba = 0;
 				ptr++;
 				index++;
 				nrsectors = nrsectors - NR_SECTORS_PER_BLK;
 			}
+			lba = last_lba;
 			break;
 		}
 
 		/* some partial overlap, front part does not have a mapping*/
-		while (e->lba > lba) {
+		while ((e->lba > lba) && (e->lba + e->len < lba)){
 			ptr->pba = 0;
 			ptr++;
 			lba =  lba + NR_SECTORS_PER_BLK;
@@ -2801,9 +2807,14 @@ struct page * read_tm_page(struct ctx * ctx, u64 lba)
 			nrsectors = nrsectors - NR_SECTORS_PER_BLK;
 		}
 
+		if (index == TM_ENTRIES_BLK) {
+			break;
+		}
+
+
 		/* e->lba <= lba */
 		e_pba = e->pba;
-		while ((e->lba + e->len) > lba) {
+		while ((e->lba <= lba) && (e->lba + e->len > lba)) {
 			ptr->pba = e_pba;
 			ptr++;
 			lba = lba + NR_SECTORS_PER_BLK;
@@ -2815,8 +2826,7 @@ struct page * read_tm_page(struct ctx * ctx, u64 lba)
 			nrsectors = nrsectors - NR_SECTORS_PER_BLK;
 		}
 	}
-
-
+	return page;
 }
 
 /*
@@ -5142,6 +5152,7 @@ int read_metadata(struct ctx * ctx)
 	printk(KERN_ERR "\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
 	read_revmap(ctx);
 	printk(KERN_INFO "\n Reverse map Read!");
+	/*
 	ret = read_translation_map(ctx);
 	if (0 > ret) {
 		__free_pages(ctx->sb_page, 0);
@@ -5151,7 +5162,7 @@ int read_metadata(struct ctx * ctx)
 		return ret;
 	}
 	printk(KERN_INFO "\n %s extent_map read!", __func__);
-
+	*/
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb2->zone_count_main /BITS_IN_BYTE;
 	if (sb2->zone_count_main % BITS_IN_BYTE)

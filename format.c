@@ -463,9 +463,8 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	sb->log_block_size = 12;
 	sb->log_zone_size = 28;
 	sb->checksum_offset = offsetof(struct lsdm_sb, crc);
-	//sb->zone_count = get_zone_count(fd);
+	sb->zone_count = get_zone_count(fd);
 	/* For now we are shunting the 7TB disk to a size of 4TB */
-	sb->zone_count = 16384;
 	printf("\n sb->zone_count: %d", sb->zone_count);
 	sb->max_pba = get_max_pba(sb);
 	printf("\n sb->max_pba: %llu", sb->max_pba);
