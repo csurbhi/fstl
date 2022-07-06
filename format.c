@@ -28,6 +28,7 @@
 #define NR_CKPT_COPIES 2 
 #define NR_BLKS_SB 2
 #define NR_SECTORS_IN_BLK 8
+#define SECTORS_SHIFT 3
 #define BITS_IN_BYTE 8
 
 unsigned int crc32(int d, unsigned char *buf, unsigned int size)

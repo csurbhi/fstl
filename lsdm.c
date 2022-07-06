@@ -62,8 +62,6 @@ long nrpages;
  */
 
 static int get_new_zone(struct ctx *ctx);
-extern struct bio_set fs_bio_set;
-
 static struct kmem_cache * extents_slab;
 #define IN_MAP 0
 #define IN_CLEANING 1
@@ -81,7 +79,7 @@ static void extent_init(struct extent *e, sector_t lba, sector_t pba, unsigned l
 #define MIN_POOL_PAGES 16
 #define MIN_POOL_IOS 16
 #define MIN_COPY_REQS 16
-#define GC_POOL_PAGES 65536/* pages for 4 zones - reserved for GC */
+#define GC_POOL_PAGES 4096 /* 4096 slots are created. Each slot takes 2^order continuous pages */
 
 static sector_t zone_start(struct ctx *ctx, sector_t pba)
 {
@@ -735,7 +733,8 @@ static int select_zone_to_clean(struct ctx *ctx, int mode)
 static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 {
 	struct gc_extents *gc_extent;
-	int maxlen = (BIO_MAX_PAGES * NR_SECTORS_IN_BLK);
+	/* maxlen is the maximum number of sectors permitted by BIO */
+	int maxlen = (BIO_MAX_PAGES) << SECTOR_SHIFT;
 	int temp = 0;
 
 	while (1) {
@@ -802,13 +801,11 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	struct bio *bio;
 	struct bvec_iter_all iter_all;
 	static int count = 0;
+	struct gc_extents *newextent;
+	int len;
 
 	count ++;
-	bio = bio_alloc(GFP_KERNEL, 1);
-	if (!bio) {
-		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
-		return -ENOMEM;
-	}
+
 	nr_sectors = gc_extent->e.len;
 	s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 	BUG_ON(gc_extent->e.len != s8);
@@ -818,29 +815,37 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	 * Since the length is blk aligned, we dont have to add a 1
 	 * to the nr_pages calculation
 	 */
-	nr_pages = (s8 >> 3);
+	nr_pages = (s8 >> SECTOR_SHIFT);
+	printk(KERN_ERR "\n %s nr_pages: %d, gc_extent->e.len (in sectors): %ld s8: %d", __func__, nr_pages, gc_extent->e.len, s8);
+	BUG_ON(nr_pages <= 0);
+	BUG_ON(nr_pages > 256);
 
+	/* create a bio with "nrpages" bio vectors, so that we can add nrpages
+	 * individually to the bio vectors
+	 */
+	bio = bio_alloc_bioset(GFP_KERNEL, nrpages, ctx->gc_bs);
+	if (!bio) {
+		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
+		return -ENOMEM;
+	}
+	printk(KERN_ERR "%s bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d \n", __func__, bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs);
 
 	/* bio_add_page sets the bi_size for the bio */
-	printk(KERN_ERR "\n %s nr_pages: %d, gc_extent->e.len: %ld s8: %d", __func__, nr_pages, gc_extent->e.len, s8);
-	BUG_ON(nr_pages == 0);
-	 
-	for(i=0; i<nr_pages; i++) {
-		//page = mempool_alloc(ctx->gc_page_pool, GFP_KERNEL);
-    		page = alloc_page(__GFP_ZERO|GFP_KERNEL);
-		if ((!page) || ( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0))) {
+	for(i=0; i<bio->bi_max_vecs; i++) {
+		page = mempool_alloc(ctx->gc_page_pool, GFP_KERNEL);
+		if ((!page) || ( !bio_add_page(bio, page, PAGE_SIZE, 0))) {
+			if (!page) {
+				printk(KERN_ERR "\n %s Could not allocate page", __func__);
+			} else {
+				printk(KERN_ERR "\n %s Could not add page to the bio ", __func__);
+				printk(KERN_ERR "bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d \n", bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs);
+			}
 			bio_for_each_segment_all(bv, bio, iter_all) {
-				//mempool_free(bv->bv_page, ctx->gc_page_pool);
-				__free_pages(page, 0);
-				printk(KERN_ERR "\n %s could not add page to a bio ", __func__);
-				nrpages--;
-				printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
+				mempool_free(bv->bv_page, ctx->gc_page_pool);
 			}
 			bio_put(bio);
 			return -ENOMEM;
 		}
-		nrpages++;
-		printk(KERN_ERR "\n %s page added to the bio, nrpages: %llu ", __func__, nrpages);
 	}
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
 	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu nr_pages: %d", __func__,  bio->bi_iter.bi_sector, nr_pages);
@@ -848,6 +853,25 @@ static int setup_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_end_io = read_extent_done;
 	gc_extent->bio = bio;
+
+	/* we create a new extent representing the pages that could not be added to this bio */
+	if (nrpages < bio->bi_max_vecs) {
+		gc_extent->e.len = bio->bi_max_vecs << SECTOR_SHIFT;
+		len = gc_extent->e.len;
+		nrpages = nrpages - bio->bi_max_vecs;
+		/* add a new extent with these pages */
+		newextent = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
+		if(!newextent) {
+			printk(KERN_ERR "\n Could not allocate memory to gc_extent! ");
+			return -1;
+		}
+		newextent->e.lba = gc_extent->e.lba + len;
+		newextent->e.pba = gc_extent->e.pba + len;
+		newextent->e.len = nrpages << SECTOR_SHIFT;
+		INIT_LIST_HEAD(&newextent->list);
+		list_add_tail(&ctx->gc_extents->list, &newextent->list);
+	}
+
 	return 0;
 }
 
@@ -855,7 +879,7 @@ static void free_gc_list(struct ctx *ctx)
 {
 
 	struct list_head *list_head;
-	struct gc_extents *gc_extent;
+	struct gc_extents *gc_extent, *temp_ptr;
 	struct bio_vec *bv = NULL;
 	struct bvec_iter_all iter_all;
 	struct bio *bio;
@@ -865,13 +889,13 @@ static void free_gc_list(struct ctx *ctx)
 		bio = gc_extent->bio;
 		if (bio) {
 			bio_for_each_segment_all(bv, bio, iter_all) {
-				//mempool_free(bv->bv_page, ctx->gc_page_pool);
-				__free_pages(bv->bv_page, 0);
-				nrpages--;
-				printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
+				mempool_free(bv->bv_page, ctx->gc_page_pool);
 			}
 			bio_put(bio);
 		}
+		temp_ptr = list_next_entry(gc_extent, list);
+		list_head = &temp_ptr->list;
+		list_del(&gc_extent->list);
 		kmem_cache_free(ctx->gc_extents_cache, gc_extent);
 	}
 }
@@ -1104,7 +1128,7 @@ static int write_valid_gc_extents(struct ctx *ctx)
 			if (s8 <= 0) {
 				panic("Should always have atleast a block left ");
 			}
-			if (!(split = bio_split(gc_extent->bio, s8, GFP_NOIO, ctx->bs))){
+			if (!(split = bio_split(gc_extent->bio, s8, GFP_NOIO, ctx->gc_bs))){
 				printk(KERN_ERR "\n %s:%d failed at bio_split! GC failed!! ", __func__, __LINE__);
 				panic("\n Low memory, cannot split bio!");
 			}
@@ -1182,7 +1206,6 @@ static int lsdm_gc(struct ctx *ctx, int zone_to_clean, char gc_mode, int err_fla
 		return -1;
 	}
 
-	return (0);
 
 
 	/* Take a semaphore lock so that no two gc instances are
@@ -1293,9 +1316,9 @@ again:
 	 * order
 	 */
 	ret = read_gc_extents(ctx);
+
 	if (ret)
 		goto failed;
-
 	if (gc_mode == BG_GC) {
 		/* Wait here till the system becomes IO Idle, if system is
 		 * iodle don't wait */
@@ -1307,14 +1330,12 @@ again:
 
 	printk(KERN_ERR "%s:%d All GC extents read! \n", __func__, __LINE__);
 
-	/*
 	ret = write_valid_gc_extents(ctx);
 	if (ret < 0)
 		goto failed;
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
 	do_checkpoint(ctx);
-	*/
 	/* Complete the GC and then sync the block device */
 	sync_blockdev(ctx->dev->bdev);
 	/* Zone gets freed when the valid blocks count is adjusted and
@@ -1613,7 +1634,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 */
 			nr_sectors = e->lba - lba;
 			//printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
-			split = bio_split(clone, nr_sectors, GFP_NOIO, ctx->bs);
+			split = bio_split(clone, nr_sectors, GFP_NOIO, NULL);
 			if (!split) {
 				printk(KERN_ERR "\n Could not split the clone! ERR ");
 				bio->bi_status = -ENOMEM;
@@ -1654,7 +1675,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			break;
 		}
 		/* else e is smaller than bio */
-		split = bio_split(clone, overlap, GFP_NOIO, ctx->bs);
+		split = bio_split(clone, overlap, GFP_NOIO, NULL);
 		if (!split) {
 			printk(KERN_INFO "\n Could not split the clone! ERR ");
 			bio->bi_status = -ENOMEM;
@@ -2727,7 +2748,7 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 	index = (lba/NR_SECTORS_IN_BLK);
 	index = index  %  TM_ENTRIES_BLK;
 	ptr = ptr + index;
-	printk(KERN_ERR "\n 1. lba: %llu, ptr->pba: %llu", lba, ptr->pba);
+	//printk(KERN_ERR "\n 1. lba: %llu, ptr->pba: %llu", lba, ptr->pba);
 	/*-----------------------------------------------*/
 	//BUG_ON ((ptr->lba == lba) && (ptr->pba == pba))
 	/* lba can be 0, but pba cannot be */
@@ -2735,11 +2756,11 @@ int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba
 		/* decrement vblocks for the segment that has
 		 * the stale block
 		 */
-		printk(KERN_ERR "\n Overwrite a block at LBA: %llu, PBA: %llu", lba, ptr->pba);
+		//printk(KERN_ERR "\n Overwrite a block at LBA: %llu, PBA: %llu", lba, ptr->pba);
 		sit_ent_vblocks_decr(ctx, ptr->pba);
 	}
 	ptr->pba = pba;
-	printk(KERN_ERR "\n 2. ptr->lba: %llu, ptr->pba: %llu", lba, ptr->pba);
+	//printk(KERN_ERR "\n 2. ptr->lba: %llu, ptr->pba: %llu", lba, ptr->pba);
 	sit_ent_vblocks_incr(ctx, ptr->pba);
 	if (pba == zone_end(ctx, pba)) {
 		sit_ent_add_mtime(ctx, ptr->pba);
@@ -4219,7 +4240,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		/*-------------------------------*/
 			spin_unlock(&ctx->lock);
 			/* We cannot call bio_split with spinlock held! */
-			if (!(split = bio_split(clone, s8, GFP_NOIO, ctx->bs))){
+			if (!(split = bio_split(clone, s8, GFP_NOIO, NULL))){
 				//trace_printk("\n failed at bio_split! ");
 				kmem_cache_free(ctx->subbio_ctx_cache, subbio_ctx);
 				goto fail;
@@ -4309,7 +4330,7 @@ fail:
    argv[2] = zone size (LBAs)
    argv[3] = max pba
    */
-#define BS_NR_POOL_PAGES 8192
+#define BS_NR_POOL_PAGES 65536
 
 /* TODO: IMPLEMENT */
 void put_free_zone(struct ctx *ctx, u64 pba)
@@ -5230,8 +5251,10 @@ static struct lsdm_shrinker {
 */
 
 static void destroy_caches(struct ctx *ctx)
-{	
+{
+	kmem_cache_destroy(ctx->bio_cache);
 	kmem_cache_destroy(ctx->extent_cache);
+	kmem_cache_destroy(ctx->tm_page_write_ctx_cache);
 	kmem_cache_destroy(ctx->app_read_ctx_cache);
 	kmem_cache_destroy(ctx->gc_extents_cache);
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
@@ -5293,11 +5316,17 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->extent_cache) {
 		goto destroy_tm_page_write_ctx_cache;
 	}
+	ctx->bio_cache = kmem_cache_create("lsdm_bio_cache", sizeof(struct bio), 0, SLAB_ACCOUNT, NULL);
+	if (!ctx->bio_cache) {
+		goto destroy_extent_cache;
+	}
 
 	return 0;
 /* failed case */
-destroy_tm_page_write_ctx_cache:
+destroy_extent_cache:
 	kmem_cache_destroy(ctx->extent_cache);
+destroy_tm_page_write_ctx_cache:
+	kmem_cache_destroy(ctx->tm_page_write_ctx_cache);
 destroy_app_read_ctx_cache:
 	kmem_cache_destroy(ctx->app_read_ctx_cache);
 destroy_gc_extents_cache:
@@ -5421,16 +5450,16 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	ret = -ENOMEM;
 	dm_target->error = "dm-lsdm: No memory";
 
-	ctx->gc_page_pool = mempool_create_page_pool(GC_POOL_PAGES, 0);
+	ctx->gc_page_pool = mempool_create_page_pool(GC_POOL_PAGES, 5);
 	if (!ctx->gc_page_pool)
 		goto put_dev;
 
 	//printk(KERN_INFO "about to call bioset_init()");
-	ctx->bs = kzalloc(sizeof(*(ctx->bs)), GFP_KERNEL);
-	if (!ctx->bs)
+	ctx->gc_bs = kzalloc(sizeof(*(ctx->gc_bs)), GFP_KERNEL);
+	if (!ctx->gc_bs)
 		goto destroy_gc_page_pool;
 
-	if(bioset_init(ctx->bs, BS_NR_POOL_PAGES, 0, 0) == -ENOMEM) {
+	if(bioset_init(ctx->gc_bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS) == -ENOMEM) {
 		//trace_printk("\n bioset_init failed!");
 		goto free_bioset;
 	}
@@ -5520,9 +5549,9 @@ free_metadata_pages:
 destroy_cache:
 	destroy_caches(ctx);
 uninit_bioset:
-	bioset_exit(ctx->bs);
+	bioset_exit(ctx->gc_bs);
 free_bioset:
-	kfree(ctx->bs);
+	kfree(ctx->gc_bs);
 
 destroy_gc_page_pool:
 	if (ctx->gc_page_pool)
@@ -5602,9 +5631,9 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	lsdm_gc_thread_stop(ctx);
 	lsdm_flush_thread_stop(ctx);
 	printk(KERN_ERR "\n gc thread stopped! \n");
-	bioset_exit(ctx->bs);
+	bioset_exit(ctx->gc_bs);
 	//trace_printk("\n exited from bioset \n");
-	kfree(ctx->bs);
+	kfree(ctx->gc_bs);
 	//trace_printk("\n bioset memory freed \n");
 	mempool_destroy(ctx->gc_page_pool);
 	//trace_printk("\n memory pool destroyed\n");

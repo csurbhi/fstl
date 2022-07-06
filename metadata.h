@@ -227,7 +227,7 @@ struct ctx {
 	int		  n_sit_extents;
 
 	mempool_t        *gc_page_pool;
-	struct bio_set   * bs;
+	struct bio_set   * gc_bs;
 
 	struct dm_dev    *dev;
 
@@ -274,6 +274,7 @@ struct ctx {
 	struct kmem_cache *gc_rb_node_cache;
 	struct kmem_cache *gc_extents_cache;
 	struct kmem_cache *app_read_ctx_cache;
+	struct kmem_cache *bio_cache;
 	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_ref_lock;
 	spinlock_t tm_flush_lock;
