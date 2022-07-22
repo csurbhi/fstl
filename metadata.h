@@ -17,6 +17,7 @@
 #define NR_SECTORS_IN_BLK 8
 #define BITS_IN_BYTE 8
 #define LOG_SECTOR_SIZE 9
+#define SECTOR_SHIFT 3
 
 
 #define REVMAP_PRIV_MAGIC 0x5
@@ -326,4 +327,14 @@ struct extent {
 	sector_t lba;		/* 512B LBA */
 	sector_t pba;		
 	u32      len;
+	u64 ptr_to_rev;
 }; 
+
+
+struct rev_extent {
+	struct rb_node rb;	/* 20 bytes */
+	sector_t pba;
+	u64 ptr_to_tm;
+};
+
+
