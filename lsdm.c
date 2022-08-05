@@ -935,6 +935,9 @@ static int setup_extent_bio_read(struct ctx *ctx, struct gc_extents *gc_extent)
 	return 0;
 }
 
+
+void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent);
+
 static void free_gc_list(struct ctx *ctx)
 {
 
@@ -946,17 +949,9 @@ static void free_gc_list(struct ctx *ctx)
 
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
-		bio = gc_extent->bio;
-		if (bio) {
-			bio_for_each_segment_all(bv, bio, iter_all) {
-				mempool_free(bv->bv_page, ctx->gc_page_pool);
-			}
-			bio_put(bio);
-		}
 		temp_ptr = list_next_entry(gc_extent, list);
 		list_head = &temp_ptr->list;
-		list_del(&gc_extent->list);
-		kmem_cache_free(ctx->gc_extents_cache, gc_extent);
+		free_gc_extent(ctx, gc_extent);
 	}
 }
 
@@ -1096,8 +1091,6 @@ again:
 		}
 		panic("GC writes failed! Perhaps a resource error");
 	}
-	bio_free_pages(bio);
-	bio_put(bio);
 	move_gc_write_frontier(ctx, s8);
 	printk(KERN_ERR "\n %s write pointer adjusted! ", __func__);
 	ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
@@ -1154,7 +1147,7 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 			return -ENOMEM;
 		}
 	}
-	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu nr_pages: %d", __func__,  bio->bi_iter.bi_sector, bio_pages);
+	printk(KERN_ERR "\n %s bio_sectors(bio): %llu nr_pages: %d", __func__,  bio_sectors(bio), bio_pages);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	//bio->bi_end_io = write_extent_done;
@@ -1164,15 +1157,11 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 
 void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent)
 {
-	struct bio_vec *bv = NULL;
 	struct bio *bio;
-	struct bvec_iter_all iter_all;
 
 	list_del(&gc_extent->list);
 	bio = gc_extent->bio;
-	bio_for_each_segment_all(bv, bio, iter_all) {
-		mempool_free(bv->bv_page, ctx->gc_page_pool);
-	}
+	bio_free_pages(bio);
 	bio_put(bio);
 	kmem_cache_free(ctx->gc_extents_cache, gc_extent);
 }
@@ -1316,16 +1305,11 @@ static int lsdm_gc(struct ctx *ctx, char gc_mode, int err_flag)
 	 * started in parallel.
 	 */
 	if (!mutex_trylock(&ctx->gc_lock)) {
-		printk(KERN_ERR "\n GC is already running! \n");
+		printk(KERN_ERR "\n 1. GC is already running! \n");
 		return -1;
 	}
 
-
-	if (!list_empty(&ctx->gc_extents->list)) {
-		printk(KERN_ERR "\n GC is already running! \n");
-		mutex_unlock(&ctx->gc_lock);
-		return -1;
-	}
+	BUG_ON(!list_empty(&ctx->gc_extents->list));
 
 	node = select_zone_to_clean(ctx, BG_GC);
 	if (!node) {
@@ -1503,9 +1487,7 @@ complete:
 		}
 
 	}
-	mutex_unlock(&ctx->gc_lock);
 /* Remove the zone from the gc_rb_root */
-
 failed:
 	/* Release GC lock */
 	mutex_unlock(&ctx->gc_lock);
