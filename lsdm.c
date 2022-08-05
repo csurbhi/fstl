@@ -398,6 +398,7 @@ void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 		} else if (r_e->pba  < r_new->pba){
 			link = &(parent->rb_right);
 		} else {
+			printk( KERN_ERR "\n %s Error while Inserting pba: %llu, pointing to (lba, len): (%llu, %llu)", __func__, r_new->pba, extent->lba, extent->len);
 			BUG_ON("Bug while adding revmap entry !");
 		}
 	}
@@ -1001,7 +1002,7 @@ static int read_gc_extents(struct ctx *ctx, refcount_t *ref)
 {
 	struct list_head *list_head;
 	struct gc_extents *gc_extent, *last_extent;
-	int count;
+	int count, pagecount = 0;
 	
 	/* If list is empty we have nothing to do */
 	BUG_ON(list_empty(&ctx->gc_extents->list));
@@ -1011,7 +1012,8 @@ static int read_gc_extents(struct ctx *ctx, refcount_t *ref)
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		count++;
 		gc_extent = list_entry(list_head, struct gc_extents, list);
-		gc_extent->bio_pages = kmalloc(bio_pages * sizeof(void *), GFP_KERNEL);
+		pagecount = (gc_extent->e.len >> SECTOR_SHIFT);
+		gc_extent->bio_pages = kmalloc(pagecount * sizeof(void *), GFP_KERNEL);
 		if (!gc_extent->bio_pages) {
 			printk(KERN_ERR "\n %s could not allocate memory for gc_extent->bio_pages", __func__);
 			return -ENOMEM;
@@ -1066,14 +1068,14 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 {
 	struct bio *bio;
 	struct gc_ctx *gc_ctx;
-	sector_t nrsectors, s8;
+	sector_t s8;
 	int trials = 0;
 	int ret;
 
 	bio = gc_extent->bio;
 	bio->bi_iter.bi_sector = ctx->warm_gc_wf_pba;
-	nrsectors = bio_sectors(bio);
-	printk(KERN_ERR "\n %s pba: %llu , len: %llu e.len: %llu" , __func__, ctx->warm_gc_wf_pba, nrsectors, gc_extent->e.len);
+	s8 = bio_sectors(bio);
+	printk(KERN_ERR "\n %s pba: %llu , len: %llu e.len: %llu" , __func__, ctx->warm_gc_wf_pba, s8, gc_extent->e.len);
 	bio->bi_status = BLK_STS_OK;
 again:
 	//submit_bio_wait(bio);
@@ -1155,9 +1157,24 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu nr_pages: %d", __func__,  bio->bi_iter.bi_sector, bio_pages);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
-	bio->bi_end_io = write_extent_done;
+	//bio->bi_end_io = write_extent_done;
 	gc_extent->bio = bio;
 
+}
+
+void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent)
+{
+	struct bio_vec *bv = NULL;
+	struct bio *bio;
+	struct bvec_iter_all iter_all;
+
+	list_del(&gc_extent->list);
+	bio = gc_extent->bio;
+	bio_for_each_segment_all(bv, bio, iter_all) {
+		mempool_free(bv->bv_page, ctx->gc_page_pool);
+	}
+	bio_put(bio);
+	kmem_cache_free(ctx->gc_extents_cache, gc_extent);
 }
 
 
@@ -1202,9 +1219,7 @@ static int write_valid_gc_extents(struct ctx *ctx, u64 last_pba)
 				if (!temp_ptr)
 					break;
 				list_head = &temp_ptr->list;
-				list_del(&gc_extent->list);
-				free_bio(gc_extent->bio);
-				kmem_cache_free(ctx->gc_extents_cache, gc_extent);
+				free_gc_extent(ctx, gc_extent);
 			}
 			break;
 		}
@@ -1216,9 +1231,7 @@ static int write_valid_gc_extents(struct ctx *ctx, u64 last_pba)
 			if (!temp_ptr)
 				break;
 			list_head = &temp_ptr->list;
-			list_del(&gc_extent->list);
-			free_bio(gc_extent->bio);
-			kmem_cache_free(ctx->gc_extents_cache, gc_extent);
+			free_gc_extent(ctx, gc_extent);
 			continue;
 		}
 		/* extents are partially snipped */
