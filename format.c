@@ -409,6 +409,7 @@ void write_revmap(int fd, sector_t revmap_pba, unsigned nr_blks)
 void write_tm(int fd, sector_t tm_pba, unsigned nr_blks)
 {
 	printf("\n ** %s Writing tm blocks at pba: %llu, nrblks: %u", __func__, tm_pba, nr_blks);
+	return 0;
 	write_zeroed_blks(fd, tm_pba, nr_blks);
 	read_block(fd, tm_pba, nr_blks);
 }

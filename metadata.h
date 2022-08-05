@@ -24,8 +24,8 @@
 #define MAX_ZONE_REVMAP 1
 #define BLOCKS_IN_ZONE 65536
 #define SUBBIOCTX_MAGIC 0x2
-#define MAX_TM_PAGES 2
-#define MAX_SIT_PAGES 2
+#define MAX_TM_PAGES 10
+#define MAX_SIT_PAGES 10
 #define NSTL_MAGIC 0xF2F52010
 #define GC_GREEDY 1
 #define GC_CB 2
@@ -199,6 +199,7 @@ struct lsdm_gc_thread {
 struct gc_extents {
 	struct extent_entry e;
 	struct bio *bio;
+	struct page ** bio_pages;
 	struct list_head list;
 };
 
@@ -281,6 +282,7 @@ struct ctx {
 	spinlock_t tm_flush_lock;
 	spinlock_t rev_flush_lock;
 	spinlock_t ckpt_lock;
+	spinlock_t gc_ref_lock;
 	wait_queue_head_t zone_entry_flushq;
 	spinlock_t flush_zone_lock;
 	atomic_t zone_revmap_count;	/* This should always be less than 3, incremented on get_new_zone and decremented
