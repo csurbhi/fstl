@@ -5717,6 +5717,13 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	struct rb_root *root = &ctx->gc_rb_root;
 
 	flush_workqueue(ctx->writes_wq);
+	/* we stop the gc thread first as it will create additional
+	 * tm entries, sit entries and we want all of them to be freed
+	 * and flushed as well.
+	 */
+	lsdm_gc_thread_stop(ctx);
+	//lsdm_flush_thread_stop(ctx);
+
 	sync_blockdev(ctx->dev->bdev);
 	printk(KERN_ERR "\n Inside dtr! About to call flush_revmap_entries()");
 	flush_revmap_entries(ctx);
@@ -5774,9 +5781,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * del_timer_sync(&ctx->timer_list);
 	 */
 	//trace_printk("\n caches destroyed! \n");
-	lsdm_gc_thread_stop(ctx);
-	//lsdm_flush_thread_stop(ctx);
-	printk(KERN_ERR "\n gc thread stopped! \n");
+		printk(KERN_ERR "\n gc thread stopped! \n");
 	bioset_exit(ctx->gc_bs);
 	//trace_printk("\n exited from bioset \n");
 	kfree(ctx->gc_bs);
