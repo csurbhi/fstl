@@ -25,7 +25,7 @@
 #define BLOCKS_IN_ZONE 65536
 #define SUBBIOCTX_MAGIC 0x2
 #define MAX_TM_PAGES 10
-#define MAX_SIT_PAGES 10
+#define MAX_SIT_PAGES 10 
 #define NSTL_MAGIC 0xF2F52010
 #define GC_GREEDY 1
 #define GC_CB 2
@@ -176,7 +176,7 @@ struct lsdm_dev_info {
 
 struct lsdm_flush_thread  {
 	struct task_struct *lsdm_flush_task;
-	wait_queue_head_t lsdm_flush_wait_queue;
+	wait_queue_head_t flush_waitq;
         unsigned int sleep_time;
         unsigned int wake;
 };

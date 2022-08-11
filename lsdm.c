@@ -719,6 +719,7 @@ void flush_translation_blocks(struct work_struct * w);
 
 #define DEF_FLUSH_TIME 500 /* (milliseconds) */
 
+void do_checkpoint(struct ctx *ctx);
 
 static int flush_thread_fn(void * data)
 {
@@ -726,26 +727,23 @@ static int flush_thread_fn(void * data)
 	struct ctx *ctx = (struct ctx *) data;
 	struct lsdm_flush_thread *flush_th = ctx->flush_th;
 	unsigned int wait_ms;
-
-	return 0;
+	wait_queue_head_t *wq = &flush_th->flush_waitq;
 
 	wait_ms = flush_th->sleep_time; 
 	printk(KERN_ERR "\n %s executing! ", __func__);
 	set_freezable();
 	do {
-		/*
 		wait_event_interruptible_timeout(*wq,
 			kthread_should_stop() || freezing(current) ||
 			flush_th->wake || (nrpages > 10),
 			msecs_to_jiffies(wait_ms));
-		*/
 		if (try_to_freeze()) {
                         continue;
                 }
-		//flush_workqueue(ctx->writes_wq);
+		flush_workqueue(ctx->writes_wq);
 		if (atomic_read(&ctx->nr_tm_pages)) {
 			wait_ms = 500;
-			//flush_translation_blocks(&ctx->tb_work);
+			do_checkpoint(ctx);
 		} else {
 			wait_ms = 50000;
 		}
@@ -767,9 +765,10 @@ int lsdm_flush_thread_start(struct ctx * ctx)
 		return -ENOMEM;
 	}
 
-	init_waitqueue_head(&flush_th->lsdm_flush_wait_queue);
+	init_waitqueue_head(&flush_th->flush_waitq);
 	flush_th->sleep_time = DEF_FLUSH_TIME;
 	flush_th->wake = 0;
+	init_waitqueue_head(&flush_th->flush_waitq);
 	flush_th->lsdm_flush_task = kthread_run(flush_thread_fn, ctx,
 			"lsdm-flush%u:%u", MAJOR(dev), MINOR(dev));
 
@@ -1089,7 +1088,6 @@ again:
 	return 0;
 }
 
-static void do_checkpoint(struct ctx *ctx);
 static void mark_zone_free(struct ctx *ctx , int zonenr);
 
 
@@ -1978,7 +1976,7 @@ struct sit_page * search_sit_blk(struct ctx *ctx, sector_t blknr)
 
 
 struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba);
-void flush_sit(struct work_struct *);
+void flush_sit(struct ctx *ctx);
 /*
  * When a segentry says that all blocks are full,
  * but the mtime is 0, then the zone is erroneous.
@@ -2029,9 +2027,7 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 			/* We dont want to wait for the flush to complete,
 			 * just initiate here
 			 */
-			INIT_WORK(&ctx->sit_work, flush_sit);
-			//queue_work(ctx->writes_wq, &ctx->sit_work);
-			flush_sit(&ctx->sit_work);
+			flush_sit(ctx);
 		}
 	}
 }
@@ -2304,7 +2300,7 @@ void flush_revmap_bitmap(struct ctx *ctx)
 	/* Not doing this right now as the conventional zones are too little.
 	 * we need to log structurize the metadata
 	 */
-	//submit_bio_wait(bio);
+	submit_bio_wait(bio);
 
 	switch(bio->bi_status) {
 		case BLK_STS_OK:
@@ -2411,13 +2407,10 @@ void free_sit_pages(struct ctx *);
  * pages in a linked list.
  * We can then later flush all the sit page in one go
  */
-void flush_sit(struct work_struct *w)
+void flush_sit(struct ctx *ctx)
 {
-	struct ctx *ctx = container_of(w, struct ctx, sit_work);
 	struct rb_root *rb_root = &ctx->sit_rb_root;
 	struct blk_plug plug;
-
-
 
 	if (!rb_root->rb_node) {
 		printk(KERN_ERR "\n %s Sit node is null, returning", __func__);
@@ -2442,7 +2435,7 @@ void flush_sit(struct work_struct *w)
 	mutex_unlock(&ctx->sit_flush_lock);
 	atomic_dec(&ctx->sit_ref);
 	wait_event(ctx->sitq, (!atomic_read(&ctx->sit_ref)));
-	printk(KERN_ERR "\n %s Done flushing all the sit pages! ");
+	printk(KERN_ERR "\n %s Done flushing all the sit pages! ", __func__);
 	/* When all the nodes are flushed we are here */
 }
 
@@ -2589,34 +2582,6 @@ void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 int is_revmap_block_available(struct ctx *ctx, u64 pba);
 void flush_tm_nodes(struct rb_node *node, struct ctx *ctx);
 
-void wait_on_revmap_block_availability(struct ctx *ctx, u64 pba)
-{
-	struct rb_root *root = &ctx->tm_rb_root;
-	struct rb_node *node = NULL;
-
-	spin_lock(&ctx->rev_flush_lock);
-	if (1 == is_revmap_block_available(ctx, pba)) {
-		spin_unlock(&ctx->rev_flush_lock);
-		return;
-	}
-	spin_unlock(&ctx->rev_flush_lock);
-
-	/* You could wait here for ever if the translation blocks are not
-	 * flushed!
-	 */
-	//printk(KERN_ERR "\n About to flush translation blocks! before waiting on revmap blk availability!!!! \n");
-
-	node = root->rb_node;
-	if (node) {
-		flush_tm_nodes(node, ctx);
-	}
-
-	spin_lock(&ctx->rev_flush_lock);
-	/* wait until atleast one zone's revmap entries are flushed */
-	wait_event_lock_irq(ctx->rev_blk_flushq, (1 == is_revmap_block_available(ctx, pba)), ctx->rev_flush_lock);
-	spin_unlock(&ctx->rev_flush_lock);
-}
-
 struct page * read_block(struct ctx *, u64 , u64 );
 /*
  * pba: stored in the LBA - PBA translation.
@@ -2636,6 +2601,9 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 	struct sit_page *new;
 	struct page *page;
 	struct lsdm_seg_entry *ptr;
+	static int count = 0;
+
+	count++;
 
 	//printk(KERN_ERR "\n %s Inside! ", __func__);
 
@@ -2651,7 +2619,7 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba)
 
 	RB_CLEAR_NODE(&new->rb);
 	sit_blknr = zonenr / SIT_ENTRIES_BLK;
-	//printk("\n %s sit_blknr: %lld sit_pba: %u", __func__, sit_blknr, ctx->sb->sit_pba);
+	printk("\n %s sit_blknr: %lld sit_pba: %u, invocation count:%d", __func__, sit_blknr, ctx->sb->sit_pba, count);
 	page = read_block(ctx, ctx->sb->sit_pba, (sit_blknr * NR_SECTORS_IN_BLK));
 	if (!page) {
 		kmem_cache_free(ctx->sit_page_cache, new);
@@ -2758,7 +2726,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 			/* We dont want to wait for the flush to complete,
 			 * just initiate here
 			 */
-			flush_sit(&ctx->sit_work);
+			flush_sit(ctx);
 		}
 	}
 }
@@ -2815,7 +2783,7 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 			/* We dont want to wait for the flush to complete,
 			 * just initiate here
 			 */
-			flush_sit(&ctx->sit_work);
+			flush_sit(ctx);
 		}
 	}
 
@@ -2861,7 +2829,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 			/* We dont want to wait for the flush to complete,
 			 * just initiate here
 			 */
-			flush_sit(&ctx->sit_work);
+			flush_sit(ctx);
 		}
 	}
 }
@@ -3168,8 +3136,6 @@ void free_sit_pages(struct ctx *ctx)
 {
 	struct rb_root *root = &ctx->sit_rb_root;
 
-	printk(KERN_ERR "\n %s entry ");
-
 	if (!root->rb_node) {
 		printk(KERN_ERR "\n %s sit tree is empty!", __func__);
 		return;
@@ -3414,10 +3380,11 @@ void write_sitbl_complete(struct bio *bio, int count)
 		 */
 		//printk(KERN_ERR "\n Could not write the SIT page to disk! ");
 	}
+	printk(KERN_ERR "\n %s freeing: sit_ctx: %p", __func__, sit_ctx);
+	kmem_cache_free(ctx->sit_ctx_cache, sit_ctx);
+
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
-
-	kmem_cache_free(ctx->sit_ctx_cache, sit_ctx);
 	atomic_dec(&ctx->sit_ref);
 	wake_up(&ctx->sitq);
 	printk(KERN_ERR "\n %s count: %d ", __func__, count);
@@ -3436,6 +3403,8 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	struct bio * bio;
 	struct sit_page_write_ctx *sit_ctx;
 	static int count = 0;
+
+	count++;
 
 	if (!node)
 		return;
@@ -3467,6 +3436,8 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 		printk(KERN_ERR "\n Low Memory ! ");
 		return;
 	}
+
+	printk(KERN_ERR "\n %s sit_ctx: %p", __func__, sit_ctx);
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
@@ -3828,8 +3799,15 @@ void process_tm_entries(struct work_struct * w)
 	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
 	add_block_based_translation(ctx, page);
 	__free_pages(page, 0);
+	clear_revmap_bit(ctx, revmap_bio_ctx->revmap_pba);
 	nrpages--;
 	//printk(KERN_ERR "\n %s nrpages: %llu tm_flush_count: %u", __func__, nrpages, atomic_read(&ctx->tm_flush_count));
+	if (revmap_bio_ctx->wait) {
+		atomic_dec(&ctx->nr_pending_writes);
+		/* Wakeup waiters waiting on tm entries to complete */
+		wake_up(&ctx->rev_blk_flushq);
+	}
+
 }
 
 
@@ -3858,7 +3836,7 @@ void revmap_blk_flushed(struct bio *bio)
 			break;
 	}
 	bio_put(bio);
-	
+	mark_revmap_bit(ctx, revmap_bio_ctx->revmap_pba);
 	/* queuing this work as we cannot use a sleeping semaphore in
 	 * bio_endio irq context 
 	 */
@@ -3866,11 +3844,10 @@ void revmap_blk_flushed(struct bio *bio)
 	queue_work(ctx->writes_wq, &revmap_bio_ctx->process_tm_work);
 	
 	if (revmap_bio_ctx->wait) {
-		atomic_dec(&ctx->nr_pending_writes);
 		/* Wakeup waiters waiting on the block barrier after the
 		 * process_tm_entries work is queued.
 		 * */
-		//wake_up(&ctx->rev_blk_flushq);
+		wake_up(&ctx->rev_blk_flushq);
 	}
 }
 
@@ -3954,7 +3931,7 @@ void flush_revmap_entries(struct ctx *ctx)
 	atomic_dec(&ctx->nr_pending_writes);
 	//trace_printk("%s waiting on block barrier ", __func__);
 	/* We wait for translation entries to be added! */
-	//wait_event(ctx->rev_blk_flushq, 0 >= atomic_read(&ctx->nr_pending_writes));
+	wait_event(ctx->rev_blk_flushq, 0 >= atomic_read(&ctx->nr_pending_writes));
 	printk(KERN_ERR "\n %s revmap entries are on disk, wait is over! \n", __func__);
 }
 
@@ -4507,12 +4484,12 @@ struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
  * b) When GC completes, it calls checkpoint as well.
  *
  */
-static void do_checkpoint(struct ctx *ctx)
+void do_checkpoint(struct ctx *ctx)
 {
 	printk("Inside %s" , __func__);
 	/*--------------------------------------------*/
 	flush_workqueue(ctx->writes_wq);
-	flush_sit(&ctx->sit_work);
+	flush_sit(ctx);
 	printk(KERN_ERR "\n sit pages flushed! nr_sit_pages: %llu sit_flush_count: %llu", atomic_read(&ctx->nr_sit_pages), atomic_read(&ctx->sit_flush_count));
 	free_sit_pages(ctx);
 	/*--------------------------------------------*/
@@ -4522,6 +4499,7 @@ static void do_checkpoint(struct ctx *ctx)
 	flush_checkpoint(ctx);
 
 	printk(KERN_ERR "\n checkpoint flushed! nr_pages: %llu \n", nrpages);
+	printk(KERN_ERR "\n sit pages flushed! nr_sit_pages: %llu sit_flush_count: %llu", atomic_read(&ctx->nr_sit_pages), atomic_read(&ctx->sit_flush_count));
 	/* We need to wait for all of this to be over before 
 	 * we proceed
 	 */
@@ -5712,7 +5690,6 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 */
 	free_translation_pages(ctx);	
 	//printk(KERN_ERR "\n translation blocks flushed! ");
-	//wait_on_revmap_block_availability(ctx, ctx->revmap_pba);
 	do_checkpoint(ctx);
 	//trace_printk("\n checkpoint done!");
 	/* If we are here, then there was no crash while writing out
