@@ -17,6 +17,7 @@
 #define NR_SECTORS_IN_BLK 8
 #define BITS_IN_BYTE 8
 #define LOG_SECTOR_SIZE 9
+#define SECTOR_SHIFT 3
 
 
 #define REVMAP_PRIV_MAGIC 0x5

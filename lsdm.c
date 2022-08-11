@@ -1064,7 +1064,7 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	printk(KERN_ERR "\n %s pba: %llu , len: %llu e.len: %llu" , __func__, ctx->warm_gc_wf_pba, s8, gc_extent->e.len);
 	bio->bi_status = BLK_STS_OK;
 again:
-	//submit_bio_wait(bio);
+	submit_bio_wait(bio);
 	if (bio->bi_status != BLK_STS_OK) {
 		if (bio->bi_status ==  BLK_STS_IOERR) {
 			/* For now we are not doing anything else
@@ -1101,16 +1101,13 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 	struct page *page;
 	struct bio *bio;
 	struct bvec_iter_all iter_all;
-	static int count = 0;
 	int len, bio_pages;
-
-	count ++;
 
 	s8 = gc_extent->e.len;
 	BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_SHIFT));
-	printk(KERN_ERR "\n %s count: %d gc_extent->e.len = %d ", __func__, count, s8);
+	printk(KERN_ERR "\n %s gc_extent->e.len = %d ", __func__, s8);
 	bio_pages = (s8 >> SECTOR_SHIFT);
-	//printk(KERN_ERR "\n 1) %s nr_pages: %d, gc_extent->e.len (in sectors): %ld s8: %d", __func__, nr_pages, gc_extent->e.len, s8);
+	printk(KERN_ERR "\n 1) %s gc_extent->e.len (in sectors): %ld s8: %d", __func__, gc_extent->e.len, s8);
 
 	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
 	 * individually to the bio vectors
@@ -1120,8 +1117,6 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
 		return -ENOMEM;
 	}
-	//printk(KERN_ERR " %s bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d nr_pages: %d \n", __func__, bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs, bio_pages);
-
 	
 	/* bio_add_page sets the bi_size for the bio */
 	for(i=0; i<bio_pages; i++) {
@@ -1140,7 +1135,6 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 	printk(KERN_ERR "\n %s bio_sectors(bio): %llu nr_pages: %d", __func__,  bio_sectors(bio), bio_pages);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
-	//bio->bi_end_io = write_extent_done;
 	gc_extent->bio = bio;
 	return 0;
 }
@@ -1461,11 +1455,9 @@ again:
 	if (ret < 0)
 		goto failed;
 
-	/*
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
 	do_checkpoint(ctx);
-	*/
 	/* Complete the GC and then sync the block device */
 	//sync_blockdev(ctx->dev->bdev);
 	/* Zone gets freed when the valid blocks count is adjusted and
@@ -3833,7 +3825,7 @@ void process_tm_entries(struct work_struct * w)
 	struct ctx * ctx = revmap_bio_ctx->ctx;
 
 	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
-	printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
+	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
 	add_block_based_translation(ctx, page);
 	__free_pages(page, 0);
 	nrpages--;
@@ -4124,7 +4116,7 @@ static void add_revmap_entries(struct ctx * ctx, sector_t lba, sector_t pba, uns
 				* Addressing is based on 512bytes sector.
 				*/
 				ctx->revmap_pba += NR_SECTORS_IN_BLK; 
-				printk(KERN_ERR "\n %s ctx->revmap_pba: %d", __func__, ctx->revmap_pba);
+				//printk(KERN_ERR "\n %s ctx->revmap_pba: %d", __func__, ctx->revmap_pba);
 
 				/* if we have the pba of the translation table,
 				* then reset the revmap pba to the original value
@@ -4894,34 +4886,6 @@ int allocate_gc_zone_bitmap(struct ctx *ctx)
 /*
  * Seginfo tree Management
  */
-
-int _lsdm_verbose;
-void gc_rb_insert(struct ctx *ctx, struct rb_root *root, struct gc_rb_node *new)
-{
-	struct rb_node **link = &root->rb_node, *parent = NULL;
-	struct gc_rb_node *e = NULL;
-
-	RB_CLEAR_NODE(&new->rb);
-	write_lock(&ctx->sit_rb_lock);
-
-	/* Go to the bottom of the tree */
-	while (*link) {
-		parent = *link;
-		e = container_of(parent, struct gc_rb_node, rb);
-		if (new->cb_cost < e->cb_cost) {
-			link = &(*link)->rb_left;
-		} else {
-			link = &(*link)->rb_right;
-		}
-	}
-	/* Put the new node there */
-	rb_link_node(&new->rb, parent, link);
-	rb_insert_color(&new->rb, root);
-	ctx->n_sit_extents++;
-	write_unlock(&ctx->sit_rb_lock);
-}
-
-
 void sit_rb_remove(struct ctx *ctx, struct rb_root *root, struct gc_rb_node*e)
 {
 	/* rb_erase resorts and rebalances the tree */
@@ -4940,15 +4904,9 @@ unsigned int get_cb_cost(struct ctx *ctx , u32 nrblks, u64 mtime)
 		dump_stack();
 		return u;
 	}
-	if (ctx->max_mtime == ctx->min_mtime) {
-		printk(KERN_ERR "\n %s equal time ", __func__);
-		ctx->max_mtime = ktime_get_real_seconds();
-		ctx->min_mtime = 0;
-	}
 	age = 100 - div_u64(100 * (mtime - ctx->min_mtime),
 				ctx->max_mtime - ctx->min_mtime);
 
-	printk(KERN_ERR "\n %s (100 + u): %d ", __func__, (100 + u));
 	return UINT_MAX - ((100 * (100 - u) * age)/ (100 + u));
 }
 
@@ -4996,8 +4954,9 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	new->cb_cost = cb_cost;
 	new->nrblks = nrblks;
 
-	//printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu \n", __func__, zonenr, nrblks, mtime);
-	write_lock(&ctx->sit_rb_lock);
+	printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu \n", __func__, zonenr, nrblks, mtime);
+	//write_lock(&ctx->sit_rb_lock);
+	/*-------------------------------------------------------------------*/
 	count = 0;
 	/* Go to the bottom of the tree */
 	while (*link) {
@@ -5007,13 +4966,14 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 		 * to add this new cost to the same parent. So we
 		 * continue searching the appropriate parent
 		 */
+		printk(KERN_ERR "\n %s e->cb_cost: %u cb_cost: %u ", __func__, e->cb_cost, cb_cost);
 		if (zonenr == e->zonenr) {
+			printk(KERN_ERR "\n %s e->zonenr: %u zonenr: %u ", __func__, e->zonenr, zonenr);
 			parent = rb_parent(&e->rb);
 			if (e->cb_cost == cb_cost)
 				return 0;
 			rb_erase(&e->rb, root);
 			kmem_cache_free(ctx->gc_rb_node_cache, e);
-			//printk(KERN_ERR "\n %s Found the zone: %d and deleted it, will read again later! ", __func__, zonenr);
 			link = &root->rb_node;
 			parent = NULL;
 			continue;
@@ -5026,6 +4986,7 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 			 * differentiting factor. More nrblks, less
 			 * mtime when the cost is the same.
 			 */
+			printk(KERN_ERR "\n %s e->nrblks: %u, nrblks: %u ", e->nrblks, nrblks);
 			if (nrblks > e->nrblks)
 				link = &(*link)->rb_left;
 			else
@@ -5049,7 +5010,8 @@ int update_gc_rb_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtim
 	 */
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
-	write_unlock(&ctx->sit_rb_lock);
+	/*-------------------------------------------------------------------*/
+	//write_unlock(&ctx->sit_rb_lock);
 
 	printk(KERN_ERR "\n %s Added zonenr: %d cost: %u to the RB tree ", __func__, zonenr, cb_cost);
 	//zonenr = select_zone_to_clean(ctx, BG_GC);
