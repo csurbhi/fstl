@@ -5600,12 +5600,10 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	if (ret) {
 		goto free_metadata_pages;
 	}
-	/*
 	ret = lsdm_flush_thread_start(ctx);
 	if (ret) {
 		goto stop_gc_thread;
 	}
-	*/
 
 	/*
 	if (register_shrinker(lsdm_shrinker))
@@ -5662,7 +5660,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * and flushed as well.
 	 */
 	lsdm_gc_thread_stop(ctx);
-	//lsdm_flush_thread_stop(ctx);
+	lsdm_flush_thread_stop(ctx);
 
 	sync_blockdev(ctx->dev->bdev);
 	printk(KERN_ERR "\n Inside dtr! About to call flush_revmap_entries()");
