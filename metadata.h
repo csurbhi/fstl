@@ -79,7 +79,6 @@ struct tm_page_write_ctx {
 
 struct sit_page_write_ctx {
 	struct ctx *ctx;
-	struct page *page;
 	sector_t sit_nr;
 	struct work_struct sit_work;
 };
@@ -95,13 +94,6 @@ struct lsdm_bioctx {
 	struct kref ref;
 	struct bio * orig;
 	struct ctx *ctx;
-};
-
-struct gc_rb_node {
-	struct rb_node rb;	/* 20 bytes */
-	u32 zonenr;
-	u32 nrblks;
-	unsigned int cb_cost;
 };
 
 struct extent_entry {
@@ -222,7 +214,8 @@ struct ctx {
 	struct rb_root	  rev_tbl_root; /* in memory reverse extent map */
 	struct rb_root    tm_rb_root;	          /* map RB tree */
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
-	struct rb_root	  gc_rb_root;	  /* GC tree */
+	struct rb_root	  gc_cost_root;	  /* GC tree */
+	struct rb_root	  gc_zone_root;
 	struct rw_semaphore metadata_update_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
@@ -273,7 +266,8 @@ struct ctx {
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
 	struct kmem_cache *tm_page_write_ctx_cache;
-	struct kmem_cache *gc_rb_node_cache;
+	struct kmem_cache *gc_cost_node_cache;
+	struct kmem_cache *gc_zone_node_cache;
 	struct kmem_cache *gc_extents_cache;
 	struct kmem_cache *app_read_ctx_cache;
 	struct kmem_cache *bio_cache;
@@ -337,6 +331,20 @@ struct rev_extent {
 	struct rb_node rb;	/* 20 bytes */
 	sector_t pba;
 	void * ptr_to_tm;
+};
+
+struct gc_cost_node {
+	struct rb_node rb;	/* 20 bytes */
+	unsigned int cost; 	/* unique key! */
+	struct list_head znodes_list; /* list of all the gc_zone_nodes that have the same cost */
+};
+
+struct gc_zone_node {
+	struct rb_node rb;
+	u32 zonenr;	/* unique key */
+	u32 vblks;
+	void *ptr_to_cost_node; 
+	struct list_head list; /* we add this node to the list maintained on gc_cost_node */
 };
 
 
