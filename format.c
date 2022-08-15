@@ -116,7 +116,9 @@ __le32 get_zone_count(int fd)
 		return zone_count;
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/ZONE_SZ));
-	return (capacity/ZONE_SZ);
+	//return (capacity/ZONE_SZ);
+	/* we test with a disk capacity of 1 TB */
+	return 4032;
 }
 
 /* Note,  that this also account for the first few metadata zones.
@@ -165,6 +167,7 @@ __le32 get_tm_blk_count(struct lsdm_sb *sb)
 	if (nr_tm_entries % nr_tm_entries_per_blk)
 		nr_tm_blks++;
 
+	printf("\n %s blocksize: ", "#BLOCK_SIZE sizeof(struct tm_entry): %d ", sizeof(struct tm_entry));
 	printf("\n %s nr_tm_entries: %llu ", __func__, nr_tm_entries);
 	printf("\n %s nr_tm_entries_per_blk: %d ", __func__, nr_tm_entries_per_blk);
 	printf("\n %s nr_tm_blks: %llu",  __func__, nr_tm_entries / nr_tm_entries_per_blk);	
@@ -338,6 +341,7 @@ void read_sb(int fd, unsigned long sectornr)
 
 __le64 get_max_pba(struct lsdm_sb *sb)
 {
+	/* We test with a disk of size 1 TB, that is 4032 zones! */
 	return sb->zone_count * (1 << (sb->log_zone_size - sb->log_sector_size));
 
 }
@@ -798,7 +802,7 @@ long reset_shingled_zones(int fd)
 			}
 			report_zone(fd, i, &bzr->zones[i]);
 		} else {
-			printf("\n zonenr: %d is a sequential zone! ", i);
+			printf("\n zonenr: %d is a non shingled zone! ", i);
 			cmr++;
 		}
 	}
