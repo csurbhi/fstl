@@ -46,11 +46,7 @@
 #define BLK_SZ 4096
 #define NR_BLKS_PER_ZONE (ZONE_SZ /BLK_SZ)
 
-
 long nrpages;
-
-
-
 /* TODO:
  * 1) Convert the STL in a block mapped STL rather
  k than a sector mapped STL
@@ -3757,6 +3753,20 @@ void wait_on_refcount(struct ctx *ctx, refcount_t *ref, spinlock_t *lock)
 	spin_unlock(lock);
 }
 
+void process_tm_entries(struct work_struct * w)
+{
+	struct revmap_bioctx * revmap_bio_ctx = container_of(w, struct revmap_bioctx, process_tm_work);
+	struct page *page = revmap_bio_ctx->page;
+	struct ctx * ctx = revmap_bio_ctx->ctx;
+
+	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
+	//printk(KERN_ERR "\n %s revmap_bio_ctx->page: %p", __func__,  page_address(page));
+	add_block_based_translation(ctx, page);
+	__free_pages(page, 0);
+	nrpages--;
+	//printk(KERN_ERR "\n %s nrpages: %llu tm_flush_count: %u", __func__, nrpages, atomic_read(&ctx->tm_flush_count));
+}
+
 void revmap_blk_flushed(struct bio *bio)
 {
 	struct ctx *ctx;
@@ -3783,9 +3793,11 @@ void revmap_blk_flushed(struct bio *bio)
 	}
 	bio_put(bio);
 	//mark_revmap_bit(ctx, revmap_bio_ctx->revmap_pba);
-	__free_pages(revmap_bio_ctx->page, 0);
-	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
-	nrpages--;
+	/* queuing this work as we cannot use a sleeping semaphore in
+	 * bio_endio irq context 
+	 */
+	INIT_WORK(&revmap_bio_ctx->process_tm_work, process_tm_entries);
+	queue_work(ctx->writes_wq, &revmap_bio_ctx->process_tm_work);
 	
 	if (revmap_bio_ctx->wait) {
 		/* Wakeup waiters waiting on the block barrier after the
@@ -4137,7 +4149,6 @@ void sub_write_done(struct work_struct * w)
 	/*------------------------------- */
 	lsdm_rb_update_range(ctx, lba, pba, len);
 	add_revmap_entry(ctx, lba, pba, len);
-	//add_translation_entry(ctx, tm_page->page, lba, pba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
 	return;
@@ -5275,9 +5286,9 @@ int read_metadata(struct ctx * ctx)
 		return -1;
 	}
 	printk(KERN_ERR "\n before: PBA for first revmap blk: %u", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
+	/*
 	read_revmap(ctx);
 	printk(KERN_INFO "\n Reverse map Read!");
-	/*
 	ret = read_translation_map(ctx);
 	if (0 > ret) {
 		__free_pages(ctx->sb_page, 0);
@@ -5362,13 +5373,11 @@ static void destroy_caches(struct ctx *ctx)
 	kmem_cache_destroy(ctx->app_read_ctx_cache);
 	kmem_cache_destroy(ctx->gc_extents_cache);
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
-	/*
 	kmem_cache_destroy(ctx->tm_page_cache);
 	kmem_cache_destroy(ctx->gc_cost_node_cache);
 	kmem_cache_destroy(ctx->gc_zone_node_cache);
 	kmem_cache_destroy(ctx->sit_ctx_cache);
 	kmem_cache_destroy(ctx->sit_page_cache);
-	*/
 	kmem_cache_destroy(ctx->revmap_bioctx_cache);
 	kmem_cache_destroy(ctx->bioctx_cache);
 }
@@ -5384,7 +5393,6 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->revmap_bioctx_cache) {
 		goto destroy_cache_bioctx;
 	}
-	/*
 	ctx->sit_page_cache = kmem_cache_create("sit_page_cache", sizeof(struct sit_page), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->sit_page_cache) {
 		goto destroy_revmap_bioctx_cache;
@@ -5404,7 +5412,7 @@ static int create_caches(struct ctx *ctx)
 	ctx->gc_zone_node_cache = kmem_cache_create("gc_zone_node_cache", sizeof(struct gc_zone_node), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->gc_zone_node_cache) {
 		goto destroy_gc_cost_node_cache;
-	} */
+	}
 	ctx->subbio_ctx_cache = kmem_cache_create("subbio_ctx_cache", sizeof(struct lsdm_sub_bioctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->subbio_ctx_cache) {
 		goto destroy_revmap_bioctx_cache;
@@ -5445,8 +5453,6 @@ destroy_gc_extents_cache:
 	kmem_cache_destroy(ctx->gc_extents_cache);
 destroy_subbio_ctx_cache:
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
-
-/*
 destroy_gc_cost_node_cache:
 	kmem_cache_destroy(ctx->gc_cost_node_cache);
 destroy_gc_zone_node_cache:
@@ -5457,10 +5463,8 @@ destroy_sit_ctx_cache:
 	kmem_cache_destroy(ctx->sit_ctx_cache);
 destroy_sit_page_cache:
 	kmem_cache_destroy(ctx->sit_page_cache);
-*/
 destroy_revmap_bioctx_cache:
 	kmem_cache_destroy(ctx->revmap_bioctx_cache);
-
 destroy_cache_bioctx:
 	kmem_cache_destroy(ctx->bioctx_cache);
 	return -1;
@@ -5733,7 +5737,6 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 		__free_pages(ctx->ckpt_page, 0);
 		nrpages--;
 	}
-
 	__free_pages(ctx->revmap_bm, 0);
 	printk(KERN_ERR "\n %s nrpages: %lu", __func__, nrpages);
 
@@ -5749,11 +5752,11 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	//trace_printk("\n bioset memory freed \n");
 	mempool_destroy(ctx->gc_page_pool);
 	//trace_printk("\n memory pool destroyed\n");
-	dm_put_device(dm_target, ctx->dev);
 	//trace_printk("\n device mapper target released\n");
 	printk(KERN_ERR "\n nr_writes: %d", atomic_read(&ctx->nr_writes));
 	printk(KERN_ERR "\n nr_failed_writes: %u", atomic_read(&ctx->nr_failed_writes));
 	destroy_caches(ctx);
+	dm_put_device(dm_target, ctx->dev);
 	kfree(ctx);
 	//trace_printk("\n ctx memory freed!\n");
 	printk(KERN_ERR "\n Goodbye World!\n");
