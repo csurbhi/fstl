@@ -259,13 +259,13 @@ struct ctx {
        	atomic_t revmap_entry_nr;
 	struct kmem_cache * bioctx_cache;
 	struct kmem_cache * extent_cache;
+	struct kmem_cache * rev_extent_cache;
 	struct kmem_cache * subbio_ctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
 	struct kmem_cache *reflist_cache;
 	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
-	struct kmem_cache *tm_page_write_ctx_cache;
 	struct kmem_cache *gc_cost_node_cache;
 	struct kmem_cache *gc_zone_node_cache;
 	struct kmem_cache *gc_extents_cache;
@@ -305,7 +305,6 @@ struct ctx {
 	atomic_t nr_sit_pages;
 	atomic_t nr_tm_pages;
 	atomic_t sit_ref;
-	atomic_t tm_ref;
 	unsigned int 	nr_invalid_zones;
 	unsigned int 	user_block_count;
 	struct crypto_shash *s_chksum_driver;

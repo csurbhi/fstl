@@ -177,16 +177,17 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba);
 static void lsdm_rb_remove(struct ctx *ctx, struct extent *e)
 {
 	struct rev_extent *rev_e;
-	struct rb_root *root = &ctx->extent_tbl_root;
+	struct rb_root *root = &ctx->rev_tbl_root;
 
 	rev_e = e->ptr_to_rev;
-	rb_erase(&e->rb, root);
+	rb_erase(&rev_e->rb, root);
+	kmem_cache_free(ctx->rev_extent_cache, rev_e);
 	ctx->n_extents--;
 
-	root = &ctx->rev_tbl_root;
-	rb_erase(&rev_e->rb, root);
+	root = &ctx->extent_tbl_root;
+	rb_erase(&e->rb, root);
+	/* e will be freed in the called */
 	ctx->n_extents--;
-	kmem_cache_free(ctx->extent_cache, rev_e);
 }
 
 static struct extent *lsdm_rb_next(struct extent *e)
@@ -378,7 +379,7 @@ void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 	}
 
 	//printk(KERN_ERR "\n lba: %lld, len: %lld ", lba, len);
-	r_new = kmem_cache_alloc(ctx->extent_cache, GFP_KERNEL);
+	r_new = kmem_cache_alloc(ctx->rev_extent_cache, GFP_KERNEL);
 	if (!r_new) {
 		printk(KERN_ERR "\n Could not allocate memory!");
 		BUG();
@@ -676,24 +677,20 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 /*
  * extent_cache
  */
-static void lsdm_free_rb_tree(struct ctx *ctx, struct rb_root *root)
+static void lsdm_free_rb_tree(struct ctx *ctx)
 {
-	struct extent *e = rb_entry(root->rb_node, struct extent, rb);
-	struct extent *next;
+	struct rb_root *root = &ctx->extent_tbl_root;
+	struct extent *e = NULL;
+	struct rb_node *node;
 
-	while(e) {
-		next = lsdm_rb_next(e);
+	node = rb_first(root);
+	while(node) {
+		e = rb_entry(node, struct extent, rb);
 		lsdm_rb_remove(ctx, e);
 		kmem_cache_free(ctx->extent_cache, e);
-		e = next;
+		node = rb_first(root);
 	}
-}
-
-
-static void lsdm_free_rb_mappings(struct ctx *ctx)
-{
-	lsdm_free_rb_tree(ctx, &ctx->extent_tbl_root);
-	//lsdm_free_rb_tree(ctx, &ctx->rev_tbl_root);
+	BUG_ON(root->rb_node);
 }
 
 static inline int is_lsdm_ioidle(struct ctx *ctx)
@@ -1266,6 +1263,7 @@ int verify_gc_zone(struct ctx *ctx, int zonenr, sector_t pba)
 	int index;
 
 	flush_sit(ctx);
+	flush_workqueue(ctx->writes_wq);
 
 	if (down_interruptible(&ctx->sit_kv_store_lock))
 		return;
@@ -1328,6 +1326,7 @@ static int lsdm_gc(struct ctx *ctx, char gc_mode, int err_flag)
 		
 	printk(KERN_ERR "\a %s GC thread polling after every few seconds:", __func__);
 
+	flush_workqueue(ctx->writes_wq);
 
 	/* Take a semaphore lock so that no two gc instances are
 	 * started in parallel.
@@ -2478,59 +2477,51 @@ void flush_sit(struct ctx *ctx)
 /* We call this function only on exit. The premise is that the gc_zone_nodes 
  * are deleted independently.
  */
-void remove_gc_cost_nodes(struct ctx *ctx, struct rb_node * rb_cost_node)
+void remove_gc_cost_nodes(struct ctx *ctx)
 {
+	struct rb_root *root = &ctx->gc_cost_root;
+	struct rb_node *node;
 	struct list_head *list_head = NULL;
 	struct gc_zone_node *zone_node, *next_node = NULL;
 	struct gc_cost_node *cost_node;
 
-	if (!rb_cost_node)
-		return;
-
-	cost_node = container_of(rb_cost_node, struct gc_cost_node, rb);
-
-	if (rb_cost_node->rb_left)
-		remove_gc_cost_nodes(ctx, rb_cost_node->rb_left);
-	if (rb_cost_node->rb_right)
-		remove_gc_cost_nodes(ctx, rb_cost_node->rb_right);
-
-	list_head = &cost_node->znodes_list;
-	/* We remove znode from the list maintained by cost node. If this is the last node on the list 
-	 * then we have to remove the cost node from the tree
-	 */
-	list_for_each_entry_safe(zone_node, next_node, list_head, list) {
-		list_del(&zone_node->list);
+	node = rb_first(root);
+	while(node) {
+		cost_node = rb_entry(node, struct gc_cost_node, rb);
+		list_head = &cost_node->znodes_list;
+		/* We remove znode from the list maintained by cost node. If this is the last node on the list 
+		 * then we have to remove the cost node from the tree
+		 */
+		list_for_each_entry_safe(zone_node, next_node, list_head, list) {
+			list_del(&zone_node->list);
+		}
+		list_del(&cost_node->znodes_list);
+		rb_erase(node, root);
+		kmem_cache_free(ctx->gc_cost_node_cache, cost_node);
+		node = rb_first(root);
 	}
-	list_del(&cost_node->znodes_list);
-	rb_erase(rb_cost_node, &ctx->gc_cost_root);
-	kmem_cache_free(ctx->gc_cost_node_cache, cost_node);
 }
 
-void remove_gc_zone_nodes(struct ctx *ctx, struct rb_node *zone_node)
+void remove_gc_zone_nodes(struct ctx *ctx)
 {
-	if (zone_node->rb_left)
-		remove_gc_zone_nodes(ctx, zone_node->rb_left);
-	if (zone_node->rb_right)
-		remove_gc_zone_nodes(ctx, zone_node->rb_right);
-	rb_erase(zone_node, &ctx->gc_zone_root);
-	kmem_cache_free(ctx->gc_zone_node_cache, zone_node);
+
+	struct rb_root *root = &ctx->gc_zone_root;
+	struct rb_node * node = NULL;
+	struct gc_zone_node *zone_node;
+
+	node = rb_first(root);
+	while (node) {
+		zone_node = rb_entry(node, struct gc_zone_node, rb);
+		kmem_cache_free(ctx->gc_zone_node_cache, zone_node);
+		rb_erase(node, root);
+		node = rb_first(root);
+	}
 }
 
 static void remove_gc_nodes(struct ctx *ctx)
 {
-	struct rb_root *root = &ctx->gc_cost_root;
-	struct rb_node *cost_rb_node = root->rb_node;
-	struct rb_node *zone_rb_node = NULL;
-
-	root = &ctx->gc_zone_root;
-	zone_rb_node = root->rb_node;
-
-	if (cost_rb_node) {
-		remove_gc_cost_nodes(ctx, cost_rb_node);
-	}
-	if (zone_rb_node) {
-		remove_gc_zone_nodes(ctx, zone_rb_node);
-	}
+	remove_gc_cost_nodes(ctx);
+	remove_gc_zone_nodes(ctx);
 }
 
 inline u64 get_elapsed_time(struct ctx *ctx)
@@ -3111,6 +3102,9 @@ struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node *
 	return NULL;
 }
 
+void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page);
+
+
 void remove_translation_pages(struct ctx *ctx)
 {
 	struct tm_page *tm_page;
@@ -3121,19 +3115,18 @@ void remove_translation_pages(struct ctx *ctx)
 	
 	while(node) {
 		tm_page = rb_entry(node, struct tm_page, rb);
-		if (!tm_page)
+		if (tm_page->flag == NEEDS_FLUSH) {
+			flush_tm_node_page(ctx, tm_page);
+		}
+		rb_erase(node, root);
+		if (!tm_page->page) {
+			panic("Page cannot be null now! ");
 			return;
-		//if (tm_page->flag == NEEDS_NO_FLUSH) {
-			rb_erase(node, &ctx->tm_rb_root);
-			if (!tm_page->page) {
-				panic("Page cannot be null now! ");
-				return;
-			}
-			__free_pages(tm_page->page, 0);
-			nrpages--;
-			kmem_cache_free(ctx->tm_page_cache, tm_page);
-			atomic_dec(&ctx->nr_tm_pages);
-		//}
+		}
+		__free_pages(tm_page->page, 0);
+		nrpages--;
+		kmem_cache_free(ctx->tm_page_cache, tm_page);
+		atomic_dec(&ctx->nr_tm_pages);
 		node = root->rb_node;
 	}
 	//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
@@ -3156,32 +3149,15 @@ void free_translation_pages(struct ctx *ctx)
 	up(&ctx->tm_kv_store_lock);
 }
 
-void remove_sit_pages(struct ctx *ctx, struct rb_node *node)
+void remove_sit_page(struct ctx *ctx, struct rb_node *node)
 {
-	struct rb_node *left=NULL, *right=NULL;
+
 	struct sit_page *sit_page;
 	struct page *page;
-
-	if (!node)
-		return;
-
-	left = node->rb_left;
-	right = node->rb_right;
-
 	sit_page = rb_entry(node, struct sit_page, rb);
-	if (!sit_page) {
-		printk(KERN_ERR "\n sit_page is NULL!");
-		return;
-	}
-
-	if (left)
-		remove_sit_pages(ctx, left);
-	if (right)
-		remove_sit_pages(ctx, right);
-
 
 	if (sit_page->flag == NEEDS_FLUSH) {
-		return;
+		flush_sit_node_page(ctx, node);
 	}
 
 	rb_erase(&sit_page->rb, &ctx->sit_rb_root);
@@ -3189,67 +3165,28 @@ void remove_sit_pages(struct ctx *ctx, struct rb_node *node)
 	if (!page) {
 		return;
 	}
-	printk(KERN_ERR "\n Freeing sit page: %p ", page_address(page));
-	sit_page->page = NULL;
 	__free_pages(page, 0);
-	nrpages--;
-	printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 	kmem_cache_free(ctx->sit_page_cache, sit_page);
-
-	printk(KERN_ERR "\n %s: Page freed! ", __func__);
-
+	nrpages--;
+	printk(KERN_ERR "\n %s: sit page freed! ", __func__);
 	return;
-
 }
 
 void free_sit_pages(struct ctx *ctx)
 {
 	struct rb_root *root = &ctx->sit_rb_root;
+	struct rb_node * node = NULL;
 
-	if (!root->rb_node) {
-		printk(KERN_ERR "\n %s sit tree is empty!", __func__);
-		return;
-	}
 	if (down_interruptible(&ctx->sit_kv_store_lock))
 		return;
-	remove_sit_pages(ctx, root->rb_node);
-	up(&ctx->sit_kv_store_lock);
-	printk(KERN_ERR "\n %s Removed all SIT Pages!", __func__);
-}
-
-/*
- * Note: 
- * When some translation pages collect in memory, they are
- * flushed to disk.
- */
-void write_tmbl_complete(struct bio *bio)
-{
-	struct ctx *ctx;
-	struct tm_page_write_ctx *tm_page_write_ctx;
-	struct page *page;
-
-	//cant_sleep();
-	tm_page_write_ctx = (struct tm_page_write_ctx *) bio->bi_private;
-	ctx = tm_page_write_ctx->ctx;
-	page = tm_page_write_ctx->tm_page->page;
-
-	/* We notify all those reverse map pages that are stuck on
-	 * these respective refcounts
-	 */
-	if (bio->bi_status != BLK_STS_OK) {
-		/*TODO: Perhaps retry!! or do something more
-		 * or else you will loose the translation entries.
-		 * write them some place else!
-		 */
-		//trace_printk("\n %s bi_status: %d \n", __func__, bio->bi_status);
-		panic("Could not write the translation entry block");
+	node = rb_first(root);
+	while(node) {
+		remove_sit_page(ctx, node);
+		node = rb_first(root);
 	}
-	/* bio_alloc(), hence bio_put() */
-	bio_put(bio);
-	kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
-	atomic_dec(&ctx->tm_ref);
-	wake_up(&ctx->tmq);
-	return;
+	up(&ctx->sit_kv_store_lock);
+	BUG_ON(root->rb_node);
+	printk(KERN_ERR "\n %s Removed all SIT Pages!", __func__);
 }
 
 /* We don't wait for the bios to complete 
@@ -3260,32 +3197,18 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	struct page *page; 
 	u64 pba;
 	struct bio * bio;
-	struct tm_page_write_ctx *tm_page_write_ctx;
 	loff_t disk_size;
 
 	page = tm_page->page;
 	if (!page)
 		return;
 
-	tm_page_write_ctx = kmem_cache_alloc(ctx->tm_page_write_ctx_cache, GFP_KERNEL);
-	if (!tm_page_write_ctx) {
-		__free_pages(page, 0);
-		nrpages--;
-		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
-		return;
-	}
-
-	tm_page_write_ctx->ctx = ctx;
-	tm_page_write_ctx->tm_page = tm_page;
-
 	//printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
-
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
 		__free_pages(page, 0);
 		nrpages--;
 		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
-		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		return;
 	}
 	
@@ -3295,7 +3218,6 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 		nrpages--;
 		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		bio_put(bio);
-		kmem_cache_free(ctx->tm_page_write_ctx_cache, tm_page_write_ctx);
 		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
 		return;
 	}
@@ -3309,22 +3231,22 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	disk_size = i_size_read(ctx->dev->bdev->bd_inode);
 	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu disk_size: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  disk_size, tm_page->blknr, ctx->sb->revmap_bm_pba - ctx->sb->tm_pba + 1);
 	BUG_ON(pba > disk_size/SECTOR_SIZE);
+
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_iter.bi_sector = pba;
-	bio->bi_private = tm_page_write_ctx;
-	bio->bi_end_io = write_tmbl_complete;
-	/* The next code is related to synchronizing at dtr() time.
-	 */
-	atomic_inc(&ctx->tm_ref);
-	/* Not doing this right now as the conventional zones are too little.
-	 * we need to log structurize the metadata
-	 */
-	//submit_bio_wait(bio);
-	bio->bi_status = BLK_STS_OK;
-	write_tmbl_complete(bio);
+	submit_bio_wait(bio);
+	if (bio->bi_status != BLK_STS_OK) {
+		/*TODO: Perhaps retry!! or do something more
+		 * or else you will loose the translation entries.
+		 * write them some place else!
+		 */
+		//trace_printk("\n %s bi_status: %d \n", __func__, bio->bi_status);
+		panic("Could not write the translation entry block");
+	}
+	/* bio_alloc(), hence bio_put() */
+	bio_put(bio);
 	//printk(KERN_INFO "\n 2. Leaving %s! flushed dirty page! \n", __func__);
-	//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 	return;
 }
 
@@ -3370,15 +3292,9 @@ void flush_translation_blocks(struct ctx *ctx)
 
 	if (!root->rb_node) {
 		mutex_unlock(&ctx->tm_lock);
-		printk(KERN_ERR "\n %s tm node is NULL!", __func__);
+		//printk(KERN_ERR "\n %s tm node is NULL!", __func__);
 		return;
 	}
-
-	/* We flush these sequential pages
-	 * together so that they can be 
-	 * written together
-	 */
-	atomic_set(&ctx->tm_ref, 1);
 
 	//blk_start_plug(&plug);
 	flush_tm_nodes(root->rb_node, ctx);
@@ -3386,12 +3302,12 @@ void flush_translation_blocks(struct ctx *ctx)
 
 	if (down_interruptible(&ctx->tm_kv_store_lock))
 		return;
-	remove_translation_pages(ctx);
+	if (MAX_TM_PAGES <= atomic_read(&ctx->nr_tm_pages)) {
+		atomic_set(&ctx->nr_tm_pages, 0);
+		remove_translation_pages(ctx);
+	}
 	up(&ctx->tm_kv_store_lock);
 	//blk_finish_plug(&plug);	
-	atomic_dec(&ctx->tm_ref);
-	//printk(KERN_ERR "\n %s nr_tm_pages: %d", __func__, atomic_read(&ctx->nr_tm_pages));
-	//printk(KERN_ERR "\n %s flushed: %d pages ", __func__, atomic_read(&ctx->tm_ref));
 	//printk(KERN_INFO "\n %s done!!", __func__);
 }
 
@@ -3631,8 +3547,8 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 
 	//printk("\n %s blknr: %d tm_pba: %llu \n", __func__, blknr, ctx->sb->tm_pba);
 	
-	//new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
-	new_tmpage->page = read_tm_page(ctx, lba);
+	new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
+	//new_tmpage->page = read_tm_page(ctx, lba);
 	if (!new_tmpage->page) {
 		printk(KERN_ERR "\n %s read_block  failed! could not allocate page! \n", __func__);
 		kmem_cache_free(ctx->tm_page_cache, new_tmpage);
@@ -4117,6 +4033,7 @@ static void add_revmap_entry(struct ctx * ctx, sector_t lba, sector_t pba, unsig
 				BUG_ON(page == NULL);
 				flush_revmap_block_disk(ctx, page, 0);
 				flush_translation_blocks(ctx);
+				
 				//clear_revmap_bit(ctx, revmap_bio_ctx->revmap_pba);
 				atomic_set(&ctx->revmap_sector_nr, 0);
 				/* Adjust the revmap_pba for the next block 
@@ -4213,34 +4130,14 @@ void sub_write_done(struct work_struct * w)
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
 
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 	kref_put(&bioctx->ref, write_done);
-
-	/* for now updating the metadata in the write request itself
-	 * (part of debug)
-	 */
-	if (down_interruptible(&ctx->tm_kv_store_lock))
-		return -1;
-/*-------------------------------------------------------------*/
-	tm_page = add_tm_page_kv_store(ctx, lba);
-	if (!tm_page) {
-		up(&ctx->tm_kv_store_lock);
-		printk(KERN_ERR "%s NO memory! ", __func__);
-		return -ENOMEM;
-	}
-	 
-	tm_page->flag = NEEDS_FLUSH;
-	/* Call this under the kv store lock, else it
-	 * will race with removal/flush code
-	 */
-/*-------------------------------------------------------------*/
-	up(&ctx->tm_kv_store_lock);
+	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
 	lsdm_rb_update_range(ctx, lba, pba, len);
 	add_revmap_entry(ctx, lba, pba, len);
-	add_translation_entry(ctx, tm_page->page, lba, pba, len);
+	//add_translation_entry(ctx, tm_page->page, lba, pba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
 	return;
@@ -4347,9 +4244,6 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		//trace_printk("\n Insufficient memory!");
 		bio->bi_status = BLK_STS_RESOURCE;
 		bio_endio(bio);
-		/* We dont call bio_put() because the bio should not
-		 * get freed by memory management before bio_endio()
-		 */
 		return -ENOMEM;
 	}
 	bioctx = kmem_cache_alloc(ctx->bioctx_cache, GFP_KERNEL);
@@ -4358,9 +4252,6 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		bio->bi_status = BLK_STS_RESOURCE;
 		bio_endio(bio);
 		bio_put(clone);
-		/* We dont call bio_put() because the bio should not
-		 * get freed by memory management before bio_endio()
-		 */
 		return -ENOMEM;
 	}
 	count++;
@@ -5084,7 +4975,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		znode->ptr_to_cost_node = NULL;
 	}
 		
-	printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu caller: (%s) \n", __func__, zonenr, nrblks, mtime, caller);
+	printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu caller: (%s) cost:%d \n", __func__, zonenr, nrblks, mtime, caller, cost);
 	/* Go to the bottom of the tree */
 	while (*link) {
 		parent = *link;
@@ -5467,18 +5358,19 @@ static void destroy_caches(struct ctx *ctx)
 {
 	kmem_cache_destroy(ctx->bio_cache);
 	kmem_cache_destroy(ctx->extent_cache);
-	kmem_cache_destroy(ctx->tm_page_write_ctx_cache);
+	kmem_cache_destroy(ctx->rev_extent_cache);
 	kmem_cache_destroy(ctx->app_read_ctx_cache);
 	kmem_cache_destroy(ctx->gc_extents_cache);
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
+	/*
 	kmem_cache_destroy(ctx->tm_page_cache);
 	kmem_cache_destroy(ctx->gc_cost_node_cache);
 	kmem_cache_destroy(ctx->gc_zone_node_cache);
 	kmem_cache_destroy(ctx->sit_ctx_cache);
 	kmem_cache_destroy(ctx->sit_page_cache);
+	*/
 	kmem_cache_destroy(ctx->revmap_bioctx_cache);
 	kmem_cache_destroy(ctx->bioctx_cache);
-	kmem_cache_destroy(ctx->sit_ctx_cache);
 }
 
 
@@ -5492,6 +5384,7 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->revmap_bioctx_cache) {
 		goto destroy_cache_bioctx;
 	}
+	/*
 	ctx->sit_page_cache = kmem_cache_create("sit_page_cache", sizeof(struct sit_page), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->sit_page_cache) {
 		goto destroy_revmap_bioctx_cache;
@@ -5499,7 +5392,7 @@ static int create_caches(struct ctx *ctx)
 	ctx->sit_ctx_cache  = kmem_cache_create("sit_ctx_cache", sizeof(struct sit_page_write_ctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->sit_ctx_cache) {
 		goto destroy_sit_page_cache;
-	}
+	} 
 	ctx->tm_page_cache = kmem_cache_create("tm_page_cache", sizeof(struct tm_page), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->tm_page_cache) {
 		goto destroy_sit_ctx_cache;
@@ -5511,10 +5404,11 @@ static int create_caches(struct ctx *ctx)
 	ctx->gc_zone_node_cache = kmem_cache_create("gc_zone_node_cache", sizeof(struct gc_zone_node), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->gc_zone_node_cache) {
 		goto destroy_gc_cost_node_cache;
-	}
+	} */
 	ctx->subbio_ctx_cache = kmem_cache_create("subbio_ctx_cache", sizeof(struct lsdm_sub_bioctx), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->subbio_ctx_cache) {
-		goto destroy_gc_zone_node_cache;
+		goto destroy_revmap_bioctx_cache;
+		//goto destroy_gc_zone_node_cache;
 	}
 	ctx->gc_extents_cache = kmem_cache_create("gc_extents_cache", sizeof(struct gc_extents), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->gc_extents_cache) {
@@ -5526,31 +5420,33 @@ static int create_caches(struct ctx *ctx)
 		goto destroy_gc_extents_cache;
 	}
 	//trace_printk("\n app_read_ctx_cache initialized to address: %p", ctx->app_read_ctx_cache);
-	ctx->tm_page_write_ctx_cache = kmem_cache_create("tmem_write_ctx_cache", sizeof(struct tm_page_write_ctx), 0, SLAB_ACCOUNT, NULL);
-	if (!ctx->tm_page_write_ctx_cache) {
-		goto destroy_app_read_ctx_cache;
-	}
 	ctx->extent_cache = kmem_cache_create("lsdm_extent_cache", sizeof(struct extent), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->extent_cache) {
-		goto destroy_tm_page_write_ctx_cache;
+		goto destroy_app_read_ctx_cache;
+	}
+	ctx->rev_extent_cache = kmem_cache_create("lsdm_rev_extent_cache", sizeof(struct rev_extent), 0, SLAB_ACCOUNT, NULL);
+	if (!ctx->extent_cache) {
+		goto destroy_extent_cache;
 	}
 	ctx->bio_cache = kmem_cache_create("lsdm_bio_cache", sizeof(struct bio), 0, SLAB_ACCOUNT, NULL);
 	if (!ctx->bio_cache) {
-		goto destroy_extent_cache;
+		goto destroy_rev_extent_cache;
 	}
 
 	return 0;
 /* failed case */
+destroy_rev_extent_cache:
+	kmem_cache_destroy(ctx->rev_extent_cache);
 destroy_extent_cache:
 	kmem_cache_destroy(ctx->extent_cache);
-destroy_tm_page_write_ctx_cache:
-	kmem_cache_destroy(ctx->tm_page_write_ctx_cache);
 destroy_app_read_ctx_cache:
 	kmem_cache_destroy(ctx->app_read_ctx_cache);
 destroy_gc_extents_cache:
 	kmem_cache_destroy(ctx->gc_extents_cache);
 destroy_subbio_ctx_cache:
 	kmem_cache_destroy(ctx->subbio_ctx_cache);
+
+/*
 destroy_gc_cost_node_cache:
 	kmem_cache_destroy(ctx->gc_cost_node_cache);
 destroy_gc_zone_node_cache:
@@ -5561,8 +5457,10 @@ destroy_sit_ctx_cache:
 	kmem_cache_destroy(ctx->sit_ctx_cache);
 destroy_sit_page_cache:
 	kmem_cache_destroy(ctx->sit_page_cache);
+*/
 destroy_revmap_bioctx_cache:
 	kmem_cache_destroy(ctx->revmap_bioctx_cache);
+
 destroy_cache_bioctx:
 	kmem_cache_destroy(ctx->bioctx_cache);
 	return -1;
@@ -5640,7 +5538,6 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	atomic_set(&ctx->nr_failed_writes, 0);
 	atomic_set(&ctx->revmap_entry_nr, 0);
 	atomic_set(&ctx->revmap_sector_nr, 0);
-	atomic_set(&ctx->tm_ref, 0);
 	atomic_set(&ctx->sit_ref, 0);
 	ctx->target = 0;
 	//trace_printk("\n About to read metadata! 1 \n");
@@ -5723,7 +5620,6 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 		ctx->w1 = ctx->sb->zone_count / 20; 
 		ctx->w2 = ctx->w1 << 1; 
 	}
-
 
 	printk(KERN_ERR "\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
 	ctx->gc_extents = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
@@ -5808,9 +5704,8 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	flush_revmap_entries(ctx);
 	printk(KERN_ERR "\n %s flush_revmap_entries done!", __func__);
 	flush_translation_blocks(ctx);
+	remove_translation_pages(ctx);
 	//clear_revmap_bit(ctx, revmap_bio_ctx->revmap_pba);
-	printk(KERN_ERR "\n %s translation blocks flushed process started! ", __func__);
-	wait_event(ctx->tmq, (!atomic_read(&ctx->tm_ref)));
 	/* Wait for the ALL the translation pages to be flushed to the
 	 * disk. The removal work is queued.
 	 */
@@ -5823,7 +5718,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * the disk metadata
 	 */
 	destroy_workqueue(ctx->writes_wq);
-	lsdm_free_rb_mappings(ctx);
+	lsdm_free_rb_tree(ctx);
 	remove_gc_nodes(ctx);
 	kmem_cache_free(ctx->gc_extents_cache, ctx->gc_extents);
 	printk(KERN_ERR "\n RB mappings freed! ");
