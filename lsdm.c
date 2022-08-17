@@ -2747,7 +2747,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		ptr->mtime = get_elapsed_time(ctx);
 		if (ctx->max_mtime < ptr->mtime)
 			ctx->max_mtime = ptr->mtime;
-		//update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
+		update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
 
 		//printk(KERN_ERR "\n %s done! zone: %u vblocks: %d pba: %lu, index: %d , ptr: %p", __func__, zonenr, ptr->vblocks, pba, index, ptr);
 	}
@@ -4929,7 +4929,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 	unsigned int cost = 0;
 
 	if (nrblks == 0) {
-		printk(KERN_ERR "\n %s Removing zone: %d from gc tree! \n", __func__, zonenr);
+		//printk(KERN_ERR "\n %s Removing zone: %d from gc tree! \n", __func__, zonenr);
 		remove_zone_from_gc_tree(ctx, zonenr);
 		return 0;
 	}
@@ -4939,7 +4939,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		return -ENOMEM;
 	}
 
-	printk(KERN_ERR "\n %s Added zone: %d to gc tree!znode: %p \n", __func__, zonenr, znode);
+	//printk(KERN_ERR "\n %s Added zone: %d to gc tree!znode: %p \n", __func__, zonenr, znode);
 	if (znode->ptr_to_cost_node) {
 		new = znode->ptr_to_cost_node;
 		if (new->cost == cost) {
@@ -4952,7 +4952,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		znode->ptr_to_cost_node = NULL;
 	}
 		
-	printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu caller: (%s) cost:%d \n", __func__, zonenr, nrblks, mtime, caller, cost);
+	//printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu caller: (%s) cost:%d \n", __func__, zonenr, nrblks, mtime, caller, cost);
 	/* Go to the bottom of the tree */
 	while (*link) {
 		parent = *link;
@@ -4976,15 +4976,15 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		printk(KERN_ERR "\n %s could not allocate memory for gc_cost_node \n", __func__);
 		return -ENOMEM;
 	}
-	printk(KERN_ERR "\n Allocate gc_cost_node: %p \n", new);
+	//printk(KERN_ERR "\n Allocate gc_cost_node: %p \n", new);
 	INIT_LIST_HEAD(&new->znodes_list);
 	new->cost = cost;
 	RB_CLEAR_NODE(&new->rb);
 	znode->ptr_to_cost_node = new;
-	printk(KERN_ERR "\n  %s adding znode to the cost node's zone list! \n ", __func__);
+	//printk(KERN_ERR "\n  %s adding znode to the cost node's zone list! \n ", __func__);
 	list_add(&znode->list, &new->znodes_list);
 
-	printk(KERN_ERR "\n %s new cost node initialized, about to add it to the tree! \n", __func__);
+	//printk(KERN_ERR "\n %s new cost node initialized, about to add it to the tree! \n", __func__);
 
 	/* link holds the address of left or the right pointer
 	 * appropriately
@@ -4993,7 +4993,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 	rb_insert_color(&new->rb, root);
 
 	zonenr = select_zone_to_clean(ctx, BG_GC);
-	printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
+	//printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
 	return 0;
 }
 
