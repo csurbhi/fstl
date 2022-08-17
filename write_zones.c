@@ -100,16 +100,16 @@ int verify_read(int zonenr, int blknr, char ch)
 
 int main(int argc, char *argv[])
 {
-	char buff[BLKSZ];
+	char buff[BLKSZ], newbuff[BLKSZ];
 	int fd, i, j, k, ret;
 	off_t offset = 0;
-	char ch = '6';
+	char newch = '6', origch = '2';
 	int count = 0;
 
 
-	printf("\n character written is: %c ", ch);
+	printf("\n character written is: %c ", origch);
 	for(i=0; i<BLKSZ; i++) {
-		buff[i] = ch;
+		buff[i] = origch;
 	}
 
 	fd = open("/dev/dm-0", O_RDWR);
@@ -153,15 +153,13 @@ retry:
 	sync();
 	printf("\n Writes done!! \n");
 
-	/*
-
+/*
 	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
-		perror("\n Could not create file because: ");
+		perror("\n Could not open file because: ");
 		printf("\n");
 		return errno;
 	}
-
 
 	lseek(fd, 0, SEEK_SET);
 	for(i=0; i<NR_ZONES; i++) {
@@ -173,45 +171,40 @@ retry:
 				return errno;
 			}
 			for(k=0; k<BLKSZ; k++) {
-				if (buff[k] != ch) {
-					printf("\n 1) write could not be verified, lba: %llu content is not %c ", (i*NR_BLKS_IN_ZONE * 8) + (j * 8), ch);
-					verify_read(i, j, ch);
-					printf("\n zone_nr: %d, blknr: %d k: %d buff[k]: %d \n", i, j, k, buff[k]);
+				if (buff[k] != origch) {
+					printf("\n 1) write could not be verified, lba: %llu content is not %c ", (i*NR_BLKS_IN_ZONE * 8) + (j * 8), origch);
+					verify_read(i, j, origch);
+					printf("\n zone_nr: %d, blknr: %d k: %d buff[k]: %c \n", i, j, k, buff[k]);
 					return -1;
 				}
 			} 
 		}
 	}
 
-	printf("\n Writes verified!! \n"); */
+	printf("\n Writes verified!! \n"); 
+
 
 	close(fd);
 	sync();
-	return 0;
-
+*/
+	printf("\n Conducting overwrites verification! .......");
 	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
-		perror("\n Could not create file because: ");
+		perror("\n Could not open file because: ");
 		printf("\n");
 		return errno;
 	}
-
-
-
-	printf("\n Conducting overwrites verification! .......");
 	lseek(fd, 0, SEEK_SET);
 
-
 	for(i=0; i<BLKSZ; i++) {
-		buff[i] = 2;
+		newbuff[i] = newch;
 	}
-	
 
 	offset = 0;
+	lseek(fd, offset, SEEK_SET);
 	for(i=0; i<NR_ZONES; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
-			lseek(fd, offset, SEEK_SET);
-			ret = write(fd, buff, BLKSZ);
+			ret = write(fd, newbuff, BLKSZ);
 			if (ret < 0) {
 				perror("\n Could not write to file because: ");
 				printf("\n");
@@ -221,19 +214,31 @@ retry:
 				printf("\n Partial write, zonenr: %d blknr: %d", i, j);
 				return(-1);
 			}
-			offset = offset + 8192;
+			ret = read(fd, buff, BLKSZ);
+			if (ret < 0) {
+				perror("\n Could not read to file because: ");
+				printf("\n");
+				return errno;
+			}
+		
+			for(k=0; k<BLKSZ; k++) {
+				if (buff[k] != origch) {
+					printf("\n Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", origch, buff[k], i, j, k);
+					printf("\n");
+					break;
+				}
+			}
 		}
 	}
 
 	close(fd);
 	printf("\n Overwrites done ! \n");
 	sync();
-	return 0;
 	
 	printf("\n Read verifying the writes ......\n");
 	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
-		perror("\n Could not create file because: ");
+		perror("\n Could not open file because: ");
 		printf("\n");
 		return errno;
 	}
@@ -243,9 +248,7 @@ retry:
 
 	offset = 0;
 	for(i=0; i<NR_ZONES; i++) {
-		for(j=2; j<NR_BLKS_IN_ZONE; j=j+2) {
-			lseek(fd, offset, SEEK_SET);
-			offset = offset + 8192;
+		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
 			ret = read(fd, buff, BLKSZ);
 			if (ret < 0) {
 				perror("\n b) Could not read to file because: ");
@@ -253,10 +256,10 @@ retry:
 				return errno;
 			}
 			for(k=0; k<BLKSZ; k++) {
-				if (buff[k] != 2) {
-					printf("\n b) Expected val: %d and found: %d for zonenr: %d  blknr: %d, k: %d", 2, buff[k], i, j, k);
+				if (buff[k] != newch) {
+					printf("\n b) Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", newch, buff[k], i, j, k);
 					printf("\n");
-					return -1;
+					break;
 				}
 			}
 			 
@@ -268,10 +271,10 @@ retry:
 			}
 		
 			for(k=0; k<BLKSZ; k++) {
-				if (buff[k] != ch) {
-					printf("\n Expected val: %c  and found: %d for zonenr: %d  blknr: %d, k: %d", ch, buff[k], i, j, k);
+				if (buff[k] != origch) {
+					printf("\n Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", origch, buff[k], i, j, k);
 					printf("\n");
-					return -1;
+					break;
 				}
 			}
 		}

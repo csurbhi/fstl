@@ -262,7 +262,6 @@ struct ctx {
 	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
 	struct kmem_cache *reflist_cache;
-	struct kmem_cache *sit_ctx_cache;
 	struct kmem_cache *tm_page_cache;
 	struct kmem_cache *gc_cost_node_cache;
 	struct kmem_cache *gc_zone_node_cache;

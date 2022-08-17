@@ -795,12 +795,14 @@ long reset_shingled_zones(int fd)
 		   (bzr->zones[i].type == BLK_ZONE_TYPE_SEQWRITE_REQ)) {
 			bz_range.sector = bzr->zones[i].start;
 			bz_range.nr_sectors = bzr->zones[i].len;
+			/*
 			ret = ioctl(fd, BLKRESETZONE, &bz_range); 
 			if (ret) {
 				fprintf(stdout, "\n Could not reset zonenr with sector: %ld", bz_range.sector);
 				perror("\n blkresetzone failed because: ");
 			}
 			report_zone(fd, i, &bzr->zones[i]);
+			*/
 		} else {
 			printf("\n zonenr: %d is a non shingled zone! ", i);
 			cmr++;
