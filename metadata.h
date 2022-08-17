@@ -55,11 +55,9 @@ struct metadata_read_ctx {
 };
 
 struct revmap_bioctx {
-	u32 wait;
-	u64 revmap_pba;			/* PBA where the revmap entries should be written.*/
 	struct ctx * ctx;
 	struct page *page;
-	int retrial;
+	u32 wait;
 	struct work_struct process_tm_work;
 };
 
@@ -290,8 +288,8 @@ struct ctx {
 	struct mutex gc_lock;
 	struct mutex tm_lock;
 	struct mutex sit_flush_lock;
-	struct semaphore sit_kv_store_lock;
-	struct semaphore tm_kv_store_lock;
+	struct mutex sit_kv_store_lock;
+	struct mutex tm_kv_store_lock;
 	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
 	 * non contiguous pages in memory
 	 */
@@ -313,6 +311,7 @@ struct ctx {
 	atomic_t ioidle;
 	//struct timer_list timer_list;
 	struct workqueue_struct *writes_wq;
+	struct workqueue_struct *tm_wq;
 	struct work_struct sit_work;
 	struct work_struct tb_work;
 };

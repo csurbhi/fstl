@@ -187,6 +187,7 @@ retry:
 
 	close(fd);
 	sync();
+	return 0;
 
 	fd = open("/dev/dm-0", O_RDWR);
 	if (fd < 0) {
