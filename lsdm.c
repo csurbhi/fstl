@@ -367,6 +367,7 @@ void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 	struct rb_root *root = &ctx->rev_tbl_root;
 	struct rb_node **link = NULL, *parent = NULL;
 	struct rev_extent *r_e = NULL, *r_new=NULL;
+	struct extent *e = NULL;
 	int ret = 0;
 
 	if (!root)  {
@@ -395,7 +396,7 @@ void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 		} else if (r_e->pba  < r_new->pba){
 			link = &(parent->rb_right);
 		} else {
-			printk( KERN_ERR "\n %s Error while Inserting pba: %llu, pointing to (lba, len): (%llu, %llu)", __func__, r_new->pba, extent->lba, extent->len);
+			printk(KERN_ERR "\n %s Error while Inserting pba: %llu, pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->pba, extent->lba, extent->len);
 			BUG_ON("Bug while adding revmap entry !");
 		}
 	}
@@ -480,7 +481,9 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 	//printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	
 	BUG_ON(len == 0);
-	//printk(KERN_ERR "\n lba: %lld, len: %lld ", lba, len);
+	BUG_ON(pba == 0);
+	BUG_ON(pba > ctx->sb->max_pba);
+	BUG_ON(lba > ctx->sb->max_pba);
 	new = kmem_cache_alloc(ctx->extent_cache, GFP_KERNEL);
 	if (!new) {
 		BUG();
@@ -922,10 +925,9 @@ static int setup_extent_bio_read(struct ctx *ctx, struct gc_extents *gc_extent)
 		gc_extent->bio_pages[i] = page;
 	}
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
-	//printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu nr_pages: %d", __func__,  bio->bi_iter.bi_sector, bio_pages);
+	printk(KERN_ERR "\n %s bio->bi_iter.bi_sector: %llu nr_pages: %d", __func__,  bio->bi_iter.bi_sector, bio_pages);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
-	bio->bi_end_io = read_extent_done;
 	gc_extent->bio = bio;
 	return 0;
 }
@@ -967,7 +969,7 @@ static int read_all_bios_and_wait(struct ctx *ctx, struct gc_extents *last_exten
 		//printk(KERN_ERR "\n %s bio::lba: %llu, bio::pba: %llu bio::len: %u \n", __func__, gc_extent->e.lba, bio->bi_iter.bi_sector, len);
 		/* setup bio sets bio->bi_end_io = read_extent_done */
 		BUG_ON(!len);
-		submit_bio_wait(gc_extent->bio);
+		//submit_bio_wait(gc_extent->bio);
 		bio_put(gc_extent->bio);
 	}
 	/* When we arrive here, we know the last bio has completed.
@@ -1014,7 +1016,7 @@ static int read_gc_extents(struct ctx *ctx, refcount_t *ref)
 		/* submiting the bio in read_all_bios_and_wait */
 		BUG_ON(gc_extent->e.len == 0);
 	}
-	//printk(KERN_ERR "\n %s gc_extents #count: %d ref: %d", __func__, count, refcount_read(ref));
+	printk(KERN_ERR "\n %s gc_extents #count: %d ref: %d", __func__, count, refcount_read(ref));
 	last_extent = gc_extent;
 	read_all_bios_and_wait(ctx, last_extent);
 	return 0;
@@ -1062,6 +1064,10 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio->bi_iter.bi_sector = ctx->warm_gc_wf_pba;
 	gc_extent->e.pba = ctx->warm_gc_wf_pba;
 	s8 = bio_sectors(bio);
+
+	BUG_ON(gc_extent->e.pba == 0);
+	BUG_ON(gc_extent->e.pba > ctx->sb->max_pba);
+	BUG_ON(gc_extent->e.lba > ctx->sb->max_pba);
 	//printk(KERN_ERR "\n %s lba: %llu pba: %llu , len: %llu e.len: %llu" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	bio->bi_status = BLK_STS_OK;
 again:
@@ -1085,8 +1091,8 @@ again:
 	}
 	move_gc_write_frontier(ctx, s8);
 	//printk(KERN_ERR "\n %s write pointer adjusted! ", __func__);
-	ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
-	add_revmap_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+	//ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+	//add_revmap_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	return 0;
 }
 
@@ -1419,7 +1425,7 @@ again:
 				temp.len = temp.len - diff;
 			}
 		}
-		//printk(KERN_ERR "\n %s (lba: %llu, pba: %llu e->len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
+		printk(KERN_ERR "\n %s (lba: %llu, pba: %llu e->len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
 		add_extent_to_gclist(ctx, &temp);
 		total_len = total_len + temp.len;
 		total_extents = total_extents + 1;
@@ -1428,7 +1434,7 @@ again:
 		//printk(KERN_ERR "\n %s total_pages used: %llu",  __func__, total_pages);
 	}
 	up_write(&ctx->metadata_update_lock);
-	//printk(KERN_ERR "\n %s Total extents: %llu, total_pages: %llu, total_len: %llu \n", __func__, total_extents, total_pages, total_len);
+	printk(KERN_ERR "\n %s Total extents: %llu, total_pages: %llu, total_len: %llu \n", __func__, total_extents, total_pages, total_len);
 
 	/* Wait here till the system becomes IO Idle, if system is
 	* iodle don't wait */
@@ -1451,14 +1457,16 @@ again:
 	 * order
 	 */
 	
-	refcount_set(ref, 1);
-	ret = read_gc_extents(ctx, ref);
-	if (ret)
-		goto failed;
+	//refcount_set(ref, 1);
+	//ret = read_gc_extents(ctx, ref);
+	//if (ret)
+	//	goto failed;
 
 	//printk(KERN_ERR "\n %s Submitted reads, waiting for them to complete....., value of ref: %d \n", __func__, refcount_read(ref));
 	//wait_on_refcount(ctx, ref, &ctx->gc_ref_lock);
 	kfree(ref);
+	free_gc_list(ctx);
+	goto complete;
 	//printk(KERN_ERR "%s:%d All GC extents read! \n", __func__, __LINE__);
 
 	/* Wait here till the system becomes IO Idle, if system is
@@ -1470,10 +1478,12 @@ again:
 			gc_th->gc_wake,
 			msecs_to_jiffies(gc_th->urgent_sleep_time));
 	}
-	*/
 	ret = write_valid_gc_extents(ctx, last_pba);
-	if (ret < 0)
+	if (ret < 0) { 
+		printk(KERN_ERR "\n write_valid_gc_extents() failed, ret: %d ", ret);
 		goto failed;
+	}
+	*/
 
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
@@ -1485,6 +1495,7 @@ again:
 	 */
 complete:
 	remove_zone_from_gc_tree(ctx, zonenr);
+	printk(KERN_ERR "\n %s GC done! \n", __func__);
 
 	/* TODO: Mode: FG_GC */
 	if (gc_mode == FG_GC) {
@@ -1498,7 +1509,7 @@ complete:
 failed:
 	/* Release GC lock */
 	mutex_unlock(&ctx->gc_lock);
-	//printk(KERN_ERR "\n %s going out! \n", __func__);
+	printk(KERN_ERR "\n %s going out! \n", __func__);
 	return 0;
 }
 
@@ -2702,6 +2713,9 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	sector_t zonenr;
 	int index;
 
+	BUG_ON(pba == 0);
+	BUG_ON(pba > ctx->sb->max_pba);
+
 	mutex_lock(&ctx->sit_kv_store_lock);
 	/*--------------------------------------------*/
 	sit_page= add_sit_page_kv_store(ctx, pba, __func__);
@@ -2773,6 +2787,9 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 	static int print = 1;
 	long vblocks = 0;
 
+	BUG_ON(pba == 0);
+	BUG_ON(pba > ctx->sb->max_pba);
+
 	mutex_lock(&ctx->sit_kv_store_lock);
 	sit_page = add_sit_page_kv_store(ctx, pba, __func__);
 	if (!sit_page) {
@@ -2817,6 +2834,9 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	sector_t zonenr;
 	int index;
 
+	BUG_ON(pba == 0);
+	BUG_ON(pba > ctx->sb->max_pba);
+
 	mutex_lock(&ctx->sit_kv_store_lock);
 	sit_page = add_sit_page_kv_store(ctx, pba, __func__);
 	if (!sit_page) {
@@ -2858,12 +2878,13 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba);
  *
  * Depending on the location within a page, add the lba.
  */
-int add_translation_entry(struct ctx * ctx, struct page *page, unsigned long lba, unsigned long pba, unsigned long len) 
+int add_translation_entry(struct ctx * ctx, struct page *page, sector_t lba, sector_t pba, unsigned long len) 
 {
 	struct tm_entry * ptr;
 	int index; 
 
 	BUG_ON(pba == 0);
+	BUG_ON(pba > ctx->sb->max_pba);
 	ptr = (struct tm_entry *) page_address(page);
 	index = (lba/NR_SECTORS_IN_BLK);
 	index = index  %  TM_ENTRIES_BLK;
@@ -3181,10 +3202,9 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	 * We convert it to sector number as bio_submit expects that.
 	 */
 	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
+	BUG_ON(pba > (ctx->sb->tm_pba + (ctx->sb->blk_count_tm << NR_SECTORS_IN_BLK)));
 
-	disk_size = i_size_read(ctx->dev->bdev->bd_inode);
-	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu disk_size: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  disk_size, tm_page->blknr, ctx->sb->revmap_bm_pba - ctx->sb->tm_pba + 1);
-	BUG_ON(pba > disk_size/SECTOR_SIZE);
+	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  tm_page->blknr, ctx->sb->blk_count_tm);
 
 	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
@@ -3428,13 +3448,17 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	struct rb_root *root = &ctx->tm_rb_root;
 	struct rb_node *parent = NULL, **link = &root->rb_node;
 	struct tm_page *new_tmpage, *parent_ent;
+	u64 blknr;
 	/* convert the sector lba to a blknr and then find out the relative
 	 * blknr where we find the translation entry from the first
 	 * translation block.
 	 *
 	 */
-	u64 blknr = lba/TM_ENTRIES_BLK;
-	
+	BUG_ON(lba > ctx->sb->max_pba);
+	lba = lba >> SECTOR_SHIFT;
+	blknr = lba/TM_ENTRIES_BLK;
+	BUG_ON(blknr > ctx->sb->blk_count_tm);
+
 	new_tmpage = search_tm_kv_store(ctx, blknr, &parent);
 	if (new_tmpage) {
 		return new_tmpage;
@@ -3461,7 +3485,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	
 	RB_CLEAR_NODE(&new_tmpage->rb);
 
-	//printk("\n %s blknr: %d tm_pba: %llu \n", __func__, blknr, ctx->sb->tm_pba);
+	//printk("\n %s lba: %llu blknr: %d tm_pba: %llu \n", __func__, lba, blknr, ctx->sb->tm_pba);
 	
 	new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
 	if (!new_tmpage->page) {
@@ -3515,6 +3539,7 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 			}
 			lba = ptr->extents[j].lba;
 			pba = ptr->extents[j].pba;
+			BUG_ON(pba > ctx->sb->max_pba);
 			len = ptr->extents[j].len;
 			if (len == 0) {
 				//printk(KERN_ERR "\n %s ptr: %p ptr->extents[%d].len: 0 ", __func__, ptr, j);
@@ -3929,28 +3954,30 @@ static void add_revmap_entry(struct ctx * ctx, sector_t lba, sector_t pba, unsig
 	int entry_nr, sector_nr;
 	struct page * page = NULL;
 
+
+	BUG_ON(pba == 0);
+	BUG_ON(pba > ctx->sb->max_pba);
+	BUG_ON(lba > ctx->sb->max_pba);
+
 	/* Merge entries by increasing the length if there lies a
 	 * matching entry in the revmap page
 	 */
 	entry_nr = atomic_read(&ctx->revmap_entry_nr);
 	sector_nr = atomic_read(&ctx->revmap_sector_nr);
+	atomic_inc(&ctx->revmap_entry_nr);
 	//printk(KERN_ERR "\n ******* %s entry_nr: %d, sector_nr: %d ctx->revmap_pba: %d ", __func__, entry_nr, sector_nr, ctx->revmap_pba);
 	if ((entry_nr > 0) || (sector_nr > 0)) {
 		page = ctx->revmap_page;
-		ptr = (struct lsdm_revmap_entry_sector *)page_address(page);
 		/*
 		found = merge_rev_entries(ctx, lba, pba, nrsectors, page);
 		if (found) {
 			//printk(KERN_ERR "\n (Merged) revmap entry added! ptr: %p i: %d, j:%d lba: %llu pba: %llu len: %d \n", ptr, i, j, lba, pba, nrsectors);
 			return;
 		} */
-
-		atomic_inc(&ctx->revmap_entry_nr);
 		if (NR_EXT_ENTRIES_PER_SEC == (entry_nr + 1)) {
 			atomic_set(&ctx->revmap_entry_nr, 0);
 			atomic_inc(&ctx->revmap_sector_nr);
 			if (NR_SECTORS_PER_BLK == (sector_nr + 1)) {
-				page = ctx->revmap_page;
 				BUG_ON(page == NULL);
 				flush_revmap_block_disk(ctx, page, 0);
 				atomic_set(&ctx->revmap_sector_nr, 0);
@@ -3986,8 +4013,8 @@ static void add_revmap_entry(struct ctx * ctx, sector_t lba, sector_t pba, unsig
 			 */
 			panic("Low memory, could not allocate page!");
 		}
-		atomic_inc(&ctx->revmap_entry_nr);
 		nrpages++;
+		//printk(KERN_ERR "\n %s revmap page address: %p ", __func__, page_address(page));
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		ctx->revmap_page = page;
 		//printk(KERN_ERR "\n revmap_page: %p", page_address(page));
@@ -4050,6 +4077,10 @@ void sub_write_done(struct work_struct * w)
 
 	kref_put(&bioctx->ref, write_done);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+
+	BUG_ON(pba == 0);
+	BUG_ON(pba > ctx->sb->max_pba);
+	BUG_ON(lba > ctx->sb->max_pba);
 
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
@@ -4239,6 +4270,11 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		atomic_inc(&ctx->nr_writes);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
+
+		BUG_ON(wf == 0);
+		BUG_ON(wf > ctx->sb->max_pba);
+		BUG_ON(lba > ctx->sb->max_pba);
+		
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
 
 		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
@@ -4758,7 +4794,7 @@ int remove_zone_from_gc_tree(struct ctx *ctx, unsigned int zonenr)
 		znode = container_of(link, struct gc_zone_node, rb);
 		if (znode->zonenr == zonenr) {
 			cost_node = (struct gc_cost_node *) znode->ptr_to_cost_node;
-			//printk(KERN_ERR "\n %s removing zone from the gc_cost_root tree", __func__);
+			printk(KERN_ERR "\n %s removing zone from the gc_cost_root tree", __func__);
 			remove_zone_from_cost_node(ctx, cost_node, zonenr);
 			rb_erase(&znode->rb, root);
 			kmem_cache_free(ctx->gc_zone_node_cache, znode);
@@ -5536,15 +5572,16 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	 * Will work with timer based invocation later
 	 * init_timer(ctx->timer);
 	 */
+	/*
 	ret = lsdm_gc_thread_start(ctx);
 	if (ret) {
 		goto free_metadata_pages;
 	}
-	/*
+	*/
 	ret = lsdm_flush_thread_start(ctx);
 	if (ret) {
 		goto stop_gc_thread;
-	} */
+	}
 
 	/*
 	if (register_shrinker(lsdm_shrinker))
@@ -5609,6 +5646,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	printk(KERN_ERR "\n %s flush_revmap_entries done!", __func__);
 	flush_workqueue(ctx->tm_wq);
 	flush_translation_blocks(ctx);
+	remove_translation_pages(ctx);
 	//clear_revmap_bit(ctx, revmap_bio_ctx->revmap_pba);
 	/* Wait for the ALL the translation pages to be flushed to the
 	 * disk. The removal work is queued.

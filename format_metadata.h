@@ -208,7 +208,6 @@ struct lsdm_sb {
 } __attribute__((packed));
 
 /*
- *
  * In theory we do not need to store the LBA on the disk.
  * We can calculate the LBA, depending on the location of the
  * sequential entry on the disk. However, we do need to store
@@ -221,7 +220,7 @@ struct lsdm_sb {
  * block based TM
  */
 struct tm_entry {
-	__le64 pba;
+	sector_t pba;
 } __attribute__((packed));
 
 

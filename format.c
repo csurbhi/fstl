@@ -162,12 +162,12 @@ __le32 get_revmap_blk_count(struct lsdm_sb *sb)
 __le32 get_tm_blk_count(struct lsdm_sb *sb)
 {
 	u64 nr_tm_entries = (sb->max_pba / NR_SECTORS_IN_BLK);
-	u32 nr_tm_entries_per_blk = BLOCK_SIZE / sizeof(struct tm_entry);
+	u32 nr_tm_entries_per_blk = BLK_SZ/ sizeof(struct tm_entry);
 	u64 nr_tm_blks = nr_tm_entries / nr_tm_entries_per_blk;
 	if (nr_tm_entries % nr_tm_entries_per_blk)
 		nr_tm_blks++;
 
-	printf("\n %s blocksize: ", "#BLOCK_SIZE sizeof(struct tm_entry): %d ", sizeof(struct tm_entry));
+	printf("\n %s blocksize: %d sizeof(struct tm_entry): %d ", __func__, BLK_SZ, sizeof(struct tm_entry));
 	printf("\n %s nr_tm_entries: %llu ", __func__, nr_tm_entries);
 	printf("\n %s nr_tm_entries_per_blk: %d ", __func__, nr_tm_entries_per_blk);
 	printf("\n %s nr_tm_blks: %llu",  __func__, nr_tm_entries / nr_tm_entries_per_blk);	
@@ -182,8 +182,8 @@ __le32 get_revmap_bm_blk_count(struct lsdm_sb *sb)
 	unsigned nr_bytes = nr_revmap_blks / BITS_IN_BYTE;
 	if (nr_revmap_blks % BITS_IN_BYTE)
 		nr_bytes++;
-	unsigned nr_blks = nr_bytes / BLOCK_SIZE;
-	if (nr_bytes % BLOCK_SIZE)
+	unsigned nr_blks = nr_bytes / BLK_SZ;
+	if (nr_bytes % BLK_SZ)
 		nr_blks++;
 	printf("\n nr_revmap_blks: %d", nr_revmap_blks);
 	printf("\n revmap_bm_blk_count: %d", nr_blks);
@@ -413,7 +413,6 @@ void write_revmap(int fd, sector_t revmap_pba, unsigned nr_blks)
 void write_tm(int fd, sector_t tm_pba, unsigned nr_blks)
 {
 	printf("\n ** %s Writing tm blocks at pba: %llu, nrblks: %u", __func__, tm_pba, nr_blks);
-	nr_blks = 12800;
 	write_zeroed_blks(fd, tm_pba, nr_blks);
 	read_block(fd, tm_pba, nr_blks);
 }

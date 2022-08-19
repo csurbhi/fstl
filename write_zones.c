@@ -13,9 +13,11 @@
 #include <sys/ioctl.h>
 
 
-#define NR_ZONES 1
+#define NR_ZONES 2
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
+
+char * fname = "/mnt/test";
 
 
 int report_zone(unsigned long zonenr)
@@ -24,7 +26,7 @@ int report_zone(unsigned long zonenr)
 	int ret;
 	long i = 0, fd = 0;
 
-	fd = open("/dev/sdb", O_RDWR);
+	fd = open(fname, O_RDWR);
 	if (!fd) {
 		perror("Could not open the disk: ");
 		return;
@@ -58,46 +60,6 @@ int report_zone(unsigned long zonenr)
 	return (bzr->zones[0].wp == bzr->zones[0].start);
 }
 
-
-int verify_read(int zonenr, int blknr, char ch)
-{
-	off_t offset;
-	char buff[BLKSZ];
-	int i, ret, fd;
-
-	fd = open("/dev/sdb", O_RDWR);
-	if (fd < 0) {
-		perror("\n Could not open file because: ");
-		printf("\n");
-		return errno;
-	}
-
-	/*sb->zone0_pba: 244842496 */
-	offset = (zonenr * 65536 * 8 * 512) + (blknr * BLKSZ) + (244842496 * 512) ;
-	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		perror("\n Could not lseek because: ");
-		return ret;
-	}
-	ret = read(fd, buff, BLKSZ);
-	if (ret < 0) {
-		perror("\n Could not read because: ");
-		return ret;
-	}
-	for(i=0; i<BLKSZ; i++) {
-		if (buff[i] != ch) {
-			printf("\n (raw-sdb) write could not be verified, lba: %llu content is not %c ", (zonenr*NR_BLKS_IN_ZONE * 8) + (blknr * 8), ch);
-			printf("\n buff[i]: %c", buff[i]);
-			return -1;
-		}
-
-	}
-
-
-
-
-}
-
 int main(int argc, char *argv[])
 {
 	char buff[BLKSZ], newbuff[BLKSZ];
@@ -107,13 +69,12 @@ int main(int argc, char *argv[])
 	int count = 0;
 
 
-	printf("\n character written is: %c ", origch);
+	//printf("\n character written is: %c ", origch);
 	for(i=0; i<BLKSZ; i++) {
 		buff[i] = origch;
 	}
 
-	fd = open("/dev/dm-0", O_RDWR);
-	//fd = open("/dev/sdb", O_RDWR);
+	fd = open(fname, O_RDWR|O_CREAT, S_IRWXU);
 	if (fd < 0) {
 		perror("\n Could not create file because: ");
 		printf("\n");
@@ -132,13 +93,6 @@ retry:
 			ret = write(fd, buff, BLKSZ);
 			if (ret < 0) {
 				fprintf(stdout, "\n Could not write, zonenr: %d, blknr: %d", i, j);
-				if (report_zone(i)) {
-					/* retry the write */
-					count = count + 1;
-					if (count < 2)
-						goto retry;
-				}
-				printf("\n");
 				perror("\n Could not write to file because: ");
 				printf("\n");
 				break;
@@ -153,42 +107,8 @@ retry:
 	sync();
 	printf("\n Writes done!! \n");
 
-/*
-	fd = open("/dev/dm-0", O_RDWR);
-	if (fd < 0) {
-		perror("\n Could not open file because: ");
-		printf("\n");
-		return errno;
-	}
-
-	lseek(fd, 0, SEEK_SET);
-	for(i=0; i<NR_ZONES; i++) {
-		for(j=0; j<NR_BLKS_IN_ZONE; j++) {
-			ret = read(fd, buff, BLKSZ);
-			if (ret < 0) {
-				perror("\n Could not read from file because: ");
-				printf("\n");
-				return errno;
-			}
-			for(k=0; k<BLKSZ; k++) {
-				if (buff[k] != origch) {
-					printf("\n 1) write could not be verified, lba: %llu content is not %c ", (i*NR_BLKS_IN_ZONE * 8) + (j * 8), origch);
-					verify_read(i, j, origch);
-					printf("\n zone_nr: %d, blknr: %d k: %d buff[k]: %c \n", i, j, k, buff[k]);
-					return -1;
-				}
-			} 
-		}
-	}
-
-	printf("\n Writes verified!! \n"); 
-
-
-	close(fd);
-	sync();
-*/
 	printf("\n Conducting overwrites verification! .......");
-	fd = open("/dev/dm-0", O_RDWR);
+	fd = open(fname, O_RDWR);
 	if (fd < 0) {
 		perror("\n Could not open file because: ");
 		printf("\n");
@@ -236,7 +156,7 @@ retry:
 	sync();
 	
 	printf("\n Read verifying the writes ......\n");
-	fd = open("/dev/dm-0", O_RDWR);
+	fd = open(fname, O_RDWR);
 	if (fd < 0) {
 		perror("\n Could not open file because: ");
 		printf("\n");

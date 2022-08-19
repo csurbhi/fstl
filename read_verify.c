@@ -6,9 +6,11 @@
 #include <unistd.h>
 #include <stdlib.h>
 
-#define NR_ZONES 1
+#define NR_ZONES 2
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
+
+char * fname = "/mnt/test";
 
 int main(int argc, char *argv[])
 {
@@ -17,7 +19,7 @@ int main(int argc, char *argv[])
 	unsigned int offset = 0, val;
 
 	printf("\n Read verifying the writes ......\n");
-	fd = open("/dev/dm-0", O_RDWR);
+	fd = open(fname, O_RDWR);
 	if (fd < 0) {
 		perror("\n Could not open file because: ");
 		printf("\n");
