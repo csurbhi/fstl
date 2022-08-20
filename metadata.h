@@ -57,7 +57,6 @@ struct metadata_read_ctx {
 struct revmap_bioctx {
 	struct ctx * ctx;
 	struct page *page;
-	u32 wait;
 	struct work_struct process_tm_work;
 };
 
@@ -299,6 +298,7 @@ struct ctx {
 	sector_t ckpt_pba;
 	sector_t revmap_pba;
 	atomic_t nr_pending_writes;
+	atomic_t nr_revmap_flushes;
 	atomic_t nr_sit_pages;
 	atomic_t nr_tm_pages;
 	atomic_t sit_ref;
