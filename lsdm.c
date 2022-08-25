@@ -184,16 +184,13 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba);
 /* TODO: depending on the root decrement the correct nr of extents */
 static void lsdm_rb_remove(struct ctx *ctx, struct extent *e)
 {
-	struct rev_extent *rev_e;
-	struct rb_root *root = &ctx->rev_tbl_root;
+	struct rev_extent *rev_e = e->ptr_to_rev;
 
-	rev_e = e->ptr_to_rev;
-	rb_erase(&rev_e->rb, root);
+	rb_erase(&rev_e->rb, &ctx->rev_tbl_root);
 	kmem_cache_free(ctx->rev_extent_cache, rev_e);
 	ctx->n_extents--;
 
-	root = &ctx->extent_tbl_root;
-	rb_erase(&e->rb, root);
+	rb_erase(&e->rb, &ctx->extent_tbl_root);
 	/* e will be freed in the called */
 	ctx->n_extents--;
 }
@@ -379,13 +376,56 @@ void print_revmap_tree(struct ctx *ctx)
 void print_extents(struct ctx *ctx);
 static int lsdm_tree_check(struct rb_root *root);
 
-struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
+struct rev_extent * lsdm_revmap_find_print(struct ctx *ctx, u64 pba, u64 last_pba)
 {
 	struct rb_root *root = &ctx->rev_tbl_root;
 	struct rb_node **link = NULL, *parent = NULL;
 	struct rev_extent *rev_e = NULL, *lower_e = NULL, *higher_e = NULL;
 	struct extent * e;
-	int count = 0, ret=0;
+	int count = 0, ret=0, print = 0;
+
+	link = &root->rb_node;
+
+	printk(KERN_ERR "\n Looking for pba: %llu ", pba);
+
+	/* Go to the bottom of the tree */
+	while (*link) {
+		count++;
+		if (count > 50) {
+			return NULL;
+		}
+
+		parent = *link;
+		rev_e = rb_entry(parent, struct rev_extent, rb);
+		if (rev_e->pba > pba) {
+			link = &(parent->rb_left);
+			if (!higher_e || (rev_e->pba < higher_e->pba)) {
+				if (rev_e->pba <= last_pba) {
+					higher_e = rev_e;
+				}
+			}
+			printk(KERN_ERR "\n rev_e->pba: %llu, going left ", rev_e->pba);
+			continue;
+		} 
+		if (rev_e->pba < pba) { 
+			link = &(parent->rb_right);
+			printk(KERN_ERR "\n rev_e->pba: %llu, going right", rev_e->pba);
+			continue;
+		}
+		return rev_e;
+	}
+	return higher_e;
+
+
+}
+
+struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
+{
+	struct rb_root *root = &ctx->rev_tbl_root;
+	struct rb_node **link = NULL, *parent = NULL;
+	struct rev_extent *rev_e = NULL, *higher_e = NULL, *temp;
+	struct extent * e;
+	int count = 0, ret=0, print = 0;
 
 	if (!root)  {
 		printk(KERN_ERR "\n Root is NULL! \n");
@@ -404,12 +444,15 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
 	/* Go to the bottom of the tree */
 	while (*link) {
 		count++;
-		if (count > 25) {
+		if (count > 50) {
 			printk(KERN_ERR "\n %s Stuck while searching pba: %llu, last_pba: %llu \n", __func__, pba, last_pba);
 			printk(KERN_ERR "\n %s On node with pba: %llu", __func__, rev_e->pba);
 			print_revmap_tree(ctx);
 			print_extents(ctx);
 			printk(KERN_ERR "\n %s Stuck while searching pba: %llu, last_pba: %llu \n", __func__, pba, last_pba);
+			printk(KERN_ERR "\n %s Stuck while searching pba: %llu, last_pba: %llu \n", __func__, pba, last_pba);
+			temp = lsdm_revmap_find_print(ctx, pba, last_pba);
+			BUG_ON(temp);
 			ret = lsdm_tree_check(&ctx->extent_tbl_root);
 			if (ret < 0) {
 				printk(KERN_ERR "\n lsdm_tree_check failed!! ");
@@ -431,13 +474,6 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
 		} 
 		if (rev_e->pba < pba) { 
 			link = &(parent->rb_right);
-			e = rev_e->ptr_to_tm;
-			BUG_ON(!e);
-			if (e->pba + e->len > pba) {
-				/* Overlapping e found*/
-				printk(KERN_ERR "\n overlapping!, searching: %llu found: (pba: %llu, len: %llu) last_pba: %llu\n", pba, (e->pba, e->len), last_pba);
-				return rev_e;
-			}
 			continue;
 		}
 		return rev_e;
@@ -445,7 +481,7 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
 	return higher_e;
 }
 
-void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
+struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 {
 	struct rb_root *root = &ctx->rev_tbl_root;
 	struct rb_node **link = NULL, *parent = NULL;
@@ -486,18 +522,20 @@ void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 		BUG_ON(e->pba != r_e->pba);
 		if (r_e->pba > r_new->pba) {
 			link = &(parent->rb_left);
-		} else if (r_e->pba  < r_new->pba){
+			continue;
+		} 
+		if (r_e->pba  < r_new->pba){
 			link = &(parent->rb_right);
-		} else {
-			printk(KERN_ERR "\n %s Error while Inserting pba: %llu, pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
-			BUG_ON("Bug while adding revmap entry !");
-		}
+			continue;
+		} 
+		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
+		BUG_ON("Bug while adding revmap entry !");
 	}
 	//printk( KERN_ERR "\n %s Inserting pba: %llu, pointing to (lba, len): (%llu, %llu)", __func__, r_new->pba, extent->lba, extent->len);
 	/* Put the new node there */
 	rb_link_node(&r_new->rb, parent, link);
 	rb_insert_color(&r_new->rb, root);
-	return;
+	return r_new;
 }
 
 int _lsdm_verbose;
@@ -512,9 +550,9 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 	struct rb_root *root = &ctx->extent_tbl_root;
 	struct rb_node **link = NULL, *parent = NULL;
 	struct extent *e = NULL;
-	struct rev_extent *r_e = NULL;
+	struct rev_extent *r_e = NULL, *r_insert, *r_find;
 	int ret = 0;
-	u64 pba;
+	u64 pba, end;
 
 	if (!root || !new) {
 		printk(KERN_ERR "\n Root is NULL! \n");
@@ -548,7 +586,15 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 	/* Put the new node there */
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
-	lsdm_rb_revmap_insert(ctx, new);
+	r_insert = lsdm_rb_revmap_insert(ctx, new);
+	end = zone_end(ctx, new->pba);
+	r_find = lsdm_rb_revmap_find(ctx, new->pba, end);
+	if (r_insert != r_find) {
+		printk(KERN_ERR "\n %s inserted revmap address is different than found one! ");
+		printk(KERN_ERR "\n revmap_find(): %p, revmap_insert(): %p", r_find, r_insert);
+		printk(KERN_ERR "\n revmap_find()::pba: %llu, revmap_insert()::pba: %llu", r_find->pba, r_insert->pba);
+		BUG();
+	}
 	merge(ctx, root, new);
 	/* new should be physically discontiguous
 	 */
