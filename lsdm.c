@@ -74,6 +74,16 @@ static void extent_init(struct extent *e, sector_t lba, sector_t pba, unsigned l
 	e->ptr_to_rev = NULL;
 }
 
+
+static void gcextent_init(struct gc_extents *gce, sector_t lba, sector_t pba, unsigned len)
+{
+	memset(gce, 0, sizeof(*gce));
+	INIT_LIST_HEAD(&gce->list);
+	gce->e.lba = lba;
+	gce->e.pba = pba;
+	gce->e.len = len;
+}
+
 void print_extents(struct ctx *ctx);
 void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent);
 
@@ -200,16 +210,28 @@ static struct extent *lsdm_rb_prev(struct extent *e)
 	return (node == NULL) ? NULL : container_of(node, struct extent, rb);
 }
 
-/* DEBUGGING CODE
+/* DEBUGGING CODE */
 static int check_node_contents(struct rb_node *node)
 {
 	int ret = 0;
 	struct extent *e, *next, *prev;
+	struct rev_extent *re;
 
 	if (!node)
 		return -1;
 
 	e = rb_entry(node, struct extent, rb);
+	if (!e)
+		return -1;
+	re = e->ptr_to_rev;
+	if (!re)
+		return -1;
+	if (re->pba != e->pba) {
+		printk(KERN_ERR "\n %s PBAs do not match in e and re:: re->pba: %llu e->pba: %llu ", __func__, re->pba, e->pba);
+		return -1;
+	}
+
+	/*
 
 	if (e->lba < 0) {
 		printk(KERN_ERR "\n LBA is <=0, tree corrupt!! \n");
@@ -256,7 +278,7 @@ static int check_node_contents(struct rb_node *node)
 			return -1;
 
 		}
-	}
+	} */
 
 	if(node->rb_left)
 		ret = check_node_contents(node->rb_left);
@@ -280,7 +302,6 @@ static int lsdm_tree_check(struct rb_root *root)
 	return ret;
 
 }
-*/
 
 /* Check if we can be merged with the left or the right node */
 static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
@@ -321,8 +342,42 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 			}
 		}
 	}
-	ctx->n_extents++;
 }
+
+void print_sub_tree(struct rb_node *parent)
+{
+	struct rev_extent *rev_e, *left, *right;
+	struct extent *e;
+	if (!parent)
+		return;
+
+	rev_e = rb_entry(parent, struct rev_extent, rb);
+	e = rev_e->ptr_to_tm;
+	print_sub_tree(parent->rb_left);
+	if (parent->rb_left) {
+		left= rb_entry(parent->rb_left, struct rev_extent, rb);
+		BUG_ON(left->pba >= rev_e->pba);
+	}
+	printk(KERN_ERR "\n %s pba: %d points to (lba: %llu, pba: %llu, len: %llu) ",  __func__, rev_e->pba, e->lba, e->pba, e->len);
+	BUG_ON(rev_e->pba != e->pba);
+	if (parent->rb_right) {
+		right = rb_entry(parent->rb_right, struct rev_extent, rb);
+		BUG_ON(rev_e->pba > right->pba);
+	}
+	print_sub_tree(parent->rb_right);
+}
+
+void print_revmap_tree(struct ctx *ctx)
+{
+	struct rb_root * root = &ctx->rev_tbl_root;
+
+	printk(KERN_ERR "\n-------------------------------------------------\n");
+	print_sub_tree(root->rb_node);
+	printk(KERN_ERR "\n-------------------------------------------------\n");
+}
+
+void print_extents(struct ctx *ctx);
+static int lsdm_tree_check(struct rb_root *root);
 
 struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
 {
@@ -330,35 +385,62 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
 	struct rb_node **link = NULL, *parent = NULL;
 	struct rev_extent *rev_e = NULL, *lower_e = NULL, *higher_e = NULL;
 	struct extent * e;
+	int count = 0, ret=0;
 
 	if (!root)  {
 		printk(KERN_ERR "\n Root is NULL! \n");
 		BUG();
 	}
 
+	if (pba > last_pba) {
+		printk(KERN_ERR "\n %s pba: %llu last_pba: %llu \n", __func__, pba, last_pba);
+		BUG_ON(1);
+	}
+
+	BUG_ON(pba == 0);
+
 	link = &root->rb_node;
 
 	/* Go to the bottom of the tree */
 	while (*link) {
+		count++;
+		if (count > 25) {
+			printk(KERN_ERR "\n %s Stuck while searching pba: %llu, last_pba: %llu \n", __func__, pba, last_pba);
+			printk(KERN_ERR "\n %s On node with pba: %llu", __func__, rev_e->pba);
+			print_revmap_tree(ctx);
+			print_extents(ctx);
+			printk(KERN_ERR "\n %s Stuck while searching pba: %llu, last_pba: %llu \n", __func__, pba, last_pba);
+			ret = lsdm_tree_check(&ctx->extent_tbl_root);
+			if (ret < 0) {
+				printk(KERN_ERR "\n lsdm_tree_check failed!! ");
+				BUG();
+			} 
+			BUG_ON(1);
+		}
+
 		parent = *link;
 		rev_e = rb_entry(parent, struct rev_extent, rb);
 		if (rev_e->pba > pba) {
+			link = &(parent->rb_left);
 			if (!higher_e || (rev_e->pba < higher_e->pba)) {
 				if (rev_e->pba <= last_pba) {
 					higher_e = rev_e;
 				}
 			}
-			link = &(parent->rb_left);
-		} else if (rev_e->pba < pba) { 
+			continue;
+		} 
+		if (rev_e->pba < pba) { 
+			link = &(parent->rb_right);
 			e = rev_e->ptr_to_tm;
+			BUG_ON(!e);
 			if (e->pba + e->len > pba) {
 				/* Overlapping e found*/
+				printk(KERN_ERR "\n overlapping!, searching: %llu found: (pba: %llu, len: %llu) last_pba: %llu\n", pba, (e->pba, e->len), last_pba);
 				return rev_e;
 			}
-			link = &(parent->rb_right);
-		} else {
-			return rev_e;
+			continue;
 		}
+		return rev_e;
 	}
 	return higher_e;
 }
@@ -376,6 +458,11 @@ void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 		BUG();
 	}
 
+	if (!extent) {
+		printk(KERN_ERR "\n %s extent is NULL ", __func__);
+		BUG();
+	}
+
 	//printk(KERN_ERR "\n lba: %lld, len: %lld ", lba, len);
 	r_new = kmem_cache_alloc(ctx->rev_extent_cache, GFP_KERNEL);
 	if (!r_new) {
@@ -384,14 +471,19 @@ void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 		return;
 	}
 	RB_CLEAR_NODE(&r_new->rb);
+	extent->ptr_to_rev = r_new;
+	r_new->ptr_to_tm = extent;
 	r_new->pba = extent->pba;
 	link = &root->rb_node;
-	r_new->ptr_to_tm = extent;
 
 	/* Go to the bottom of the tree */
 	while (*link) {
 		parent = *link;
 		r_e = rb_entry(parent, struct rev_extent, rb);
+		/* DEBUG PURPOSE */
+		e = r_e->ptr_to_tm;
+		BUG_ON(!e);
+		BUG_ON(e->pba != r_e->pba);
 		if (r_e->pba > r_new->pba) {
 			link = &(parent->rb_left);
 		} else if (r_e->pba  < r_new->pba){
@@ -405,7 +497,6 @@ void lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent)
 	/* Put the new node there */
 	rb_link_node(&r_new->rb, parent, link);
 	rb_insert_color(&r_new->rb, root);
-	extent->ptr_to_rev = r_new;
 	return;
 }
 
@@ -421,6 +512,7 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 	struct rb_root *root = &ctx->extent_tbl_root;
 	struct rb_node **link = NULL, *parent = NULL;
 	struct extent *e = NULL;
+	struct rev_extent *r_e = NULL;
 	int ret = 0;
 	u64 pba;
 
@@ -437,6 +529,9 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 	while (*link) {
 		parent = *link;
 		e = rb_entry(parent, struct extent, rb);
+		r_e = e->ptr_to_rev;
+		BUG_ON(!r_e);
+		BUG_ON(e->pba != r_e->pba);
 		//printk(KERN_ERR "\n %s parent->lba: %llu, parent->pba: %llu, parent->len: %lu", __func__, e->lba, e->pba, e->len);
 		if (e->lba >= (new->lba + new->len)) {
 			//printk(KERN_ERR "\n \t Going left now! ");
@@ -524,7 +619,6 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 		diff =  lba - e->lba;
 		/* Initialize split before e->len changes!! */
 		extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
-
 		e->len = diff;
 		/* find e in revmap and reduce the size */
 
@@ -839,6 +933,7 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 			printk(KERN_ERR "\n Could not allocate memory to gc_extent! ");
 			return -ENOMEM;
 		}
+		gcextent_init(gc_extent, 0, 0 , 0);
 		gc_extent->e.lba = e->lba;
 		gc_extent->e.pba = e->pba;
 		gc_extent->e.len = e->len;
@@ -853,7 +948,6 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 			return -ENOMEM;
 		}
 		//printk(KERN_ERR "\n %s (lba: %llu, pba: %llu e->len: %ld) maxlen: %ld temp: %d", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, (maxlen), temp);
-		INIT_LIST_HEAD(&gc_extent->list);
 		/* 
 		 * We always want to add the extents in a PBA increasing order
 		 */
@@ -1145,26 +1239,28 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 
 void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent)
 {
-	struct bio *bio;
 	struct bio_vec *bv = NULL;
 	struct bvec_iter_all iter_all;
 	unsigned int pagecount = 0;
 	int i;
 
 	list_del(&gc_extent->list);
-	bio = gc_extent->bio;
 	pagecount = gc_extent->nrpages;
-	for (i=0; i<pagecount; i++) {
-		if(gc_extent->bio_pages && gc_extent->bio_pages[i]) {
-			mempool_free(gc_extent->bio_pages[i], ctx->gc_page_pool);
-			gc_extent->bio_pages[i] = NULL;
+	if (gc_extent->bio_pages) {
+		for (i=0; i<pagecount; i++) {
+			if(gc_extent->bio_pages[i]) {
+				mempool_free(gc_extent->bio_pages[i], ctx->gc_page_pool);
+				gc_extent->bio_pages[i] = NULL;
+			}
 		}
+		kfree(gc_extent->bio_pages);
+		gc_extent->bio_pages = NULL;
+		gc_extent->nrpages = 0;
+		gcextent_init(gc_extent, 0, 0 , 0);
 	}
-	if (bio) {
-		bio_put(bio);
+	if (gc_extent->bio) {
+		bio_put(gc_extent->bio);
 	}
-	kfree(gc_extent->bio_pages);
-	gc_extent->bio_pages = NULL;
 	kmem_cache_free(ctx->gc_extents_cache, gc_extent);
 }
 
@@ -1221,7 +1317,7 @@ static int write_valid_gc_extents(struct ctx *ctx, u64 last_pba)
 {
 	struct extent *e = NULL;
 	struct rev_extent *rev_e = NULL;
-	struct gc_extents *gc_extent, *temp_ptr, *newgc_extent;
+	struct gc_extents *gc_extent, *temp_ptr, *newgc_extent, *next_ptr;
 	struct list_head *list_head;
 	sector_t diff;
 	sector_t nr_sectors, s8, len;
@@ -1231,40 +1327,26 @@ static int write_valid_gc_extents(struct ctx *ctx, u64 last_pba)
 	int count = 0, pagecount = 0;
 	int i, j;
 
-	list_for_each(list_head, &ctx->gc_extents->list) {
+	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
 		count++;
-		gc_extent = list_entry(list_head, struct gc_extents, list);
 		/* Reverse map stores PBA as e->lba and LBA as e->pba
 		 * This was done for code reuse between map and revmap
 		 * Thus e->lba is actually the PBA
 		 */
 		gc_extent->bio = NULL;
-		down_write(&ctx->metadata_update_lock);
 		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, last_pba);
 prep:
-		up_write(&ctx->metadata_update_lock);
 		if (!rev_e) {
 			/* snip all the gc_extents from this onwards */
-			while(list_head) {
-				temp_ptr = list_next_entry(gc_extent, list);
-				if (!temp_ptr)
-					break;
-				list_head = &temp_ptr->list;
+			list_for_each_entry_safe_from(gc_extent, temp_ptr, &ctx->gc_extents->list, list) {
 				free_gc_extent(ctx, gc_extent);
 			}
-			up_write(&ctx->metadata_update_lock);
 			break;
 		}
 		e = rev_e->ptr_to_tm;
 		/* entire extent is lost by interim overwrites */
 		if (e->pba >= (gc_extent->e.pba + gc_extent->e.len)) {
 			//printk(KERN_ERR "\n %s:%d entire extent is lost! \n", __func__, __LINE__);
-			temp_ptr = list_next_entry(gc_extent, list);
-			if (!temp_ptr) {
-				up_write(&ctx->metadata_update_lock);
-				break;
-			}
-			list_head = &temp_ptr->list;
 			free_gc_extent(ctx, gc_extent);
 			continue;
 		}
@@ -1274,6 +1356,7 @@ prep:
 			gc_extent->e.lba = e->lba;
 			diff = e->pba - gc_extent->e.pba;
 			BUG_ON(diff == gc_extent->e.len);
+			gc_extent->e.pba = e->pba;
 			gc_extent->e.len = gc_extent->e.len - diff;
 			BUG_ON(gc_extent->e.len == 0);
 			BUG_ON((diff<<9) == gc_extent->e.len);
@@ -1294,7 +1377,9 @@ prep:
 				printk(KERN_ERR "\n Could not allocate memory to gc_extent! ");
 				return -1;
 			}
+			gcextent_init(newgc_extent, 0, 0 , 0);
 			newgc_extent->e.lba = gc_extent->e.lba + gc_extent->e.len;
+			newgc_extent->e.pba = gc_extent->e.pba + gc_extent->e.pba;
 			newgc_extent->e.len = len;
 			pagecount = len >> SECTOR_SHIFT;
 			newgc_extent->nrpages = pagecount;
@@ -1309,22 +1394,21 @@ prep:
 				newgc_extent->bio_pages[i] = gc_extent->bio_pages[j];
 			}
 			gc_extent->nrpages = gc_extent->e.len >> SECTOR_SHIFT;
-			INIT_LIST_HEAD(&newgc_extent->list);
 			list_add(&newgc_extent->list, &gc_extent->list);
 		}
-		down_write(&ctx->metadata_update_lock);
+		//down_write(&ctx->metadata_update_lock);
 		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, last_pba);
-		if (rev_e) {
-			e = rev_e->ptr_to_tm;
-			if ((e->lba <= gc_extent->e.lba) && (e->len >= gc_extent->e.len)) {
-				ret = write_gc_extent(ctx, gc_extent);
-			} else {
-				goto prep;
-			}
+		if (!rev_e) {
+			goto prep;
+		}
+		e = rev_e->ptr_to_tm;
+		/* gc_extent could have been split because of lack of space in write frontier */
+		if ((e->lba <= gc_extent->e.lba) && (e->len >= gc_extent->e.len)) {
+			ret = write_gc_extent(ctx, gc_extent);
 		} else {
 			goto prep;
 		}
-		up_write(&ctx->metadata_update_lock);
+		//up_write(&ctx->metadata_update_lock);
 		if (ret) {
 			/* write error! disk is in a read mode! we
 			 * cannot perform any further GC
@@ -1333,6 +1417,7 @@ prep:
 			return -1;
 		}
 		move_gc_write_frontier(ctx, gc_extent->e.len);
+		free_gc_extent(ctx, gc_extent);
 	}
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
 	flush_workqueue(ctx->tm_wq);
@@ -1340,7 +1425,6 @@ prep:
 	complete_revmap_blk_flush(ctx, ctx->revmap_page);
 	/* clear the revmap bitmap */
 	printk(KERN_ERR "\n %s All %d extents written! Segment cleaned!", __func__, count);
-	free_gc_list(ctx);
 	return 0;
 }
 
@@ -1473,14 +1557,12 @@ again:
 	//printk(KERN_ERR "\n %s first_pba: %llu last_pba: %llu", __func__, pba, last_pba);
 
 	while(pba <= last_pba) {
-		down_write(&ctx->metadata_update_lock);
 		//printk(KERN_ERR "\n %s Looking for pba: %llu" , __func__, pba);
 		rev_e = lsdm_rb_revmap_find(ctx, pba, last_pba);
 		if (NULL == rev_e) {
 			printk(KERN_ERR "\n Found NULL! ");
 			break;
 		}
-		up_write(&ctx->metadata_update_lock);
 		e = rev_e->ptr_to_tm;
 		//printk(KERN_ERR "\n %s Found e, LBA: %llu, PBA: %llu, len: %u", __func__, e->lba, e->pba, e->len);
 		
@@ -1623,10 +1705,13 @@ failed:
 void print_sub_extents(struct rb_node *parent)
 {
 	struct extent *e;
+	struct rev_extent *r_e;
 	if (!parent)
 		return;
 
 	e = rb_entry(parent, struct extent, rb);
+	r_e = e->ptr_to_rev;
+	BUG_ON(e->pba != r_e->pba);
 	print_sub_extents(parent->rb_left);
 	printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %lu", __func__, e->lba, e->pba, e->len);
 	print_sub_extents(parent->rb_right);
@@ -1788,6 +1873,7 @@ void lsdm_ioidle(struct kref *kref)
 
 	ctx = container_of(kref, struct ctx, ongoing_iocount);
 	atomic_set(&ctx->ioidle, 1);
+	wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
 	//printk(KERN_ERR "\n Stl is io idle!", __func__);
 	/* Add the initialized timer to the global list */
 	/* TODO: We start the timer only when there is some work to do.
@@ -1869,6 +1955,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	read_ctx->bio = bio;
 
 	atomic_set(&ctx->ioidle, 0);
+	kref_get(&ctx->ongoing_iocount);
 	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
 	if (!clone) {
 		printk(KERN_ERR "\n %s could not allocate memory to clone", __func__);
@@ -4342,7 +4429,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		/* Next we fetch the LBA that our DM got */
 		lba = bio->bi_iter.bi_sector;
 		kref_get(&bioctx->ref);
-		//kref_get(&ctx->ongoing_iocount);
+		kref_get(&ctx->ongoing_iocount);
 		atomic_inc(&ctx->nr_writes);
 		subbio_ctx->extent.lba = lba;
 		subbio_ctx->extent.pba = wf;
@@ -4888,8 +4975,7 @@ int remove_zone_from_gc_tree(struct ctx *ctx, unsigned int zonenr)
 	}
 	/* did not find the zone in rb tree */
 	temp = select_zone_to_clean(ctx, BG_GC);
-	printk("\n %s could not find zone: %d in the zone tree! zone selected for next round: %d \n", __func__, temp);
-	BUG_ON(1);
+	printk("\n %s could not find zone: %d in the zone tree! zone selected for next round: %d \n", __func__, zonenr, temp);
 	return (-1);
 }
 
@@ -5650,6 +5736,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 		printk(KERN_ERR "\n Could not allocate gc_extent and hence could not initialized \n");
 		goto free_metadata_pages;
 	}
+	gcextent_init(ctx->gc_extents, 0, 0 , 0);
 	//trace_printk("\n Extent allocated....! ctx->gc_extents: %p", ctx->gc_extents);
 	/*
 	 * Will work with timer based invocation later
