@@ -121,7 +121,7 @@ struct lsdm_seg_entry {
 struct lsdm_revmap_extent {
 	__le64 lba;
 	__le64 pba;
-	__le16 len; /* At a maximum there are 65536 blocks in a zone */
+	__le16 len; /* At a maximum there are 512 pages in a bio */
 }__attribute__((packed));
 
 

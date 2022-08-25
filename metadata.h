@@ -186,6 +186,7 @@ struct lsdm_gc_thread {
 
 
 struct gc_extents {
+	int nrpages;
 	struct extent_entry e;
 	struct bio *bio;
 	struct page ** bio_pages;
