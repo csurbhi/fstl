@@ -1475,9 +1475,9 @@ prep:
 			}
 			j = gc_extent->e.len >> SECTOR_SHIFT;
 			/* j is the new page count of gc_extent */
-			gc_extent->nrpages = j;
 			BUG_ON(!j);
 			BUG_ON((j + pagecount) > gc_extent->nrpages);
+			gc_extent->nrpages = j;
 			for(i=0; i<pagecount; i++, j++) {
 				newgc_extent->bio_pages[i] = gc_extent->bio_pages[j];
 			}
@@ -1659,20 +1659,23 @@ again:
 			 * Overlapping e found
 			 * e-------
 			 * 	pba
-			 *
-			 * This  case should have been found for a previous pba iteration
-			 * where e->pba should have equalled pba!
 			 */
-			BUG_ON(1);
+			BUG_ON((e->pba + e->len) < pba);
+			diff = pba - e->pba;
+			temp.pba = pba;
+			temp.lba = e->pba + diff;
+			temp.len = e->len - diff;
 
-		} 
-		/*
-		 * 	e------
-		 * pba
-		 */
-		temp.pba = e->pba;
-		temp.lba = e->lba;
-		temp.len = e->len;
+
+		} else {
+			/*
+			 * 	e------
+			 * pba
+			 */
+			temp.pba = e->pba;
+			temp.lba = e->lba;
+			temp.len = e->len;
+		}
 		/* if start is 0, len is 4, then you want to read 4 sectors. If last_pba is
 		 * 3, you want len to be 4.
 		 */
