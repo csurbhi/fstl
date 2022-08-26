@@ -528,7 +528,8 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
 			link = &(parent->rb_right);
 			continue;
 		} 
-		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
+		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, e->lba, e->pba, e->len);
+		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
 		BUG_ON("Bug while adding revmap entry !");
 	}
 	//printk( KERN_ERR "\n %s Inserting pba: %llu, pointing to (lba, len): (%llu, %llu)", __func__, r_new->pba, extent->lba, extent->len);
@@ -1216,7 +1217,8 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio->bi_iter.bi_sector = ctx->warm_gc_wf_pba;
 	gc_extent->e.pba = bio->bi_iter.bi_sector;
 	s8 = bio_sectors(bio);
-
+	
+	BUG_ON(gc_extent->e.len == 0);
 	BUG_ON(gc_extent->e.pba == 0);
 	BUG_ON(gc_extent->e.pba > ctx->sb->max_pba);
 	BUG_ON(gc_extent->e.lba > ctx->sb->max_pba);
@@ -1415,6 +1417,7 @@ prep:
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 		BUG_ON(nr_sectors != s8);
 		if (nr_sectors > ctx->free_sectors_in_gc_wf) {
+			BUG_ON(!ctx->free_sectors_in_gc_wf);
 			printk(KERN_ERR "\n %s nr_sectors: %llu, ctx->free_sectors_in_gc_wf: %llu gc_extent->nrpages: %d", __func__, nr_sectors, ctx->free_sectors_in_gc_wf, gc_extent->nrpages);
 			gc_extent->e.len = ctx->free_sectors_in_gc_wf;
 			len = nr_sectors - gc_extent->e.len;
@@ -1425,9 +1428,10 @@ prep:
 			}
 			gcextent_init(newgc_extent, 0, 0 , 0);
 			newgc_extent->e.lba = gc_extent->e.lba + gc_extent->e.len;
-			newgc_extent->e.pba = gc_extent->e.pba + gc_extent->e.pba;
+			newgc_extent->e.pba = gc_extent->e.pba + gc_extent->e.len;
 			newgc_extent->e.len = len;
 			pagecount = len >> SECTOR_SHIFT;
+			BUG_ON(!pagecount);
 			newgc_extent->nrpages = pagecount;
 			newgc_extent->bio_pages = kmalloc(pagecount * sizeof(void *), GFP_KERNEL);
 			if (!newgc_extent->bio_pages) {
@@ -1440,6 +1444,7 @@ prep:
 				newgc_extent->bio_pages[i] = gc_extent->bio_pages[j];
 			}
 			gc_extent->nrpages = gc_extent->e.len >> SECTOR_SHIFT;
+			BUG_ON(!gc_extent->nrpages);
 			list_add(&newgc_extent->list, &gc_extent->list);
 		}
 		//down_write(&ctx->metadata_update_lock);
