@@ -6,6 +6,11 @@ sudo ./writezones
 free -h
 sudo ./readverify
 free -h
+sudo mv /mnt/test /mnt/test.1
+sudo ./writezones
+free -h
+sudo ./readverify
+free -h
 #sudo umount /mnt
 #sudo dmsetup remove TL1
 #sudo rmmod lsdm.ko

@@ -376,7 +376,7 @@ void print_revmap_tree(struct ctx *ctx)
 void print_extents(struct ctx *ctx);
 static int lsdm_tree_check(struct rb_root *root);
 
-struct rev_extent * lsdm_revmap_find_print(struct ctx *ctx, u64 pba, u64 last_pba)
+struct rev_extent * lsdm_revmap_find_print(struct ctx *ctx, u64 pba, size_t len, u64 last_pba)
 {
 	struct rb_root *root = &ctx->rev_tbl_root;
 	struct rb_node **link = NULL, *parent = NULL;
@@ -407,7 +407,17 @@ struct rev_extent * lsdm_revmap_find_print(struct ctx *ctx, u64 pba, u64 last_pb
 			printk(KERN_ERR "\n rev_e->pba: %llu, going left ", rev_e->pba);
 			continue;
 		} 
-		if (rev_e->pba < pba) { 
+		if (rev_e->pba < pba) {
+			e = rev_e->ptr_to_tm;
+			BUG_ON(!e);
+			if (rev_e->pba + e->len > pba) {
+				/* We find an overlapping pba when the gc_extent was split due to space
+				 * requirements in the gc frontier
+				 */
+				BUG_ON((rev_e->pba + e->len) < (pba + len));
+				return rev_e;
+			}
+
 			link = &(parent->rb_right);
 			printk(KERN_ERR "\n rev_e->pba: %llu, going right", rev_e->pba);
 			continue;
@@ -419,7 +429,7 @@ struct rev_extent * lsdm_revmap_find_print(struct ctx *ctx, u64 pba, u64 last_pb
 
 }
 
-struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
+struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, size_t len, u64 last_pba)
 {
 	struct rb_root *root = &ctx->rev_tbl_root;
 	struct rb_node **link = NULL, *parent = NULL;
@@ -451,7 +461,7 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
 			print_extents(ctx);
 			printk(KERN_ERR "\n %s Stuck while searching pba: %llu, last_pba: %llu \n", __func__, pba, last_pba);
 			printk(KERN_ERR "\n %s Stuck while searching pba: %llu, last_pba: %llu \n", __func__, pba, last_pba);
-			temp = lsdm_revmap_find_print(ctx, pba, last_pba);
+			temp = lsdm_revmap_find_print(ctx, pba, len, last_pba);
 			BUG_ON(temp);
 			ret = lsdm_tree_check(&ctx->extent_tbl_root);
 			if (ret < 0) {
@@ -472,7 +482,16 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, u64 last_pba)
 			}
 			continue;
 		} 
-		if (rev_e->pba < pba) { 
+		if (rev_e->pba < pba) {
+			e = rev_e->ptr_to_tm;
+			BUG_ON(!e);
+			if (rev_e->pba + e->len > pba) {
+				/* We find an overlapping pba when the gc_extent was split due to space
+				 * requirements in the gc frontier
+				 */
+				BUG_ON((rev_e->pba + e->len) < (pba + len));
+				return rev_e;
+			}
 			link = &(parent->rb_right);
 			continue;
 		}
@@ -525,6 +544,15 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
 			continue;
 		} 
 		if (r_e->pba  < r_new->pba){
+			if (r_e->pba + e->len > r_new->pba) {
+				/* We find an overlapping pba when the gc_extent was split due to space
+				 * requirements in the gc frontier
+				 */
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, e->lba, e->pba, e->len);
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
+
+				BUG_ON("Bug while adding revmap entry !");
+			}
 			link = &(parent->rb_right);
 			continue;
 		} 
@@ -589,7 +617,7 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 	rb_insert_color(&new->rb, root);
 	r_insert = lsdm_rb_revmap_insert(ctx, new);
 	end = zone_end(ctx, new->pba);
-	r_find = lsdm_rb_revmap_find(ctx, new->pba, end);
+	r_find = lsdm_rb_revmap_find(ctx, new->pba, new->len, end);
 	if (r_insert != r_find) {
 		printk(KERN_ERR "\n %s inserted revmap address is different than found one! ");
 		printk(KERN_ERR "\n revmap_find(): %p, revmap_insert(): %p", r_find, r_insert);
@@ -1382,7 +1410,7 @@ static int write_valid_gc_extents(struct ctx *ctx, u64 last_pba)
 		 * Thus e->lba is actually the PBA
 		 */
 		gc_extent->bio = NULL;
-		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, last_pba);
+		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, gc_extent->e.len, last_pba);
 prep:
 		if (!rev_e) {
 			/* snip all the gc_extents from this onwards */
@@ -1402,18 +1430,24 @@ prep:
 		if (e->pba > gc_extent->e.pba) {
 			//printk(KERN_ERR "\n %s:%d extent is snipped! \n", __func__, __LINE__);
 			gc_extent->e.lba = e->lba;
-			diff = e->pba - gc_extent->e.pba;
-			BUG_ON(diff == gc_extent->e.len);
 			gc_extent->e.pba = e->pba;
+			diff = e->pba - gc_extent->e.pba;
 			gc_extent->e.len = gc_extent->e.len - diff;
-			BUG_ON(gc_extent->e.len == 0);
-			BUG_ON((diff<<9) == gc_extent->e.len);
+			BUG_ON(!gc_extent->e.len);
+			pagecount = gc_extent->e.len >> SECTOR_SHIFT;
+			BUG_ON(!pagecount);
+			/* free the extra pages */
+			for(i=pagecount; i<gc_extent->nrpages; i++) {
+				mempool_free(gc_extent->bio_pages[i], ctx->gc_page_pool);
+			}
+			gc_extent->nrpages = pagecount;
 		}
 		/* Now we adjust the gc_extent such that it can be  written in the available
 		 * space in the gc segment. If less space is available than is required by a
 		 * bio, we split that bio. Else we write it as it is.
 		 */
 		nr_sectors = gc_extent->e.len;
+		BUG_ON(!nr_sectors);
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 		BUG_ON(nr_sectors != s8);
 		if (nr_sectors > ctx->free_sectors_in_gc_wf) {
@@ -1430,6 +1464,7 @@ prep:
 			newgc_extent->e.lba = gc_extent->e.lba + gc_extent->e.len;
 			newgc_extent->e.pba = gc_extent->e.pba + gc_extent->e.len;
 			newgc_extent->e.len = len;
+			/* pagecount: page count of newgc_extent */
 			pagecount = len >> SECTOR_SHIFT;
 			BUG_ON(!pagecount);
 			newgc_extent->nrpages = pagecount;
@@ -1439,26 +1474,21 @@ prep:
 				return -ENOMEM;
 			}
 			j = gc_extent->e.len >> SECTOR_SHIFT;
+			/* j is the new page count of gc_extent */
+			gc_extent->nrpages = j;
+			BUG_ON(!j);
+			BUG_ON((j + pagecount) > gc_extent->nrpages);
 			for(i=0; i<pagecount; i++, j++) {
-				BUG_ON(j > gc_extent->nrpages);
 				newgc_extent->bio_pages[i] = gc_extent->bio_pages[j];
 			}
-			gc_extent->nrpages = gc_extent->e.len >> SECTOR_SHIFT;
-			BUG_ON(!gc_extent->nrpages);
 			list_add(&newgc_extent->list, &gc_extent->list);
 		}
 		//down_write(&ctx->metadata_update_lock);
-		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, last_pba);
-		if (!rev_e) {
+		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, gc_extent->e.len, last_pba);
+		if (!rev_e || (rev_e->pba > gc_extent->e.pba)) {
 			goto prep;
 		}
-		e = rev_e->ptr_to_tm;
-		/* gc_extent could have been split because of lack of space in write frontier */
-		if ((e->lba <= gc_extent->e.lba) && (e->len >= gc_extent->e.len)) {
-			ret = write_gc_extent(ctx, gc_extent);
-		} else {
-			goto prep;
-		}
+		ret = write_gc_extent(ctx, gc_extent);
 		//up_write(&ctx->metadata_update_lock);
 		if (ret) {
 			/* write error! disk is in a read mode! we
@@ -1609,7 +1639,7 @@ again:
 
 	while(pba <= last_pba) {
 		//printk(KERN_ERR "\n %s Looking for pba: %llu" , __func__, pba);
-		rev_e = lsdm_rb_revmap_find(ctx, pba, last_pba);
+		rev_e = lsdm_rb_revmap_find(ctx, pba, 0, last_pba);
 		if (NULL == rev_e) {
 			printk(KERN_ERR "\n Found NULL! ");
 			break;
@@ -1629,30 +1659,25 @@ again:
 			 * Overlapping e found
 			 * e-------
 			 * 	pba
+			 *
+			 * This  case should have been found for a previous pba iteration
+			 * where e->pba should have equalled pba!
 			 */
+			BUG_ON(1);
 
-			diff = pba - e->pba;
-			/* Bug when e is non overlapping */
-			BUG_ON(diff >= e->len);
-			temp.pba = e->pba + diff;
-			temp.lba = e->lba + diff;
-			temp.len = e->len - diff;
-		} else {
-			/*
-			 * 	e------
-			 * pba
-			 */
-			temp.pba = e->pba;
-			temp.lba = e->lba;
-			temp.len = e->len;
-			/* if start is 0, len is 4, then you
-			 * want to read 4 sectors.
-			 * If last_pba is 3, you want len to be 4
-			 */
-			if (temp.pba + temp.len > last_pba + 1) {
-				diff = (temp.pba + temp.len - 1) - last_pba;
-				temp.len = temp.len - diff;
-			}
+		} 
+		/*
+		 * 	e------
+		 * pba
+		 */
+		temp.pba = e->pba;
+		temp.lba = e->lba;
+		temp.len = e->len;
+		/* if start is 0, len is 4, then you want to read 4 sectors. If last_pba is
+		 * 3, you want len to be 4.
+		 */
+		if (temp.pba + temp.len > last_pba + 1) {
+			temp.len = last_pba - temp.pba + 1;
 		}
 		//printk(KERN_ERR "\n %s (lba: %llu, pba: %llu e->len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
 		add_extent_to_gclist(ctx, &temp);
@@ -2842,18 +2867,20 @@ void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
 
 /* Always called with the ctx->lock held
  */
-void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8)
+void move_gc_write_frontier(struct ctx *ctx, sector_t s8)
 {
 	/* We should have adjusted sectors_s8 to accomodate
 	 * for the rooms in the zone before calling this function.
 	 * Its how we split the bio
 	 */
-	if (ctx->free_sectors_in_gc_wf < sectors_s8) {
+	if (ctx->free_sectors_in_gc_wf < s8) {
 		panic("Wrong manipulation of gc wf; used unavailable sectors in a log");
-	}	
+	}
+
+	BUG_ON(!s8);
 	
-	ctx->warm_gc_wf_pba = ctx->warm_gc_wf_pba + sectors_s8;
-	ctx->free_sectors_in_gc_wf = ctx->free_sectors_in_gc_wf - sectors_s8;
+	ctx->warm_gc_wf_pba = ctx->warm_gc_wf_pba + s8;
+	ctx->free_sectors_in_gc_wf = ctx->free_sectors_in_gc_wf - s8;
 	if (ctx->free_sectors_in_gc_wf < NR_SECTORS_IN_BLK) {
 		if ((ctx->warm_gc_wf_pba - 1) != ctx->warm_gc_wf_end) {
 			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
