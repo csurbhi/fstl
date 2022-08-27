@@ -268,7 +268,6 @@ struct ctx {
 	struct kmem_cache *gc_extents_cache;
 	struct kmem_cache *app_read_ctx_cache;
 	struct kmem_cache *bio_cache;
-	wait_queue_head_t tm_blk_flushq;
 	spinlock_t tm_ref_lock;
 	spinlock_t tm_flush_lock;
 	spinlock_t rev_flush_lock;
@@ -281,6 +280,7 @@ struct ctx {
 					 */
 	wait_queue_head_t refq;
 	wait_queue_head_t rev_blk_flushq;
+	wait_queue_head_t tm_writes_q;
 	wait_queue_head_t sitq;
 	wait_queue_head_t tmq;
 	struct page * revmap_page;
@@ -300,6 +300,7 @@ struct ctx {
 	sector_t revmap_pba;
 	atomic_t nr_pending_writes;
 	atomic_t nr_revmap_flushes;
+	atomic_t nr_tm_writes;
 	atomic_t nr_sit_pages;
 	atomic_t nr_tm_pages;
 	atomic_t sit_ref;
