@@ -1246,7 +1246,7 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	gc_extent->e.pba = bio->bi_iter.bi_sector;
 	s8 = bio_sectors(bio);
 	
-	BUG_ON(gc_extent->e.len == 0);
+	BUG_ON(gc_extent->e.len != s8);
 	BUG_ON(gc_extent->e.pba == 0);
 	BUG_ON(gc_extent->e.pba > ctx->sb->max_pba);
 	BUG_ON(gc_extent->e.lba > ctx->sb->max_pba);
@@ -1279,6 +1279,7 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 	BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_SHIFT));
 	//printk(KERN_ERR "\n %s gc_extent->e.len = %d ", __func__, s8);
 	bio_pages = (s8 >> SECTOR_SHIFT);
+	BUG_ON(bio_pages != gc_extent->nrpages);
 	//printk(KERN_ERR "\n 1) %s gc_extent->e.len (in sectors): %ld s8: %d", __func__, gc_extent->e.len, s8);
 
 	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
@@ -1290,8 +1291,6 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 		return -ENOMEM;
 	}
 
-	BUG_ON(bio_pages > gc_extent->nrpages);
-	
 	/* bio_add_page sets the bi_size for the bio */
 	for(i=0; i<bio_pages; i++) {
 		page = gc_extent->bio_pages[i];
@@ -2048,9 +2047,9 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	nr_sectors = bio_sectors(clone);
 	split = NULL;
 
+	lba = clone->bi_iter.bi_sector;
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
-		lba = clone->bi_iter.bi_sector;
 		e = lsdm_rb_geq(ctx, lba, print);
 
 		/* case of no overlap, technically, e->lba + e->len cannot be less than lba
@@ -2082,8 +2081,8 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			/* bio is front filled with zeroes, but we
 			 * need to compare 'clone' now with the same e
 			 */
+			lba = lba + nr_sectors;
 			nr_sectors = bio_sectors(clone);
-			lba = clone->bi_iter.bi_sector;
 			/* we fall through as e->lba == lba now */
 		} 
 		//(e->lba <= lba) 
@@ -2092,6 +2091,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		/*  [---------bio------] */
 		overlap = e->lba + e->len - lba;
 		diff = lba - e->lba;
+		BUG_ON(diff < 0);
 		pba = e->pba + diff;
 		if (overlap >= nr_sectors) { 
 		/* e is bigger than bio, so overlap >= nr_sectors, no further
@@ -2122,6 +2122,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		split->bi_iter.bi_sector = pba;
 		bio_set_dev(split, ctx->dev->bdev);
 		submit_bio(split);
+		lba = lba + overlap;
 		/* Since e was smaller, we want to search for the next e */
 	}
 	//printk(KERN_INFO "\n %s end", __func__);
@@ -2470,7 +2471,7 @@ try_again:
 	ctx->hot_wf_pba = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	ctx->hot_wf_end = zone_end(ctx, ctx->hot_wf_pba);
 
-	//printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d hot_wf_pba: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->hot_wf_pba, ctx->hot_wf_end);
+	printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d hot_wf_pba: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->hot_wf_pba, ctx->hot_wf_end);
 	if (ctx->hot_wf_pba > ctx->hot_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %lld", ctx->free_sectors_in_wf );
 	}
@@ -2842,19 +2843,19 @@ void update_checkpoint(struct ctx *ctx)
 
 /* Always called with the ctx->lock held
  */
-void move_write_frontier(struct ctx *ctx, sector_t sectors_s8)
+void move_write_frontier(struct ctx *ctx, sector_t s8)
 {
 	/* We should have adjusted sectors_s8 to accomodate
 	 * for the rooms in the zone before calling this function.
 	 * Its how we split the bio
 	 */
-	if (ctx->free_sectors_in_wf < sectors_s8) {
+	if (ctx->free_sectors_in_wf < s8) {
 		panic("Wrong manipulation of wf; used unavailable sectors in a log");
 	}
 
-	ctx->hot_wf_pba = ctx->hot_wf_pba + sectors_s8;
-	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - sectors_s8;
-	ctx->user_block_count -= sectors_s8 / NR_SECTORS_IN_BLK;
+	ctx->hot_wf_pba = ctx->hot_wf_pba + s8;
+	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - s8;
+	ctx->user_block_count -= s8 / NR_SECTORS_IN_BLK;
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
 		//printk(KERN_INFO "Num of free sect.: %llu, about to call get_new_zone() \n", ctx->free_sectors_in_wf);
 		if ((ctx->hot_wf_pba - 1) != ctx->hot_wf_end) {
@@ -4469,6 +4470,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 			goto fail;
 		}
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+		BUG_ON(s8 != nr_sectors);
 		//trace_printk("\n subbio_ctx: %llu", subbio_ctx);
 		spin_lock(&ctx->lock);
 		/*-------------------------------*/
@@ -4480,9 +4482,8 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		if (s8 > ctx->free_sectors_in_wf){
 			//trace_printk("SPLITTING!!!!!!!! s8: %d ctx->free_sectors_in_wf: %d", s8, ctx->free_sectors_in_wf);
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
-			if (s8 <= 0) {
-				panic("Should always have atleast a block left ");
-			}
+			BUG_ON(!s8);
+			BUG_ON(s8 != ctx->free_sectors_in_wf);
 			move_write_frontier(ctx, s8);
 		/*-------------------------------*/
 			spin_unlock(&ctx->lock);
@@ -4493,26 +4494,26 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 				goto fail;
 			}
 			subbio_ctx->extent.len = s8;
+			BUG_ON(!nr_sectors);
 		} 
 		else {
 			move_write_frontier(ctx, s8);
 		/*-------------------------------*/
 			spin_unlock(&ctx->lock);
 			split = clone;
-			/* s8 might be bigger than nr_sectors. We want
-			 * to maintain the exact length in the
-			 * translation map, not padded entry
+			/* s8 might be bigger than nr_sectors. We want to 
+			 * maintain the exact length in the translation 
+			 * map, not padded entry.
 			 */
 			subbio_ctx->extent.len = nr_sectors;
 		}
     		
-
 		/* Next we fetch the LBA that our DM got */
-		lba = bio->bi_iter.bi_sector;
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
 		atomic_inc(&ctx->nr_writes);
 		subbio_ctx->extent.lba = lba;
+		lba = lba + subbio_ctx->extent.len;
 		subbio_ctx->extent.pba = wf;
 
 		BUG_ON(wf == 0);
@@ -4521,7 +4522,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		
 		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
 
-		split->bi_iter.bi_sector = wf; /* we use the save write frontier */
+		split->bi_iter.bi_sector = wf; /* we use the saved write frontier */
 		split->bi_private = subbio_ctx;
 		split->bi_end_io = lsdm_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
@@ -4529,32 +4530,8 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		//printk(KERN_ERR "\n %s lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	} while (split != clone);
 
-	/* We might need padding when the original request is not block
-	 * aligned.
-	 * We want to zero fill the padded portion of the last page.
-	 * We know that we always have a page corresponding to a bio.
-	 * A page is always 4096 bytes, but the request may be smaller.
-	 */
 	if (nr_sectors < s8) {
-		/* We need to zero out the remaining bytes
-		 * from the last page in the bio
-		 */
-		dump_stack();
-		pad = bio_clone_fast(clone, GFP_KERNEL, NULL);
-		pad->bi_iter.bi_size = s8 << 9;
-		/* We use the saved write frontier */
-		pad->bi_iter.bi_sector = wf;
-		/* bio advance will advance the bi_sector and bi_size
-		 */
-		bio_advance(pad, nr_sectors << 9);
-		zero_fill_bio(pad);
-		/* we dont need to take any action when pad completes
-		 * and thus we dont need any endio for pad. Chain it 
-		 * with parent, so that we are notified its completion
-		 * when parent completes.
-		 */
-		bio_chain(pad, clone);
-		submit_bio(pad);
+		BUG_ON(1);
 	}
 	//blk_finish_plug(&plug);
 	kref_put(&bioctx->ref, write_done);
@@ -4750,7 +4727,8 @@ void mark_zone_occupied(struct ctx *ctx , int zonenr)
 		 * same zone. The bit is already unset and the zone 
 		 * is marked occupied already.
 		 */
-		//printk(KERN_ERR "\n %s zone is already occupied! bitmap[%d]: %d ", __func__, bytenr, bitnr, bitmap[bytenr]);
+		printk(KERN_ERR "\n %s zone is already occupied! bitmap[%d]: %d ", __func__, bytenr, bitnr, bitmap[bytenr]);
+		//BUG_ON(1);
 		return;
 	}
 	/* This bit is set and the zone is free. We want to unset it
