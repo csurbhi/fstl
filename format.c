@@ -135,12 +135,14 @@ __le64 get_nr_blks(struct lsdm_sb *sb)
 /*
  * 131072 reverse map entries are stored as a part of the reverse map
  * irrespective of the size of the disk. These are entries for two zones
- * of data. One block stores 48 entries. To store 131072 entries
- * we need (131072/48) ie 2730 blocks. 
- * Now to store the bitmap of 2730 blocks we need only 1 block of bits
- * since 4096 bits can be represented by this bitmap.
+ * of data. 
+ * sizeof(lsdm_revmap_extent): 20 
+ * number of revmap extents in a sector: 25 
+ * number of revmap extents in a block: 200 
+ * number of blocks needed to store 65536 entries: 327 
+ * number of blocks needed to store 131072 entries: 654 
+ * blocks needed to represent bitmap for 654 blocks: 1
  */
-
 __le32 get_revmap_blk_count(struct lsdm_sb *sb)
 {
 	unsigned nr_rm_entries = 2 << (sb->log_zone_size - sb->log_block_size);

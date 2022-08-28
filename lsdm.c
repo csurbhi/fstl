@@ -1221,7 +1221,7 @@ void mark_disk_full(struct ctx *ctx);
 void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8);
 
 static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent);
-static void add_revmap_entry(struct ctx *, __le64, __le64, int, unsigned int);
+static void add_revmap_entry(struct ctx *, __le64, __le64, int);
 /* 
  * The extent that we are about to write will definitely fit into
  * the gc write frontier. No one is writing to the gc frontier
@@ -1258,7 +1258,7 @@ again:
 		panic("GC writes failed! Perhaps a resource error");
 	}
 	ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
-	add_revmap_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, 0);
+	add_revmap_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	return 0;
 }
 
@@ -2317,13 +2317,6 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	}
 	copy_blocks(zonenr, destn_zonenr); 
 
-	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
-		atomic_set(&ctx->sit_flush_count, 0);
-		/* We dont want to wait for the flush to complete,
-		 * just initiate here
-		 */
-		flush_sit(ctx);
-	}
 }
 
 /* 
@@ -2471,7 +2464,7 @@ try_again:
 	ctx->hot_wf_pba = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	ctx->hot_wf_end = zone_end(ctx, ctx->hot_wf_pba);
 
-	printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d hot_wf_pba: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->hot_wf_pba, ctx->hot_wf_end);
+	//printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d hot_wf_pba: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->hot_wf_pba, ctx->hot_wf_end);
 	if (ctx->hot_wf_pba > ctx->hot_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %lld", ctx->free_sectors_in_wf );
 	}
@@ -2972,7 +2965,6 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba, char * c
 	
 	atomic_inc(&ctx->nr_sit_pages);
 	atomic_inc(&ctx->sit_flush_count);
-
 	return new;
 }
 
@@ -3016,7 +3008,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		ptr->mtime = get_elapsed_time(ctx);
 		if (ctx->max_mtime < ptr->mtime)
 			ctx->max_mtime = ptr->mtime;
-		update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
+		//update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
 		//printk(KERN_ERR "\n %s done! zone: %u vblocks: %d pba: %lu, index: %d , ptr: %p", __func__, zonenr, ptr->vblocks, pba, index, ptr);
 	}
 	if (!ptr->vblocks) {
@@ -3032,15 +3024,6 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		}
 	}
 	mutex_unlock(&ctx->sit_kv_store_lock);
-
-
-	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
-		atomic_set(&ctx->sit_flush_count, 0);
-		/* We dont want to wait for the flush to complete,
-		 * just initiate here
-		 */
-		flush_sit(ctx);
-	}
 }
 
 
@@ -3092,14 +3075,6 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 			panic("Zone has more blocks that it should!");
 		}
 	} 
-	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
-		atomic_set(&ctx->sit_flush_count, 0);
-		/* We dont want to wait for the flush to complete,
-		 * just initiate here
-		 */
-		flush_sit(ctx);
-	}
-
 	return;
 }
 
@@ -3136,15 +3111,6 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	if (ctx->max_mtime < ptr->mtime)
 		ctx->max_mtime = ptr->mtime;
 	mutex_unlock(&ctx->sit_kv_store_lock);
-
-
-	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
-		atomic_set(&ctx->sit_flush_count, 0);
-		/* We dont want to wait for the flush to complete,
-		 * just initiate here
-		 */
-		flush_sit(ctx);
-	}
 }
 
 struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node **parent);
@@ -3167,7 +3133,6 @@ int add_translation_entry(struct ctx * ctx, struct page *page, __le64 lba, __le6
 
 	BUG_ON(len < 0);
 	BUG_ON(nrblks == 0);
-	BUG_ON(nrblks > BIO_MAX_PAGES); /* You cannot write more than a bio can carry */
 	BUG_ON(pba == 0);
 	ptr = (struct tm_entry *) page_address(page);
 	index = (lba >> SECTOR_SHIFT);
@@ -3566,7 +3531,7 @@ void flush_translation_blocks(struct ctx *ctx)
 
 	//printk(KERN_ERR "\n Inside %s ", __func__);
 	if (!mutex_trylock(&ctx->tm_lock)) {
-			return;
+		return;
 	}
 
 	if (!root->rb_node) {
@@ -3790,7 +3755,7 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	
 	RB_CLEAR_NODE(&new_tmpage->rb);
 
-	printk("\n %s lba: %llu blknr: %d tm_pba: %llu \n", __func__, lba, blknr, ctx->sb->tm_pba);
+	//printk("\n %s lba: %llu blknr: %d tm_pba: %llu \n", __func__, lba, blknr, ctx->sb->tm_pba);
 
 	new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
 	if (!new_tmpage->page) {
@@ -3809,7 +3774,6 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, u64 lba)
 	rb_insert_color(&new_tmpage->rb, root);
 	atomic_inc(&ctx->nr_tm_pages);
     	atomic_inc(&ctx->tm_flush_count);
-	
 	return new_tmpage;
 }
 
@@ -3855,7 +3819,6 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 				printk(KERN_ERR "\n  %s lba: %llu, pba: %llu, len: %d \n", __func__, lba, pba, len);
 				panic("len has to be a multiple of 8");
 			}
-			BUG_ON(len > (BIO_MAX_PAGES << SECTOR_SHIFT));
 			tm_page = add_tm_page_kv_store(ctx, lba);
 			if (!tm_page) {
 				mutex_unlock(&ctx->tm_kv_store_lock);
@@ -4013,6 +3976,18 @@ void process_tm_entries(struct work_struct * w)
 	nrpages--;
 	atomic_dec(&ctx->nr_tm_writes);
 	wake_up(&ctx->tm_writes_q);
+	
+	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_FLUSH_PAGES) {
+		flush_translation_blocks(ctx);
+		atomic_set(&ctx->tm_flush_count, 0);
+	}
+	
+
+	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
+		atomic_set(&ctx->sit_flush_count, 0);
+		flush_sit(ctx);
+	}
+
 }
 
 void revmap_blk_flushed(struct bio *bio)
@@ -4218,7 +4193,7 @@ int merge_rev_entries(struct ctx * ctx, sector_t lba, sector_t pba, unsigned lon
  * 
  * Always called with the metadata_update_lock held!
  */
-static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsectors, u32 wait)
+static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsectors)
 {
 	struct lsdm_revmap_entry_sector * ptr = NULL;
 	int entry_nr, sector_nr;
@@ -4227,7 +4202,6 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
-	BUG_ON(nrsectors > (BIO_MAX_PAGES <<  SECTOR_SHIFT));
 
 	/* Merge entries by increasing the length if there lies a
 	 * matching entry in the revmap page
@@ -4290,7 +4264,6 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 	ptr->extents[entry_nr].len = nrsectors;
 	BUG_ON((pba + nrsectors) > ctx->sb->max_pba);
 	BUG_ON((lba + nrsectors) > ctx->sb->max_pba);
-	BUG_ON(nrsectors > (BIO_MAX_PAGES << SECTOR_SHIFT));
 
 	if (NR_EXT_ENTRIES_PER_SEC == (entry_nr+1)) {
 		//ptr->crc = calculate_crc(ctx, page);
@@ -4352,7 +4325,7 @@ void sub_write_done(struct work_struct * w)
 	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
 	lsdm_rb_update_range(ctx, lba, pba, len);
-	add_revmap_entry(ctx, lba, pba, len, 0);
+	add_revmap_entry(ctx, lba, pba, len);
 	/*-------------------------------*/
 	up_write(&ctx->metadata_update_lock);
 	return;
@@ -4423,7 +4396,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	struct blk_plug plug;
 	sector_t wf;
 	struct lsdm_ckpt *ckpt;
-	static int count = 0;
+	int count = 0;
 	struct tm_page *tm_page;
 
 	//printk(KERN_ERR "\n ******* Inside %s, requesting lba: %llu sectors: %d ", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
@@ -4448,7 +4421,6 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	ckpt->clean = 0;
 	nr_sectors = bio_sectors(bio);
 	if (unlikely(nr_sectors <= 0)) {
-		//trace_printk("\n Less than 0 sectors (%d) requested!", nr_sectors);
 		bio->bi_status = BLK_STS_OK;
 		bio_endio(bio);
 		return -1;
@@ -4470,7 +4442,6 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		bio_put(clone);
 		return -ENOMEM;
 	}
-	count++;
 	//printk(KERN_ERR "\n %s bioctx allocated from bioctx_cache, ptr: %p count: %d" , __func__, bioctx, count);
 	bioctx->orig = bio;
 	bioctx->ctx = ctx;
@@ -4485,7 +4456,12 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	
 	do {
 		nr_sectors = bio_sectors(clone);
-		BUG_ON(nr_sectors > (BIO_MAX_PAGES <<  SECTOR_SHIFT));
+		if (!nr_sectors) {
+			printk(KERN_ERR "\n %s 2)nr_sectors: %d count: %d \n", __func__, nr_sectors, count);
+			dump_stack();
+			BUG_ON(!nr_sectors);
+		}
+		count++;
 		subbio_ctx = NULL;
 		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
 		if (!subbio_ctx) {
@@ -4506,9 +4482,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		if (s8 > ctx->free_sectors_in_wf){
 			//trace_printk("SPLITTING!!!!!!!! s8: %d ctx->free_sectors_in_wf: %d", s8, ctx->free_sectors_in_wf);
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
-			BUG_ON(!s8);
 			BUG_ON(s8 != ctx->free_sectors_in_wf);
-			BUG_ON(s8 > (BIO_MAX_PAGES <<  SECTOR_SHIFT));
 			move_write_frontier(ctx, s8);
 		/*-------------------------------*/
 			spin_unlock(&ctx->lock);
@@ -4533,7 +4507,6 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 			subbio_ctx->extent.len = nr_sectors;
 		}
     		
-		BUG_ON(subbio_ctx->extent.len > (BIO_MAX_PAGES <<  SECTOR_SHIFT));
 		/* Next we fetch the LBA that our DM got */
 		kref_get(&bioctx->ref);
 		kref_get(&ctx->ongoing_iocount);
@@ -5270,8 +5243,10 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 				ctx->min_mtime = entry->mtime;
 			if (ctx->max_mtime < entry->mtime)
 				ctx->max_mtime = entry->mtime;
+			/*
 			if (!update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__))
 				panic("Memory error, write a memory shrinker!");
+			*/
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
@@ -5732,16 +5707,14 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	atomic_set(&ctx->revmap_entry_nr, 0);
 	atomic_set(&ctx->revmap_sector_nr, 0);
 	atomic_set(&ctx->sit_ref, 0);
+	atomic_set(&ctx->tm_flush_count, 0);
+	atomic_set(&ctx->sit_flush_count, 0);
 	ctx->target = 0;
-	//trace_printk("\n About to read metadata! 1 \n");
-	//trace_printk("\n About to read metadata! 2 \n");
-	//trace_printk("\n About to read metadata! 3 \n");
 	atomic_set(&ctx->nr_pending_writes, 0);
 	atomic_set(&ctx->nr_revmap_flushes, 0);
 	atomic_set(&ctx->nr_tm_writes, 0);
 	atomic_set(&ctx->nr_sit_pages, 0);
 	atomic_set(&ctx->nr_tm_pages, 0);
-	//trace_printk("\n About to read metadata! 4 \n");
 	init_waitqueue_head(&ctx->refq);
 	init_waitqueue_head(&ctx->rev_blk_flushq);
 	init_waitqueue_head(&ctx->tm_writes_q);

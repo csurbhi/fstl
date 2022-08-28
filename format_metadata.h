@@ -116,12 +116,12 @@ struct lsdm_seg_entry {
 } __attribute__((packed));
 
 
-/* In the worst case, we spend 80 bytes per block. There are 65536
+/* In the worst case, we spend 20 bytes per block. There are 65536
  * such blocks. So we need 65536 such entries */
 struct lsdm_revmap_extent {
 	__le64 lba;
 	__le64 pba;
-	__le16 len; /* At a maximum there are 512 pages in a bio */
+	__le32 len; /* At a maximum there are 512 pages in a bio */
 }__attribute__((packed));
 
 
@@ -133,9 +133,8 @@ struct lsdm_revmap_extent {
  */
 
 #define BLK_SIZE			4096
-//#define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct lsdm_revmap_extent)
-#define NR_EXT_ENTRIES_PER_SEC		6
-//#define NR_EXT_ENTRIES_PER_BLK 		NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK
+#define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct lsdm_revmap_extent)
+#define NR_EXT_ENTRIES_PER_BLK 		NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK
 #define NR_SECTORS_PER_BLK		8	/* 4096 / 512 */
 #define NR_EXT_ENTRIES_PER_BLK 		48
 #define MAX_EXTENTS_PER_ZONE		65536
