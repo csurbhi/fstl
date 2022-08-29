@@ -48,6 +48,8 @@
 #define BLK_SZ 4096
 #define NR_BLKS_PER_ZONE (ZONE_SZ /BLK_SZ)
 
+#define NR_EXT_ENTRIES_PER_SEC          25
+#define NR_EXT_ENTRIES_PER_BLK          200
 long nrpages;
 /* TODO:
  * 1) Convert the STL in a block mapped STL rather
@@ -882,10 +884,12 @@ static inline void * lsdm_malloc(size_t size, gfp_t flags)
 }
 
 void flush_translation_blocks(struct ctx *ctx);
+void flush_sit(struct ctx *ctx);
 
-#define DEF_FLUSH_TIME 5000 /* (milliseconds) */
+#define DEF_FLUSH_TIME 50000 /* (milliseconds) */
 
 void do_checkpoint(struct ctx *ctx);
+void remove_translation_pages(struct ctx *ctx);
 
 static int flush_thread_fn(void * data)
 {
@@ -894,6 +898,7 @@ static int flush_thread_fn(void * data)
 	struct lsdm_flush_thread *flush_th = ctx->flush_th;
 	unsigned int wait_ms;
 	wait_queue_head_t *wq = &flush_th->flush_waitq;
+	int flag = 0;
 
 	wait_ms = flush_th->sleep_time; 
 	printk(KERN_ERR "\n %s executing! ", __func__);
@@ -907,11 +912,29 @@ static int flush_thread_fn(void * data)
                         continue;
                 }
 		flush_workqueue(ctx->writes_wq);
-		if (atomic_read(&ctx->nr_tm_pages)) {
-			wait_ms = 5000;
+		flush_workqueue(ctx->tm_wq);
+	
+		if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_FLUSH_PAGES) {
+			flush_translation_blocks(ctx);
+			atomic_set(&ctx->tm_flush_count, 0);
+			flag = 1;
+		}
+		
+		if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
+			atomic_set(&ctx->sit_flush_count, 0);
+			flush_sit(ctx);
+			flag = 1;
+		}
+		if (atomic_read(&ctx->nr_tm_pages) >= MAX_TM_PAGES) {
+			remove_translation_pages(ctx);
+			atomic_set(&ctx->nr_tm_pages, 0);
+		}
+		if (flag) {
+			wait_ms = DEF_FLUSH_TIME;
 			do_checkpoint(ctx);
+			flag = 0;
 		} else {
-			wait_ms = 500000;
+			wait_ms = DEF_FLUSH_TIME * 10;
 		}
 	} while(!kthread_should_stop());
 	return 0;
@@ -924,7 +947,7 @@ int lsdm_flush_thread_start(struct ctx * ctx)
 	dev_t dev = ctx->dev->bdev->bd_dev;
 	int err=0;
 
-	printk(KERN_ERR "\n About to start GC thread");
+	printk(KERN_ERR "\n About to start flush thread");
 
 	flush_th = lsdm_malloc(sizeof(struct lsdm_flush_thread), GFP_KERNEL);
 	if (!flush_th) {
@@ -1509,7 +1532,6 @@ prep:
 }
 
 
-void flush_sit(struct ctx *ctx);
 struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba, char * caller);
 
 int verify_gc_zone(struct ctx *ctx, int zonenr, sector_t pba)
@@ -1573,8 +1595,8 @@ static int lsdm_gc(struct ctx *ctx, char gc_mode, int err_flag)
 	__kernel_ulong_t freeram, available;
 		
 	//printk(KERN_ERR "\a %s GC thread polling after every few seconds:", __func__);
-	
 	flush_workqueue(ctx->tm_wq);
+	
 	/* Take a semaphore lock so that no two gc instances are
 	 * started in parallel.
 	 */
@@ -1820,8 +1842,7 @@ static int gc_thread_fn(void * data)
 	unsigned int wait_ms;
 	int mode;
 
-	//wait_ms = gc_th->min_sleep_time * 10;
-	wait_ms = gc_th->min_sleep_time; 
+	wait_ms = gc_th->min_sleep_time * 10;
 	mutex_init(&ctx->gc_lock);
 	printk(KERN_ERR "\n %s executing! ", __func__);
 	set_freezable();
@@ -1875,6 +1896,7 @@ static int gc_thread_fn(void * data)
 		//}
 		/* Doing this for now! ret part */
 		lsdm_gc(ctx, BG_GC, 0);
+
 	} while(!kthread_should_stop());
 	return 0;
 }
@@ -2652,7 +2674,7 @@ void flush_checkpoint(struct ctx *ctx)
 	/* Not doing this right now as the conventional zones are too little.
 	 * we need to log structurize the metadata
 	 */
-	//submit_bio_wait(bio);
+	submit_bio_wait(bio);
 	/* we do not free ckpt page, because we need it. we free it in
 	 * dtr()
 	 */
@@ -2827,7 +2849,7 @@ void update_checkpoint(struct ctx *ctx)
 	//trace_printk("\n %s, ckpt->hot_frontier_pba: %llu version: %lld", __func__, ckpt->hot_frontier_pba, ckpt->version);
 	ckpt->warm_gc_frontier_pba = ctx->warm_gc_wf_pba;
 	ckpt->nr_free_zones = ctx->nr_freezones;
-	//printk(KERN_ERR "\n %s ckpt->nr_free_zones: %llu, ctx->nr_freezones: %llu", __func__, ckpt->nr_free_zones, ctx->nr_freezones);
+	printk(KERN_ERR "\n %s ckpt->nr_free_zones: %llu, ctx->nr_freezones: %llu", __func__, ckpt->nr_free_zones, ctx->nr_freezones);
 	ckpt->elapsed_time = get_elapsed_time(ctx);
 	ckpt->clean = 1;
 	return;
@@ -3008,7 +3030,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		ptr->mtime = get_elapsed_time(ctx);
 		if (ctx->max_mtime < ptr->mtime)
 			ctx->max_mtime = ptr->mtime;
-		//update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
+		update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
 		//printk(KERN_ERR "\n %s done! zone: %u vblocks: %d pba: %lu, index: %d , ptr: %p", __func__, zonenr, ptr->vblocks, pba, index, ptr);
 	}
 	if (!ptr->vblocks) {
@@ -3976,18 +3998,6 @@ void process_tm_entries(struct work_struct * w)
 	nrpages--;
 	atomic_dec(&ctx->nr_tm_writes);
 	wake_up(&ctx->tm_writes_q);
-	
-	if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_FLUSH_PAGES) {
-		flush_translation_blocks(ctx);
-		atomic_set(&ctx->tm_flush_count, 0);
-	}
-	
-
-	if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
-		atomic_set(&ctx->sit_flush_count, 0);
-		flush_sit(ctx);
-	}
-
 }
 
 void revmap_blk_flushed(struct bio *bio)
@@ -4208,8 +4218,9 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 	 */
 	entry_nr = atomic_read(&ctx->revmap_entry_nr);
 	sector_nr = atomic_read(&ctx->revmap_sector_nr);
+	BUG_ON(entry_nr > NR_EXT_ENTRIES_PER_SEC);
+	BUG_ON(sector_nr > NR_SECTORS_PER_BLK);
 	atomic_inc(&ctx->revmap_entry_nr);
-	//printk(KERN_ERR "\n ******* %s entry_nr: %d, sector_nr: %d ctx->revmap_pba: %d ", __func__, entry_nr, sector_nr, ctx->revmap_pba);
 	if ((entry_nr > 0) || (sector_nr > 0)) {
 		page = ctx->revmap_page;
 		if (NR_EXT_ENTRIES_PER_SEC == (entry_nr + 1)) {
@@ -5056,8 +5067,6 @@ struct gc_zone_node * add_zonenr_gc_zone_tree(struct ctx *ctx, unsigned int zone
 			link = &(*link)->rb_left;
 		}
 	}
-	printk(KERN_ERR "\n %s Adding zone: %d to the gc zone tree, nrblks: %d! ", __func__, zonenr, nrblks);
-
 	znew = kmem_cache_alloc(ctx->gc_zone_node_cache, GFP_KERNEL);
 	if (!znew) {
 		printk(KERN_ERR "\n %s could not allocate memory for gc_zone_node \n", __func__);
@@ -5243,10 +5252,8 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 				ctx->min_mtime = entry->mtime;
 			if (ctx->max_mtime < entry->mtime)
 				ctx->max_mtime = entry->mtime;
-			/*
 			if (!update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__))
 				panic("Memory error, write a memory shrinker!");
-			*/
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
@@ -5804,7 +5811,6 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	if (ret) {
 		goto free_metadata_pages;
 	}
-	/*
 	ret = lsdm_flush_thread_start(ctx);
 	if (ret) {
 		goto stop_gc_thread;
@@ -5865,7 +5871,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * and flushed as well.
 	 */
 	lsdm_gc_thread_stop(ctx);
-	//lsdm_flush_thread_stop(ctx);
+	lsdm_flush_thread_stop(ctx);
 	sync_blockdev(ctx->dev->bdev);
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
 	flush_workqueue(ctx->tm_wq);

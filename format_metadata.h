@@ -132,10 +132,10 @@ struct lsdm_revmap_extent {
  * 0 as there are 0 entries recorded for previous zone
  */
 
-#define BLK_SIZE			4096
-#define NR_EXT_ENTRIES_PER_SEC		SECTOR_SIZE/sizeof(struct lsdm_revmap_extent)
-#define NR_EXT_ENTRIES_PER_BLK 		NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK
 #define NR_SECTORS_PER_BLK		8	/* 4096 / 512 */
+#define BLK_SIZE			4096
+#define NR_EXT_ENTRIES_PER_SEC		((SECTOR_SIZE - 4)/(sizeof(struct lsdm_revmap_extent)))
+#define NR_EXT_ENTRIES_PER_BLK 		(NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK)
 #define NR_EXT_ENTRIES_PER_BLK 		48
 #define MAX_EXTENTS_PER_ZONE		65536
 struct lsdm_revmap_entry_sector{
@@ -160,7 +160,7 @@ struct lsdm_ckpt {
 	__le32 nr_invalid_zones;	/* zones that have errors in them */
 	__le64 hot_frontier_pba;
 	__le64 warm_gc_frontier_pba;
-	__le64 nr_free_zones;
+	__le32 nr_free_zones;
 	__le64 elapsed_time;		/* records the time elapsed since all the mounts */
 	__u8 clean;			/* becomes 0 in ctr and 1 in dtr. Used to identify crash */
 	__le64 crc;
