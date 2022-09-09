@@ -43,6 +43,7 @@
 
 #include "metadata.h"
 #define DM_MSG_PREFIX "lsdm"
+#define BIO_MAX_PAGES 256
 
 #define ZONE_SZ (256 * 1024 * 1024)
 #define BLK_SZ 4096
@@ -50,7 +51,37 @@
 
 #define NR_EXT_ENTRIES_PER_SEC          25
 #define NR_EXT_ENTRIES_PER_BLK          200
+
+extern int blkdev_zone_mgmt(struct block_device *bdev, enum req_opf op,
+                            sector_t sectors, sector_t nr_sectors,
+                            gfp_t gfp_mask);
+
 long nrpages;
+
+
+static inline void mykref_init(struct mykref *kref)
+{
+	refcount_set(&kref->refcount, 1);
+}
+
+static inline void mykref_get(struct mykref *kref)
+{
+        refcount_inc(&kref->refcount);
+}
+
+/* At the end we call refcount_dec */
+static inline int mykref_put(struct mykref *kref, void (*callback)(struct mykref *kref))
+{
+	return 0;
+
+	if (!refcount_dec_not_one(&kref->refcount)) {
+		/* refcount is one */
+                callback(kref);
+                return 1;
+        }
+        return 0;
+}
+
 /* TODO:
  * 1) Convert the STL in a block mapped STL rather
  k than a sector mapped STL
@@ -525,7 +556,6 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
 	if (!r_new) {
 		printk(KERN_ERR "\n Could not allocate memory!");
 		BUG();
-		return;
 	}
 	RB_CLEAR_NODE(&r_new->rb);
 	extent->ptr_to_rev = r_new;
@@ -1967,7 +1997,7 @@ void invoke_gc(unsigned long ptr)
 }
 
 
-void lsdm_ioidle(struct kref *kref)
+void lsdm_ioidle(struct mykref *kref)
 {
 	struct ctx *ctx;
 
@@ -2002,7 +2032,7 @@ void lsdm_subread_done(struct bio *clone)
 	struct bio * bio = read_ctx->bio;
 
 	bio_endio(bio);
-	kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
+	mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 	bio_put(clone);
 	kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
 }
@@ -2055,8 +2085,8 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	read_ctx->bio = bio;
 
 	atomic_set(&ctx->ioidle, 0);
-	kref_get(&ctx->ongoing_iocount);
-	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
+	mykref_get(&ctx->ongoing_iocount);
+	clone = bio_clone_fast(bio, GFP_KERNEL, &fs_bio_set);
 	if (!clone) {
 		printk(KERN_ERR "\n %s could not allocate memory to clone", __func__);
 		kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
@@ -2072,6 +2102,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	lba = clone->bi_iter.bi_sector;
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
+		printk(KERN_ERR "\n %s lba: %llu nrsectors: %d", __func__, lba, nr_sectors);
 		e = lsdm_rb_geq(ctx, lba, print);
 
 		/* case of no overlap, technically, e->lba + e->len cannot be less than lba
@@ -2089,7 +2120,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 */
 			nr_sectors = e->lba - lba;
 			//printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
-			split = bio_split(clone, nr_sectors, GFP_NOIO, NULL);
+			split = bio_split(clone, nr_sectors, GFP_NOIO, &fs_bio_set);
 			if (!split) {
 				printk(KERN_ERR "\n Could not split the clone! ERR ");
 				bio->bi_status = -ENOMEM;
@@ -2131,7 +2162,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			break;
 		}
 		/* else e is smaller than bio */
-		split = bio_split(clone, overlap, GFP_NOIO, NULL);
+		split = bio_split(clone, overlap, GFP_NOIO, &fs_bio_set);
 		if (!split) {
 			printk(KERN_INFO "\n Could not split the clone! ERR ");
 			bio->bi_status = -ENOMEM;
@@ -3040,7 +3071,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		mark_zone_free(ctx , zonenr);
 		/* we need to reset the  zone that we are about to use */
 		sector_pba = get_first_pba_for_zone(ctx, zonenr);
-		ret = blkdev_reset_zones(ctx->dev->bdev, get_first_pba_for_zone(ctx, zonenr), ctx->sb->nr_lbas_in_zone, GFP_NOIO);
+		ret = blkdev_zone_mgmt(ctx->dev->bdev, REQ_OP_ZONE_RESET, get_first_pba_for_zone(ctx, zonenr), ctx->sb->nr_lbas_in_zone, GFP_NOIO);
 		if (ret ) {
 			printk(KERN_ERR "\n Failed to reset zonenr: %d, retvalue: %d", zonenr, ret);
 		}
@@ -4304,7 +4335,7 @@ void write_done(struct kref *kref)
 
 	ctx = lsdm_bioctx->ctx;
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
-	kref_put(&ctx->ongoing_iocount, lsdm_ioidle);
+	mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 }
 
 
@@ -4438,7 +4469,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	}
 	
 	bio->bi_status = BLK_STS_OK;
-	clone = bio_clone_fast(bio, GFP_KERNEL, NULL);
+	clone = bio_clone_fast(bio, GFP_KERNEL, &fs_bio_set);
 	if (!clone) {
 		//trace_printk("\n Insufficient memory!");
 		bio->bi_status = BLK_STS_RESOURCE;
@@ -4498,7 +4529,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		/*-------------------------------*/
 			spin_unlock(&ctx->lock);
 			/* We cannot call bio_split with spinlock held! */
-			if (!(split = bio_split(clone, s8, GFP_NOIO, NULL))){
+			if (!(split = bio_split(clone, s8, GFP_NOIO, &fs_bio_set))){
 				//trace_printk("\n failed at bio_split! ");
 				kmem_cache_free(ctx->subbio_ctx_cache, subbio_ctx);
 				goto fail;
@@ -4520,7 +4551,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
     		
 		/* Next we fetch the LBA that our DM got */
 		kref_get(&bioctx->ref);
-		kref_get(&ctx->ongoing_iocount);
+		mykref_get(&ctx->ongoing_iocount);
 		atomic_inc(&ctx->nr_writes);
 		subbio_ctx->extent.lba = lba;
 		lba = lba + subbio_ctx->extent.len;
@@ -5681,11 +5712,11 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 
 	q = bdev_get_queue(ctx->dev->bdev);
 	printk(KERN_ERR "\n number of sectors in a zone: %llu", blk_queue_zone_sectors(q));
-	printk(KERN_ERR "\n number of zones in device: %llu", blkdev_nr_zones(ctx->dev->bdev));
+	printk(KERN_ERR "\n number of zones in device: %llu", blkdev_nr_zones(ctx->dev->bdev->bd_disk));
 
 
-	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", ctx->dev->bdev->bd_part->start_sect);
-	printk(KERN_INFO "\n sc->dev->bdev->bd_part->nr_sects: %llu", ctx->dev->bdev->bd_part->nr_sects);
+	printk(KERN_INFO "\n sc->dev->bdev->bd_part->start_sect: %llu", ctx->dev->bdev->bd_start_sect);
+	//printk(KERN_INFO "\n sc->dev->bdev->bd_part->nr_sects: %llu", ctx->dev->bdev->bd_part->nr_sects);
 
 
 	disk_size = i_size_read(ctx->dev->bdev->bd_inode);
@@ -5769,8 +5800,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 		goto destroy_cache;
 	}
 
-	kref_init(&ctx->ongoing_iocount);
-	kref_put(&ctx->ongoing_iocount, no_op);
+	mykref_init(&ctx->ongoing_iocount);
 	//trace_printk("\n About to read metadata! 5 ! \n");
 
     	ret = read_metadata(ctx);
