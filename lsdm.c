@@ -2040,30 +2040,34 @@ void lsdm_subread_done(struct bio *clone)
 	unsigned long diff = 0;
 
 	lba = round_down(lba, NR_SECTORS_IN_BLK);
-	if (lba != read_ctx->lba) {
-		/* Top end of the first page is not requested by the read */
-		diff = (read_ctx->lba - lba) << SECTOR_SHIFT;
+	/* Top part of the first page is not requested by the read */
+	diff = (read_ctx->lba - lba) << SECTOR_SHIFT;
+	if (!diff) {
 		bio_for_each_segment(bv, bio, iter) {
 			data = kmap_atomic(bv.bv_page);
 			data = data + bv.bv_offset;
+			BUG_ON(diff > 4096);
 			memset(data, 0, diff);
-			flush_dcache_page(bv.bv_page);
 			kunmap_atomic(data);
 			break;
 		}
-	} 
-	if ((read_ctx->lba + nrsectors) != (lba + s8)) {
-		/* Bottom end of the last page is not requested by the read */
-		diff = ((lba + s8) - (read_ctx->lba + nrsectors)) << SECTOR_SHIFT;
-		/* lba matches. We need to add zeroes at the end */
+	}
+
+	/* Bottom end of the last page is not requested by the read
+	 * lba matches. We need to add zeroes at the end
+	 */
+	diff = ((lba + s8) - (read_ctx->lba + nrsectors)) << SECTOR_SHIFT;
+	if (!diff) {
+	//if ((read_ctx->lba + nrsectors) != (lba + s8)) {
 		bio_for_each_segment(bv, bio, iter) {
 			last_bv = bv;
 		}
 		data = kmap_atomic(last_bv.bv_page);
 		data = data + last_bv.bv_offset;
 		data = data + ((read_ctx->lba - lba + nrsectors) << SECTOR_SHIFT);
-		memset(data, 0, diff);
-		flush_dcache_page(last_bv.bv_page);
+		BUG_ON((read_ctx->lba - lba + nrsectors) != 0);
+		BUG_ON(diff > 4096);
+		//memset(data, 0, diff);
 		data = data - ((read_ctx->lba - lba + nrsectors) << SECTOR_SHIFT);
 		kunmap_atomic(data);
 	}
@@ -2139,8 +2143,10 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	read_ctx->lba = lba;
 	lba = round_down(lba, NR_SECTORS_IN_BLK);
 	nr_sectors = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+	printk(KERN_ERR "\n %s lba: %llu nrsectors: %d bio::lba: %llu, bio::len: %d", __func__, lba, nr_sectors, read_ctx->lba, read_ctx->nrsectors);
+	clone->bi_iter.bi_size = nr_sectors << LOG_SECTOR_SIZE;
 	while(split != clone) {
-		printk(KERN_ERR "\n %s lba: %llu nrsectors: %d", __func__, lba, nr_sectors);
+		printk(KERN_ERR "\n %s -> lba: %llu nrsectors: %d", __func__, lba, nr_sectors);
 		e = lsdm_rb_geq(ctx, lba, print);
 
 		/* case of no overlap, technically, e->lba + e->len cannot be less than lba
