@@ -2027,10 +2027,46 @@ void no_op(struct kref *kref) { }
 
 void lsdm_subread_done(struct bio *clone)
 {
+	unsigned long flags;
+	struct bio_vec bv, last_bv;
+	struct bvec_iter iter;
+	char * data = NULL;
 	struct app_read_ctx *read_ctx = clone->bi_private;
 	struct ctx *ctx = read_ctx->ctx;
 	struct bio * bio = read_ctx->bio;
+	sector_t lba = 0;
+	sector_t nrsectors = read_ctx->nrsectors;
+	sector_t s8 = round_up(nrsectors, NR_SECTORS_IN_BLK);
+	unsigned long diff = 0;
 
+	lba = round_down(lba, NR_SECTORS_IN_BLK);
+	if (lba != read_ctx->lba) {
+		/* Top end of the first page is not requested by the read */
+		diff = (read_ctx->lba - lba) << SECTOR_SHIFT;
+		bio_for_each_segment(bv, bio, iter) {
+			data = kmap_atomic(bv.bv_page);
+			data = data + bv.bv_offset;
+			memset(data, 0, diff);
+			flush_dcache_page(bv.bv_page);
+			kunmap_atomic(data);
+			break;
+		}
+	} 
+	if ((read_ctx->lba + nrsectors) != (lba + s8)) {
+		/* Bottom end of the last page is not requested by the read */
+		diff = ((lba + s8) - (read_ctx->lba + nrsectors)) << SECTOR_SHIFT;
+		/* lba matches. We need to add zeroes at the end */
+		bio_for_each_segment(bv, bio, iter) {
+			last_bv = bv;
+		}
+		data = kmap_atomic(last_bv.bv_page);
+		data = data + last_bv.bv_offset;
+		data = data + ((read_ctx->lba - lba + nrsectors) << SECTOR_SHIFT);
+		memset(data, 0, diff);
+		flush_dcache_page(last_bv.bv_page);
+		data = data - ((read_ctx->lba - lba + nrsectors) << SECTOR_SHIFT);
+		kunmap_atomic(data);
+	}
 	bio_endio(bio);
 	mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 	bio_put(clone);
@@ -2098,10 +2134,12 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	bio_set_dev(clone, ctx->dev->bdev);
 	nr_sectors = bio_sectors(clone);
 	split = NULL;
-
+	read_ctx->nrsectors = nr_sectors;
 	lba = clone->bi_iter.bi_sector;
+	read_ctx->lba = lba;
+	lba = round_down(lba, NR_SECTORS_IN_BLK);
+	nr_sectors = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 	while(split != clone) {
-		nr_sectors = bio_sectors(clone);
 		printk(KERN_ERR "\n %s lba: %llu nrsectors: %d", __func__, lba, nr_sectors);
 		e = lsdm_rb_geq(ctx, lba, print);
 
@@ -2158,7 +2196,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			bio_set_dev(clone, ctx->dev->bdev);
 			//printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(clone), e->lba, e->pba, e->len);
 			//printk(KERN_ERR "\n %s 3* {lba: %llu, pba: %llu, len: %llu}",  __func__, lba, pba, e->len);
-			submit_bio(clone);
+			submit_bio_noacct(clone);
 			break;
 		}
 		/* else e is smaller than bio */
@@ -2174,8 +2212,9 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		bio_chain(split, clone);
 		split->bi_iter.bi_sector = pba;
 		bio_set_dev(split, ctx->dev->bdev);
-		submit_bio(split);
+		submit_bio_noacct(split);
 		lba = lba + overlap;
+		nr_sectors = bio_sectors(clone);
 		/* Since e was smaller, we want to search for the next e */
 	}
 	//printk(KERN_INFO "\n %s end", __func__);
@@ -4567,7 +4606,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		split->bi_private = subbio_ctx;
 		split->bi_end_io = lsdm_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
-		submit_bio(split);
+		submit_bio_noacct(split);
 		//printk(KERN_ERR "\n %s lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	} while (split != clone);
 

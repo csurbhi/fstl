@@ -828,7 +828,8 @@ int main()
 	long cmr;
 
 	//char * blkdev = "/dev/vdb";
-	char * blkdev = "/dev/sdb";
+	//char * blkdev = "/dev/sdb";
+	char * blkdev = "/dev/sda";
 	int fd = open_disk(blkdev);
 	cmr = reset_shingled_zones(fd);
 	sb1 = write_sb(fd, 0, cmr);

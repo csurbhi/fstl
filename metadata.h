@@ -48,6 +48,8 @@ struct gc_read_ctx {
 struct app_read_ctx {
 	struct ctx *ctx;
 	struct bio *bio;
+	sector_t lba;
+	sector_t nrsectors;
 };
 
 struct metadata_read_ctx {
