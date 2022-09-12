@@ -13,11 +13,11 @@
 #include <sys/ioctl.h>
 
 
-#define NR_ZONES 2
+#define NR_ZONES 1
 #define NR_BLKS_IN_ZONE 65536
-#define BLKSZ 4096
+#define BLKSZ 64
 
-char * fname = "/mnt/test";
+char * fname = "/dev/dm-0";
 
 
 int report_zone(unsigned long zonenr)

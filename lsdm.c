@@ -2027,50 +2027,11 @@ void no_op(struct kref *kref) { }
 
 void lsdm_subread_done(struct bio *clone)
 {
-	unsigned long flags;
-	struct bio_vec bv, last_bv;
-	struct bvec_iter iter;
-	char * data = NULL;
 	struct app_read_ctx *read_ctx = clone->bi_private;
 	struct ctx *ctx = read_ctx->ctx;
 	struct bio * bio = read_ctx->bio;
-	sector_t lba = 0;
-	sector_t nrsectors = read_ctx->nrsectors;
-	sector_t s8 = round_up(nrsectors, NR_SECTORS_IN_BLK);
-	unsigned long diff = 0;
 
-	lba = round_down(lba, NR_SECTORS_IN_BLK);
-	/* Top part of the first page is not requested by the read */
-	diff = (read_ctx->lba - lba) << SECTOR_SHIFT;
-	if (!diff) {
-		bio_for_each_segment(bv, bio, iter) {
-			data = kmap_atomic(bv.bv_page);
-			data = data + bv.bv_offset;
-			BUG_ON(diff > 4096);
-			memset(data, 0, diff);
-			kunmap_atomic(data);
-			break;
-		}
-	}
-
-	/* Bottom end of the last page is not requested by the read
-	 * lba matches. We need to add zeroes at the end
-	 */
-	diff = ((lba + s8) - (read_ctx->lba + nrsectors)) << SECTOR_SHIFT;
-	if (!diff) {
-	//if ((read_ctx->lba + nrsectors) != (lba + s8)) {
-		bio_for_each_segment(bv, bio, iter) {
-			last_bv = bv;
-		}
-		data = kmap_atomic(last_bv.bv_page);
-		data = data + last_bv.bv_offset;
-		data = data + ((read_ctx->lba - lba + nrsectors) << SECTOR_SHIFT);
-		BUG_ON((read_ctx->lba - lba + nrsectors) != 0);
-		BUG_ON(diff > 4096);
-		//memset(data, 0, diff);
-		data = data - ((read_ctx->lba - lba + nrsectors) << SECTOR_SHIFT);
-		kunmap_atomic(data);
-	}
+	printk(KERN_ERR "\n %s read lba: %llu ! \n", __func__, read_ctx->lba);
 	bio_endio(bio);
 	mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 	bio_put(clone);
@@ -2093,6 +2054,96 @@ static int zero_fill_clone(struct ctx *ctx, struct app_read_ctx *read_ctx, struc
 	return 0;
 }
 
+void complete_small_reads(struct bio *clone)
+{
+	struct bio_vec bv, last_bv;
+	struct bvec_iter iter;
+	char * todata = NULL, *fromdata = NULL;
+	struct app_read_ctx *readctx = clone->bi_private;
+	struct ctx *ctx = readctx->ctx;
+	struct bio * bio = readctx->bio;
+	struct page * page;
+	sector_t lba = round_down(readctx->lba, NR_SECTORS_IN_BLK);
+	sector_t nrsectors = readctx->nrsectors;
+	unsigned long diff = 0;
+	int i = 0;
+
+	if (clone->bi_status != BLK_STS_OK) {
+		readctx->clone->bi_status = clone->bi_status;
+		goto free;
+	}
+
+	printk(KERN_ERR "\n %s smaller bio's address: %p larger bio's address: %p", __func__, clone, readctx->clone);
+	printk(KERN_ERR "\n readctx->lba: %llu, lba: %llu NR_SECTORS_IN_BLK: %d \n", readctx->lba, lba, NR_SECTORS_IN_BLK);
+	if ((readctx->lba - lba) > NR_SECTORS_IN_BLK) {
+		goto free;
+		//BUG();
+	}
+	diff = (readctx->lba - lba) << LOG_SECTOR_SIZE;
+	printk(KERN_ERR "\n %s 1. diff: %llu nrsectors: %d \n", __func__, diff, nrsectors);
+	bio_for_each_segment(bv, readctx->clone, iter) {
+		todata = page_address(bv.bv_page);
+		todata = todata + bv.bv_offset;
+		break;
+	}
+	fromdata = readctx->data;
+	memcpy(todata, fromdata + diff, (nrsectors << LOG_SECTOR_SIZE));
+	printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %d  bytes: %d \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
+free:
+	bio_endio(readctx->clone);
+	bio_free_pages(clone);
+	bio_put(clone);
+}
+
+
+struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_read_ctx * readctx)
+{
+	struct page *page; 
+	struct bio * bio;
+	loff_t disk_size;
+	struct bio_vec bv, last_bv;
+	struct bvec_iter iter;
+	char * data;
+
+	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
+	if (!page )
+		return NULL;
+
+	bio = bio_alloc(GFP_KERNEL, 1);
+	if (!bio) {
+		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
+		return NULL;
+	}
+
+	printk(KERN_ERR "\n %s smaller bio's address: %p larger bio address: %p", __func__, bio, readctx->clone);
+	
+	/* bio_add_page sets the bi_size for the bio */
+	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
+		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
+		bio_put(bio);
+		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
+		return NULL;
+	}
+	bio_for_each_segment(bv, bio, iter) {
+		page = bv.bv_page;
+		data = page_address(page);
+		data = data + bv.bv_offset;
+		printk(KERN_ERR "\n %s (new small bio) data: %p ", __func__, data);
+		readctx->data = data;
+	}
+	bio_set_op_attrs(bio, REQ_OP_READ, 0);
+	bio_set_dev(bio, ctx->dev->bdev);
+	bio->bi_iter.bi_sector = pba;
+	bio->bi_end_io = complete_small_reads;
+	bio->bi_private = readctx;
+	return bio;
+}
+
+
 /*
  * This is an asynchronous read, i.e we submit the request
  * here but do not wait for the request to complete.
@@ -2107,7 +2158,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	struct bio *split = NULL;
 	sector_t lba, pba;
 	struct extent *e;
-	unsigned nr_sectors, overlap, diff;
+	unsigned nr_sectors, overlap, diff, s8, zerolen;
 
 	struct app_read_ctx *read_ctx;
 	struct bio *clone;
@@ -2135,18 +2186,14 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		return -ENOMEM;
 	}
 
+	clone->bi_private = read_ctx;
 	bio_set_dev(clone, ctx->dev->bdev);
-	nr_sectors = bio_sectors(clone);
 	split = NULL;
-	read_ctx->nrsectors = nr_sectors;
-	lba = clone->bi_iter.bi_sector;
-	read_ctx->lba = lba;
-	lba = round_down(lba, NR_SECTORS_IN_BLK);
-	nr_sectors = round_up(nr_sectors, NR_SECTORS_IN_BLK);
-	printk(KERN_ERR "\n %s lba: %llu nrsectors: %d bio::lba: %llu, bio::len: %d", __func__, lba, nr_sectors, read_ctx->lba, read_ctx->nrsectors);
-	clone->bi_iter.bi_size = nr_sectors << LOG_SECTOR_SIZE;
 	while(split != clone) {
-		printk(KERN_ERR "\n %s -> lba: %llu nrsectors: %d", __func__, lba, nr_sectors);
+		nr_sectors = bio_sectors(clone);
+		lba = clone->bi_iter.bi_sector;
+		lba = round_down(lba, NR_SECTORS_IN_BLK);
+		printk(KERN_ERR "\n %s -> lba: %llu bio::lba: %llu bio::nrsectors: %d", __func__, lba, clone->bi_iter.bi_sector, nr_sectors);
 		e = lsdm_rb_geq(ctx, lba, print);
 
 		/* case of no overlap, technically, e->lba + e->len cannot be less than lba
@@ -2162,9 +2209,9 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		/*   		 [eeeeeeeeeeee]
 		 *	[---------bio------] 
 		 */
-			nr_sectors = e->lba - lba;
+			zerolen = e->lba - lba;
 			//printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
-			split = bio_split(clone, nr_sectors, GFP_NOIO, &fs_bio_set);
+			split = bio_split(clone, zerolen, GFP_NOIO, &fs_bio_set);
 			if (!split) {
 				printk(KERN_ERR "\n Could not split the clone! ERR ");
 				bio->bi_status = -ENOMEM;
@@ -2178,7 +2225,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			/* bio is front filled with zeroes, but we
 			 * need to compare 'clone' now with the same e
 			 */
-			lba = lba + nr_sectors;
+			lba = lba + zerolen;
 			nr_sectors = bio_sectors(clone);
 			/* we fall through as e->lba == lba now */
 		} 
@@ -2195,12 +2242,46 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 * splitting is required. Previous splits if any, are chained
 		 * to the last one as 'clone' is their parent.
 		 */
-			atomic_inc(&ctx->nr_reads);
-			clone->bi_private = read_ctx;
-			clone->bi_end_io = lsdm_subread_done;
-			clone->bi_iter.bi_sector = pba;
-			bio_set_dev(clone, ctx->dev->bdev);
-			//printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(clone), e->lba, e->pba, e->len);
+			s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+			if (nr_sectors == s8) {
+				atomic_inc(&ctx->nr_reads);
+				clone->bi_end_io = lsdm_subread_done;
+				read_ctx->nrsectors = s8;
+				read_ctx->lba = clone->bi_iter.bi_sector;
+				clone->bi_iter.bi_sector = pba;
+				bio_set_dev(clone, ctx->dev->bdev);
+				//printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(clone), e->lba, e->pba, e->len);
+			} else {
+				s8 = round_down(nr_sectors, NR_SECTORS_IN_BLK);
+				if (nr_sectors > s8) {
+					split = bio_split(clone, s8, GFP_NOIO, &fs_bio_set);
+					if (!split) {
+						printk(KERN_INFO "\n Could not split the clone! ERR ");
+						bio->bi_status = -ENOMEM;
+						clone->bi_status = BLK_STS_RESOURCE;
+						zero_fill_clone(ctx, read_ctx, clone);
+						return -ENOMEM;
+					}
+					bio_chain(split, clone);
+					split->bi_iter.bi_sector = pba;
+					bio_set_dev(split, ctx->dev->bdev);
+					submit_bio_noacct(split);
+					nr_sectors = bio_sectors(clone);
+					pba = pba + s8;
+					/* let it fall through to the next case */
+				}
+				if (nr_sectors < NR_SECTORS_IN_BLK) {
+					read_ctx->nrsectors = nr_sectors;
+					read_ctx->lba = clone->bi_iter.bi_sector;
+					printk(KERN_ERR "\n %s **** lba: %llu nrsectors: %d bio::lba: %llu, bio::len: %d clone: %p \n", __func__, lba, nr_sectors, read_ctx->lba, read_ctx->nrsectors, clone);
+					read_ctx->clone = clone;
+					clone = construct_smaller_bios(ctx, pba, read_ctx);
+					if (clone  == NULL) {
+						printk(KERN_ERR "\n %s could not construct smaller bio! \n");
+						bio_endio(read_ctx->clone);
+					}
+				}
+			}
 			//printk(KERN_ERR "\n %s 3* {lba: %llu, pba: %llu, len: %llu}",  __func__, lba, pba, e->len);
 			submit_bio_noacct(clone);
 			break;
@@ -4486,7 +4567,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	int count = 0;
 	struct tm_page *tm_page;
 
-	//printk(KERN_ERR "\n ******* Inside %s, requesting lba: %llu sectors: %d ", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
+	printk(KERN_ERR "\n ******* Inside %s, requesting lba: %llu sectors: %d ", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
 	/* Just debbuging purpose
 	bio->bi_status = BLK_STS_OK;
 	bio_advance(bio, bio->bi_iter.bi_size);
@@ -4579,7 +4660,6 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 				kmem_cache_free(ctx->subbio_ctx_cache, subbio_ctx);
 				goto fail;
 			}
-			subbio_ctx->extent.len = s8;
 			BUG_ON(!nr_sectors);
 		} 
 		else {
@@ -4587,13 +4667,8 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		/*-------------------------------*/
 			spin_unlock(&ctx->lock);
 			split = clone;
-			/* s8 might be bigger than nr_sectors. We want to 
-			 * maintain the exact length in the translation 
-			 * map, not padded entry.
-			 */
-			subbio_ctx->extent.len = nr_sectors;
 		}
-    		
+		subbio_ctx->extent.len = s8;
 		/* Next we fetch the LBA that our DM got */
 		kref_get(&bioctx->ref);
 		mykref_get(&ctx->ongoing_iocount);
@@ -5881,7 +5956,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	/*
 	 * Will work with timer based invocation later
 	 * init_timer(ctx->timer);
-	 */
+	 *
 	ret = lsdm_gc_thread_start(ctx);
 	if (ret) {
 		goto free_metadata_pages;
@@ -5890,7 +5965,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	if (ret) {
 		goto stop_gc_thread;
 	}
-
+	*/
 	/*
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
@@ -5899,7 +5974,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	return 0;
 /* failed case */
 stop_gc_thread:
-	lsdm_gc_thread_stop(ctx);
+	//lsdm_gc_thread_stop(ctx);
 free_metadata_pages:
 	printk(KERN_ERR "\n freeing metadata pages!");
 	if (ctx->revmap_bm) {
@@ -5945,8 +6020,8 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * tm entries, sit entries and we want all of them to be freed
 	 * and flushed as well.
 	 */
-	lsdm_gc_thread_stop(ctx);
-	lsdm_flush_thread_stop(ctx);
+	//lsdm_gc_thread_stop(ctx);
+	//lsdm_flush_thread_stop(ctx);
 	sync_blockdev(ctx->dev->bdev);
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
 	flush_workqueue(ctx->tm_wq);
