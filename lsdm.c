@@ -653,7 +653,7 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 
 	//printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	
-	BUG_ON(len == 0);
+	BUG_ON(len <= 0);
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
@@ -665,6 +665,7 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 	}
 	RB_CLEAR_NODE(&new->rb);
 	extent_init(new, lba, pba, len);
+	BUG_ON(new->len <= 0);
 
 	e = lsdm_rb_insert(ctx, new);
 	/* No overlapping extent found, inserted new */
@@ -696,7 +697,18 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 		diff =  lba - e->lba;
 		/* Initialize split before e->len changes!! */
 		extent_init(split, lba + len, e->pba + (diff + len), e->len - (diff + len));
+		lsdm_rb_remove(ctx, e);
 		e->len = diff;
+		BUG_ON(e->len <= 0);
+		if (lsdm_rb_insert(ctx, e)) {
+			printk(KERN_ERR"\n Corruption in case 1!! ");
+			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR"\n"); 
+			printk(KERN_ERR "\n RBTree corruption!!" );
+			BUG();
+
+		}
 		/* find e in revmap and reduce the size */
 
 		//printk("\n Case1: Modified: (new->lba: %llu, new->pba: %llu, new->len: %lu) ", e->lba, e->pba, e->len);
@@ -708,7 +720,7 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
 		}
-
+		BUG_ON(split->len <= 0);
 		if (lsdm_rb_insert(ctx, split)) {
 			printk(KERN_ERR"\n Corruption in case 1.2!! diff: %d", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
@@ -754,8 +766,18 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 	if ((lba > e->lba) && ((lba + len) >= (e->lba + e->len)) && (lba < (e->lba + e->len))) {
 		u64 temppba, newpba;
 		//printk(KERN_ERR "\n Case2, Modified e->len: %lu to %lu ", e->len, lba - e->lba);
-		diff = e->len - (lba - e->lba);
+		lsdm_rb_remove(ctx, e);
 		e->len = lba - e->lba;
+		BUG_ON(e->len <= 0);
+		if (lsdm_rb_insert(ctx, e)) {
+			printk(KERN_ERR"\n Corruption in case 2!! ");
+			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR"\n"); 
+			printk(KERN_ERR "\n RBTree corruption!!" );
+			BUG();
+
+		}
 		e = lsdm_rb_next(e);
 		/*  
 		 *  process the next overlapping segments!
@@ -779,9 +801,6 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 	 */
 	while ((e!=NULL) && (lba <= e->lba) && ((lba + len) >= (e->lba + e->len))) {
 		tmp = lsdm_rb_next(e);
-		diff = e->len;
-		pba = e->pba;
-		//printk("\n Case3, Removed: (e->lba: %llu, e->pba: %llu, e->len: %lu) ", e->lba, e->pba, e->len);
 		lsdm_rb_remove(ctx, e);
 		kmem_cache_free(ctx->extent_cache, e);
 		e = tmp;
@@ -812,13 +831,10 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 	 * --------------
 	 *
 	 */
-	if ((lba <= e->lba) && (lba + len > e->lba) && (lba + len < e->lba + e->len))  {
+	if ((lba <= e->lba) && ((lba + len) > e->lba) && ((lba + len) < (e->lba + e->len)))  {
 		diff = lba + len - e->lba;
-		//printk("\n Case4, Removed: (e->lba: %llu, e->pba: %llu, e->len: %lu) ", e->lba, e->pba, e->len);
+		//printk("\n Case4, Removing: (e->lba: %llu, e->pba: %llu, e->len: %lu) diff: %d", e->lba, e->pba, e->len, diff);
 		lsdm_rb_remove(ctx, e);
-		e->lba = e->lba + diff;
-		e->len = e->len - diff;
-		e->pba = e->pba + diff;
 		if (lsdm_rb_insert(ctx, new)) {
 			printk(KERN_ERR"\n Corruption in case 4.1!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
@@ -827,6 +843,12 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
 		}
+		//printk("\n Case4.1, Inserted: (new->lba: %llu, new->pba: %llu, new->len: %lu) ", new->lba, new->pba, new->len);
+		e->lba = lba + len;
+		e->len = e->len - diff;
+		e->pba = e->pba + diff;
+		//printk("\n Case4.2, Inserting: (e->lba: %llu, e->pba: %llu, e->len: %lu) ", e->lba, e->pba, e->len);
+		BUG_ON(e->len <= 0);
 		if (lsdm_rb_insert(ctx, e)) {
 			printk(KERN_ERR"\n Corruption in case 4.2!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
@@ -886,7 +908,7 @@ static inline void * lsdm_malloc(size_t size, gfp_t flags)
 void flush_translation_blocks(struct ctx *ctx);
 void flush_sit(struct ctx *ctx);
 
-#define DEF_FLUSH_TIME 50000 /* (milliseconds) */
+#define DEF_FLUSH_TIME 500000 /* (milliseconds) */
 
 void do_checkpoint(struct ctx *ctx);
 void remove_translation_pages(struct ctx *ctx);
@@ -1510,6 +1532,7 @@ prep:
 		if (!rev_e || (rev_e->pba > gc_extent->e.pba)) {
 			goto prep;
 		}
+		len = gc_extent->e.len;
 		ret = write_gc_extent(ctx, gc_extent);
 		//up_write(&ctx->metadata_update_lock);
 		if (ret) {
@@ -1519,7 +1542,7 @@ prep:
 			printk(KERN_ERR "\n GC failed due to disk error! ");
 			return -1;
 		}
-		move_gc_write_frontier(ctx, gc_extent->e.len);
+		move_gc_write_frontier(ctx, len);
 		free_gc_extent(ctx, gc_extent);
 	}
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
@@ -3830,9 +3853,12 @@ int add_block_based_translation(struct ctx *ctx, struct page *page)
 			}
 			lba = ptr->extents[j].lba;
 			pba = ptr->extents[j].pba;
-			BUG_ON(pba > ctx->sb->max_pba);
-			BUG_ON(lba > ctx->sb->max_pba);
 			len = ptr->extents[j].len;
+			if (pba > ctx->sb->max_pba) {
+				printk(KERN_ERR "\n %s ptr: %p, i: %d , j: %d, lba: %llu, pba: %llu, len: %llu", __func__, i, j, lba, pba, len);
+				BUG();
+			}
+			BUG_ON(lba > ctx->sb->max_pba);
 			if (len <= 0) {
 				printk(KERN_ERR "\n %s ptr: %p ptr->extents[%d].len: %d ", __func__, ptr, j, len);
 				BUG();
