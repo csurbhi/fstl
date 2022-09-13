@@ -14,6 +14,8 @@ all:
 	gcc write_zones.c -o writezones
 	gcc read_verify.c -o readverify
 	gcc format.c -o format
+	gcc writefullzones.c -o writefullzones
+	gcc readfullzones.c -o readfullzones
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
