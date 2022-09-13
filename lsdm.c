@@ -2103,7 +2103,7 @@ void complete_small_reads(struct bio *clone)
 		//BUG();
 	}
 	diff = (readctx->lba - lba) << LOG_SECTOR_SIZE;
-	printk(KERN_ERR "\n %s 1. diff: %llu nrsectors: %d \n", __func__, diff, nrsectors);
+	//printk(KERN_ERR "\n %s 1. diff: %llu nrsectors: %d \n", __func__, diff, nrsectors);
 	bio_for_each_segment(bv, readctx->clone, iter) {
 		todata = page_address(bv.bv_page);
 		todata = todata + bv.bv_offset;
@@ -2111,7 +2111,7 @@ void complete_small_reads(struct bio *clone)
 	}
 	fromdata = readctx->data;
 	memcpy(todata, fromdata + diff, (nrsectors << LOG_SECTOR_SIZE));
-	printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %d  bytes: %d \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
+	//printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %d  bytes: %d \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
 free:
 	readctx->clone->bi_end_io = lsdm_subread_done;
 	bio_endio(readctx->clone);
@@ -2156,7 +2156,7 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 		page = bv.bv_page;
 		data = page_address(page);
 		data = data + bv.bv_offset;
-		printk(KERN_ERR "\n %s (new small bio) data: %p ", __func__, data);
+		//printk(KERN_ERR "\n %s (new small bio) data: %p ", __func__, data);
 		readctx->data = data;
 	}
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
