@@ -5958,11 +5958,12 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	/*
 	 * Will work with timer based invocation later
 	 * init_timer(ctx->timer);
-	 *
+	 */
 	ret = lsdm_gc_thread_start(ctx);
 	if (ret) {
 		goto free_metadata_pages;
 	}
+	/*
 	ret = lsdm_flush_thread_start(ctx);
 	if (ret) {
 		goto stop_gc_thread;
@@ -5976,7 +5977,7 @@ static int ls_dm_dev_init(struct dm_target *dm_target, unsigned int argc, char *
 	return 0;
 /* failed case */
 stop_gc_thread:
-	//lsdm_gc_thread_stop(ctx);
+	lsdm_gc_thread_stop(ctx);
 free_metadata_pages:
 	printk(KERN_ERR "\n freeing metadata pages!");
 	if (ctx->revmap_bm) {
@@ -6022,7 +6023,7 @@ static void ls_dm_dev_exit(struct dm_target *dm_target)
 	 * tm entries, sit entries and we want all of them to be freed
 	 * and flushed as well.
 	 */
-	//lsdm_gc_thread_stop(ctx);
+	lsdm_gc_thread_stop(ctx);
 	//lsdm_flush_thread_stop(ctx);
 	sync_blockdev(ctx->dev->bdev);
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));

@@ -13,7 +13,7 @@
 #include <sys/ioctl.h>
 
 
-#define NR_ZONES 8
+#define NRZONES 8
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
 
@@ -68,6 +68,12 @@ int main(int argc, char *argv[])
 	off_t offset = 0;
 	char newch = '6', origch = '2';
 	int count = 0;
+	long nrzones;
+
+	if (argc < 3) {
+		fprintf(stderr, "\n Usage: %s filename nrzones \n", argv[0]);
+		exit(EXIT_FAILURE);
+	}
 
 
 	fname = argv[1];
@@ -75,6 +81,10 @@ int main(int argc, char *argv[])
 	for(i=0; i<BLKSZ; i++) {
 		buff[i] = origch;
 	}
+
+	nrzones = strtol(argv[2], NULL, 10);
+
+	printf("\n Opening file: %s and working with %llu zones \n", fname, nrzones);
 
 	fd = open(fname, O_RDWR|O_CREAT, S_IRWXU);
 	if (fd < 0) {
@@ -89,7 +99,7 @@ int main(int argc, char *argv[])
 	//offset = (244842496 * 512);
 
 	lseek(fd, 0, SEEK_SET);
-	for(i=0; i<NR_ZONES; i++) {
+	for(i=0; i<nrzones; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j++) {
 retry:
 			ret = write(fd, buff, BLKSZ);
@@ -124,7 +134,7 @@ retry:
 
 	offset = 0;
 	lseek(fd, offset, SEEK_SET);
-	for(i=0; i<NR_ZONES; i++) {
+	for(i=0; i<nrzones; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
 			ret = write(fd, newbuff, BLKSZ);
 			if (ret < 0) {
@@ -169,7 +179,7 @@ retry:
 	lseek(fd, 0, SEEK_SET);
 
 	offset = 0;
-	for(i=0; i<NR_ZONES; i++) {
+	for(i=0; i<nrzones; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
 			ret = read(fd, buff, BLKSZ);
 			if (ret < 0) {
