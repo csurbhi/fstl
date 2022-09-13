@@ -17,7 +17,9 @@
 #define NR_BLKS_IN_ZONE 65536
 #define BLKSZ 4096
 
-char * fname = "/mnt/test";
+//char * fname = "/mnt/test";
+//char * fname = "/dev/dm-0";
+char * fname = "/dev/sdb";
 
 
 int report_zone(unsigned long zonenr)
@@ -29,7 +31,7 @@ int report_zone(unsigned long zonenr)
 	fd = open(fname, O_RDWR);
 	if (!fd) {
 		perror("Could not open the disk: ");
-		return;
+		return -1;
 	}
 	printf("\n %s opened %s with fd: %ld ", __func__, "/dev/sdb", fd);
 
@@ -42,7 +44,7 @@ int report_zone(unsigned long zonenr)
 	if (ret) {
 		fprintf(stderr, "\n blkreportzone for zonenr: %ld ioctl failed, ret: %d ", zonenr, ret);
 		perror("\n blkreportzone failed because: ");
-		return;
+		return -1;
 	}
 	assert(bzr->nr_zones <= 256);
 	for (i=0; i<bzr->nr_zones; i++) {
@@ -66,10 +68,16 @@ int main(int argc, char *argv[])
 	int fd, i, j, k, ret;
 	off_t offset = 0;
 	char newch = '6', origch = '2';
-	int count = 0;
+	int count = 0, nrzones;
 
+	if (argc < 2) {
+		printf("\n Usage: %s #zones \n", argv[1]);
+		exit(-1);
+	}
 
-	//printf("\n character written is: %c ", origch);
+	nrzones = strtol(argv[1], NULL, 10);
+        printf("\n %s nrzones: %d \n", __func__, nrzones);
+
 	for(i=0; i<BLKSZ; i++) {
 		buff[i] = origch;
 	}
@@ -81,13 +89,13 @@ int main(int argc, char *argv[])
 		return errno;
 	}
 
+	printf("\n Opened %s ", fname);
 
-
-	printf("\n Conducting write verification ....");
+	printf("\n Conducting write verification to %d zones....", nrzones);
 	//offset = (244842496 * 512);
 
 	lseek(fd, 0, SEEK_SET);
-	for(i=0; i<NR_ZONES; i++) {
+	for(i=0; i<nrzones; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j++) {
 retry:
 			ret = write(fd, buff, BLKSZ);
@@ -107,6 +115,37 @@ retry:
 	sync();
 	printf("\n Writes done!! \n");
 
+	printf("\n Read verifying the writes ......\n");
+	fd = open(fname, O_RDWR);
+	if (fd < 0) {
+		perror("\n Could not open file because: ");
+		printf("\n");
+		return errno;
+	}
+
+
+	lseek(fd, 0, SEEK_SET);
+
+	offset = 0;
+	for(i=0; i<nrzones; i++) {
+		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
+			ret = read(fd, buff, BLKSZ);
+			if (ret < 0) {
+				perror("\n b) Could not read to file because: ");
+				printf("\n");
+				return errno;
+			}
+			ret = read(fd, buff, BLKSZ);
+			if (ret < 0) {
+				perror("\n Could not read to file because: ");
+				printf("\n");
+				return errno;
+			}
+		}
+	}
+	printf("\n");
+	close(fd);
+
 	printf("\n Conducting overwrites verification! .......");
 	fd = open(fname, O_RDWR);
 	if (fd < 0) {
@@ -122,7 +161,7 @@ retry:
 
 	offset = 0;
 	lseek(fd, offset, SEEK_SET);
-	for(i=0; i<NR_ZONES; i++) {
+	for(i=0; i<nrzones; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
 			ret = write(fd, newbuff, BLKSZ);
 			if (ret < 0) {
@@ -139,14 +178,6 @@ retry:
 				perror("\n Could not read to file because: ");
 				printf("\n");
 				return errno;
-			}
-		
-			for(k=0; k<BLKSZ; k++) {
-				if (buff[k] != origch) {
-					printf("\n Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", origch, buff[k], i, j, k);
-					printf("\n");
-					break;
-				}
 			}
 		}
 	}
@@ -167,7 +198,7 @@ retry:
 	lseek(fd, 0, SEEK_SET);
 
 	offset = 0;
-	for(i=0; i<NR_ZONES; i++) {
+	for(i=0; i<nrzones; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j=j+2) {
 			ret = read(fd, buff, BLKSZ);
 			if (ret < 0) {
@@ -175,27 +206,11 @@ retry:
 				printf("\n");
 				return errno;
 			}
-			for(k=0; k<BLKSZ; k++) {
-				if (buff[k] != newch) {
-					printf("\n b) Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", newch, buff[k], i, j, k);
-					printf("\n");
-					break;
-				}
-			}
-			 
 			ret = read(fd, buff, BLKSZ);
 			if (ret < 0) {
 				perror("\n Could not read to file because: ");
 				printf("\n");
 				return errno;
-			}
-		
-			for(k=0; k<BLKSZ; k++) {
-				if (buff[k] != origch) {
-					printf("\n Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", origch, buff[k], i, j, k);
-					printf("\n");
-					break;
-				}
 			}
 		}
 	}
