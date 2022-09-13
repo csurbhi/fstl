@@ -194,6 +194,10 @@ struct gc_extents {
 	struct list_head list;
 };
 
+struct mykref {
+	refcount_t refcount;
+};
+
 /* this has grown kind of organically, and needs to be cleaned up.
 */
 struct ctx {
@@ -309,7 +313,7 @@ struct ctx {
 	unsigned int 	user_block_count;
 	struct crypto_shash *s_chksum_driver;
 	struct gc_extents * gc_extents;
-	struct kref	ongoing_iocount;
+	struct mykref	ongoing_iocount;
 	atomic_t ioidle;
 	//struct timer_list timer_list;
 	struct workqueue_struct *writes_wq;
