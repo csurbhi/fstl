@@ -13,11 +13,12 @@
 #include <sys/ioctl.h>
 
 
-#define NR_ZONES 1
+#define NR_ZONES 8
 #define NR_BLKS_IN_ZONE 65536
-#define BLKSZ 64
+#define BLKSZ 4096
 
-char * fname = "/dev/dm-0";
+//char * fname = "/dev/dm-0";
+char * fname = "/mnt/test";
 
 
 int report_zone(unsigned long zonenr)
@@ -69,6 +70,7 @@ int main(int argc, char *argv[])
 	int count = 0;
 
 
+	fname = argv[1];
 	//printf("\n character written is: %c ", origch);
 	for(i=0; i<BLKSZ; i++) {
 		buff[i] = origch;
