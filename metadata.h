@@ -38,7 +38,7 @@
 /* The next is quite random; it is used for deciding how much do we
  * clean in a FG GC run
  */
-#define SMALL_NR_ZONES 1000 /* 25 GB */
+#define SMALL_NR_ZONES 1000 /* 250 GB */
 
 struct gc_read_ctx {
 	struct ctx *ctx;
@@ -179,6 +179,7 @@ struct lsdm_flush_thread  {
 struct lsdm_gc_thread {
 	struct task_struct *lsdm_gc_task;
 	wait_queue_head_t lsdm_gc_wait_queue;
+	wait_queue_head_t fggc_wq;
 	/* for gc sleep time */
 	unsigned int urgent_sleep_time;
 	unsigned int min_sleep_time;
@@ -250,8 +251,8 @@ struct ctx {
 	struct lsdm_ckpt *ckpt;
 	char *freezone_bitmap;
 	int 	nr_freezones;
-	int 	w1;
-	int	w2;
+	int 	higher_watermark;
+	int	lower_watermark;
 	char *gc_zone_bitmap;
 	int nr_gc_zones;
 	int	bitmap_bytes;
@@ -260,7 +261,8 @@ struct ctx {
 	time64_t min_mtime;
 	time64_t max_mtime;
 	unsigned int flag_ckpt;
-	atomic_t nr_writes;
+	atomic_t nr_app_writes;
+	atomic_t nr_gc_writes;
        	atomic_t nr_failed_writes;
        	atomic_t revmap_sector_nr;
        	atomic_t revmap_entry_nr;
@@ -324,6 +326,7 @@ struct ctx {
 	struct workqueue_struct *tm_wq;
 	struct work_struct sit_work;
 	struct work_struct tb_work;
+	unsigned int err;
 };
 
 struct extent {
@@ -351,7 +354,7 @@ struct gc_zone_node {
 	struct rb_node rb;
 	u32 zonenr;	/* unique key */
 	u32 vblks;
-	void *ptr_to_cost_node; 
+	struct gc_cost_node *ptr_to_cost_node; 
 	struct list_head list; /* we add this node to the list maintained on gc_cost_node */
 };
 

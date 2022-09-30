@@ -78,36 +78,42 @@ function gettimediff()
 	mins=$((mins2 - mins1))
 	seconds=$((seconds2 - seconds1))
 	nano=$((nano2 - nano1))
-	echo "Action: $3 " >> $DIR/time.out
+	echo "Action: $3 " >> $outfile
 	echo "Action: $3 " 
 	echo "time taken to $3 $4 zones was: $hours:$mins:$seconds:$nano" >> $outfile
-	echo "time taken to $3 $4 zones was: $hours:$mins:$seconds:$nano" >> $outfile
+	echo "time taken to $3 $4 zones was: $hours:$mins:$seconds:$nano"
 }
+
+# on herambh, sda - host managed, sdb - host aware
 
 sudo ./format
 sudo insmod lsdm.ko 
-sudo /sbin/dmsetup create TL1 --table '0 2104492032 lsdm /dev/sda TL1 524288 2104492032'
+#sudo /sbin/dmsetup create TL1 --table '0 2104492032 lsdm /dev/sda TL1 524288 2104492032'
+sudo /sbin/dmsetup create TL1 --table '0 128450560 lsdm /dev/sda TL1 524288 128450560'
 sudo mkfs.ext4 /dev/dm-0
 sudo mount -t ext4 /dev/dm-0 /mnt
-for i in {1..10}
+nrzones=$1
+out=$2
+DIR="zones/$out/$nrzones"
+mkdir -p $DIR
+outfile="$DIR/$nrzones.out"
+touch $outfile
+for i in {1..1}
 do
 	echo "-----------------------------" >> $DIR/time.out
 	echo "-----------------------------" 
 	fname="/mnt/test$i"
-	nrzones=10
-	DIR="zones/alternate_blocks/$nrzones"
-	outfile="$DIR/$nrzones.out"
-	touch $outfile
-	echo "Beginning round: $i" >> $outfile
+	echo "Beginning round: $i" > $outfile
 	echo "Beginning round: $i"
-	mkdir -p $DIR
-	iostat -d -h -N -x -y sdb 1 > $DIR/sdb_stats.out.before &
-	PID=$!
+	iostat -d -h -N -x -y sda 1 > $DIR/sda_iostats.out.before &
+	IOPID=$!
+	dstat -d -c -g -m -i  -r -t > $DIR/sda_dstats.out.before &
+	DPID=$!
 	time1=`date "+%k:%-M:%-S:%-N"`
 	./writezones  $fname $nrzones | tee "$DIR/writezones.out.$nrzones"
 	time2=`date "+%k:%-M:%-S:%-N"`
-	kill $PID
-	sudo killall iostat
+	kill $IOPID
+	kill $DPID
 
 	hours1=`echo $time1 | cut -d ":" -f 1`
 	mins1=`echo $time1 | cut -d ":" -f 2`
@@ -124,8 +130,10 @@ do
 	echo "Time at the beginning: $time1"
 	echo "Time after test completed: $time2"
 	gettimediff $time1 $time2 "write-read-overwrite-read" $nrzones $outfile
-	nrzones=$(( nrzones + 10 ))
+	nrzones=$(( nrzones * 2 ))
 done
+sudo umount /mnt
+sudo dmsetup remove TL1
 sudo rmmod lsdm.ko
 echo "-----------------------------" >> $DIR/time.out
 echo "-----------------------------"

@@ -118,7 +118,9 @@ __le32 get_zone_count(int fd)
 	printf("\n Actual zone count calculated: %d ", (capacity/ZONE_SZ));
 	//return (capacity/ZONE_SZ);
 	/* we test with a disk capacity of 1 TB */
-	return 4032;
+	//return 4032;
+	//return 1000;
+	return 256;
 }
 
 /* Note,  that this also account for the first few metadata zones.
@@ -449,7 +451,8 @@ unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
 {
 	int zonenr = get_zone_count(fd);
 
-	zonenr = zonenr - 20000;
+	//zonenr = zonenr - 20000;
+	zonenr = zonenr - 10;
 	return (zonenr) * (1 << (sb->log_zone_size - sb->log_sector_size));
 }
 
@@ -463,6 +466,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	if (!sb)
 		exit(-1);
 	memset(sb, 0, BLK_SZ);
+
 	
 	sb->magic = STL_SB_MAGIC;
 	sb->version = 1;
@@ -790,20 +794,18 @@ long reset_shingled_zones(int fd)
 	printf("\n nr of zones reported: %d", bzr->nr_zones);
 	assert(bzr->nr_zones == zone_count);
 
-	bzr->nr_zones = 200;
+	bzr->nr_zones = 256;
 	for (i=0; i<bzr->nr_zones; i++) {
 		if ((bzr->zones[i].type == BLK_ZONE_TYPE_SEQWRITE_PREF)  || 
 		   (bzr->zones[i].type == BLK_ZONE_TYPE_SEQWRITE_REQ)) {
 			bz_range.sector = bzr->zones[i].start;
 			bz_range.nr_sectors = bzr->zones[i].len;
-			/*
 			ret = ioctl(fd, BLKRESETZONE, &bz_range); 
 			if (ret) {
 				fprintf(stdout, "\n Could not reset zonenr with sector: %ld", bz_range.sector);
 				perror("\n blkresetzone failed because: ");
 			}
 			report_zone(fd, i, &bzr->zones[i]);
-			*/
 		} else {
 			printf("\n zonenr: %d is a non shingled zone! ", i);
 			cmr++;
