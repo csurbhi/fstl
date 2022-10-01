@@ -1,4 +1,4 @@
- /*
+/*
  *  Copyright (C) 2016 Peter Desnoyers and 2020 Surbhi Palande.
  *
  * This file is released under the GPL
@@ -1078,6 +1078,7 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 			temp = e->len - maxlen;
 			e->len = maxlen;
 		}
+		BUG_ON(0 == e->len);
 		gc_extent = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 		if (!gc_extent) {
 			printk(KERN_ERR "\n Could not allocate memory to gc_extent! ");
@@ -1112,33 +1113,15 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 	return 0;
 }
 
-void read_extent_done(struct bio *bio)
+void read_gcextent_done(struct bio * bio)
 {
-	int trial = 0;
-	refcount_t *ref;
+	struct gc_extents *gc_extent = (struct gc_extents *) bio->bi_private;
 	
-	if (bio->bi_status != BLK_STS_OK) {
-		if (bio->bi_status == BLK_STS_IOERR) {
-			//trace_printk("\n GC read failed because of disk error!");
-			/* We need to mark this target segment as erroneous and restart the writes to a new segment.
-			 */
-		}
-		else {
-			if (bio->bi_status  == BLK_STS_AGAIN) {
-				trial ++;
-				if (trial < 3)
-					submit_bio(bio);
-
-			}
-			panic("GC read of an extent failed! Could be a resource issue, write better error handling");
-		}
-	}
-	ref = bio->bi_private;
-	refcount_dec(ref);
+	refcount_dec(&gc_extent->ref);
 	bio_put(bio);
 }
 
-static int setup_extent_bio_read(struct ctx *ctx, struct gc_extents *gc_extent)
+static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 {
 	struct bio_vec *bv = NULL;
 	struct page *page;
@@ -1146,10 +1129,8 @@ static int setup_extent_bio_read(struct ctx *ctx, struct gc_extents *gc_extent)
 	struct bvec_iter_all iter_all;
 	unsigned int len, s8, pagecount;
 	int i;
-	__kernel_ulong_t freeram, available, usedlast;
 
-	freeram = global_zone_page_state(NR_FREE_PAGES);
-	freeram = freeram << (PAGE_SHIFT - 10);
+	refcount_set(&gc_extent->ref, 2);
 	s8 = gc_extent->e.len;
 	BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_SHIFT));
 	pagecount = (s8 >> SECTOR_SHIFT);
@@ -1178,19 +1159,11 @@ static int setup_extent_bio_read(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
+	bio->bi_private = gc_extent;
+	bio->bi_end_io = read_gcextent_done;
 	gc_extent->bio = bio;
-
-	/*
-	printk(KERN_ERR "\n %s sizeof(bio): %d, pagecount: %d ", __func__, sizeof(struct bio), pagecount);
-	usedlast = freeram;
-	freeram = global_zone_page_state(NR_FREE_PAGES);
-	freeram = (freeram << (PAGE_SHIFT - 10));
-	usedlast = usedlast - freeram;
-	printk(KERN_ERR " Free memory: %llu mB. ", freeram >> 10);
-	available = si_mem_available();
-	available = (available << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "Available memory: %llu mB. usedlast: %llu kB. \n", available, usedlast);
-	*/
+	/* submiting the bio in read_all_bios_and_wait */
+	submit_bio(gc_extent->bio);
 	return 0;
 }
 
@@ -1212,44 +1185,12 @@ static void free_gc_list(struct ctx *ctx)
 
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref, spinlock_t *lock);
 
-/* All the bios share the same reference. The address of this common
- * reference is stored in the bi_private field of the bio
- */
-static int read_all_bios_and_wait(struct ctx *ctx)
-{
-
-	struct list_head *list_head;
-	struct gc_extents *gc_extent;
-	struct blk_plug plug;
-	struct bio * bio;
-	int len = 0;
-
-	//blk_start_plug(&plug);
-	list_for_each(list_head, &ctx->gc_extents->list) {
-		gc_extent = list_entry(list_head, struct gc_extents, list);
-		bio = gc_extent->bio;
-		len = bio_sectors(gc_extent->bio);
-		//printk(KERN_ERR "\n %s bio::lba: %llu, bio::pba: %llu bio::len: %u \n", __func__, gc_extent->e.lba, bio->bi_iter.bi_sector, len);
-		/* setup bio sets bio->bi_end_io = read_extent_done */
-		BUG_ON(!len);
-		BUG_ON(gc_extent->e.pba > ctx->sb->max_pba);
-		submit_bio_wait(gc_extent->bio);
-		bio_put(gc_extent->bio);
-	}
-	/* When we arrive here, we know the last bio has completed.
-	 * Since the previous bios were chained to this one, we know
-	 * that the previous bios have completed as well
-	 */
-	//blk_finish_plug(&plug);
-	return 0;
-}
-
 /*
  * TODO: Do  not chain the bios as we do not get notification
  * of what extent reading did not work! We can retry and if
  * the block did not work, we can do something more meaningful.
  */
-static int read_gc_extents(struct ctx *ctx, refcount_t *ref)
+static int read_gc_extents(struct ctx *ctx)
 {
 	struct list_head *list_head;
 	struct gc_extents *gc_extent;
@@ -1261,20 +1202,17 @@ static int read_gc_extents(struct ctx *ctx, refcount_t *ref)
 	/* setup the bio for the first gc_extent */
 	list_for_each(list_head, &ctx->gc_extents->list) {
 		gc_extent = list_entry(list_head, struct gc_extents, list);
+		BUG_ON(gc_extent->e.len == 0);
+		BUG_ON(gc_extent->e.pba > ctx->sb->max_pba);
 		//printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %ld ", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
-		if (setup_extent_bio_read(ctx, gc_extent)) {
+		if (read_extent_bio(ctx, gc_extent)) {
 			free_gc_list(ctx);
 			printk(KERN_ERR "Low memory! TODO: Write code to free memory from translation tables etc ");
-			return -1;
+			BUG();
 		}
-		//refcount_inc(ref);
-		gc_extent->bio->bi_private = ref;
-		/* submiting the bio in read_all_bios_and_wait */
-		BUG_ON(gc_extent->e.len == 0);
-		count++;
+		count = count + 1;
 	}
-	printk(KERN_ERR "\n %s gc_extents #count: %d ref: %d", __func__, count, refcount_read(ref));
-	read_all_bios_and_wait(ctx);
+	printk(KERN_ERR "\n GC extents submitted for read: %d ", count);
 	return 0;
 }
 
@@ -1327,7 +1265,6 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	BUG_ON(gc_extent->e.pba == 0);
 	BUG_ON(gc_extent->e.pba > ctx->sb->max_pba);
 	BUG_ON(gc_extent->e.lba > ctx->sb->max_pba);
-	//printk(KERN_ERR "\n %s lba: %llu pba: %llu , len: %llu e.len: %llu" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	bio->bi_status = BLK_STS_OK;
 again:
 	BUG_ON(gc_extent->e.pba > ctx->sb->max_pba);
@@ -1336,6 +1273,7 @@ again:
 	if (bio->bi_status != BLK_STS_OK) {
 		panic("GC writes failed! Perhaps a resource error");
 	}
+	printk(KERN_ERR "\n %s lba: %llu pba: %llu , len: %llu e.len: %llu" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	add_revmap_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	return 0;
@@ -1568,6 +1506,7 @@ prep:
 			goto prep;
 		}
 		len = gc_extent->e.len;
+		wait_on_refcount(ctx, &gc_extent->ref, &ctx->gc_ref_lock);
 		ret = write_gc_extent(ctx, gc_extent);
 		up_write(&ctx->metadata_update_lock);
 		if (ret) {
@@ -1624,96 +1563,36 @@ int verify_gc_zone(struct ctx *ctx, int zonenr, sector_t pba)
 
 int remove_zone_from_gc_tree(struct ctx *ctx, unsigned int zonenr);
 
-/*
- * TODO: write code for FG_GC
- *
- * if err_flag is set, we have to mark the zone_to_clean erroneous.
- * This is set in the lsdm_clone_endio() path when a block cannot be
- * written to some zone because of disk error. We need to read the
- * remaining blocks from this zone and write to the destn_zone.
- *
- */
-static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
+void print_memory_usage(struct ctx *ctx, char *action)
 {
-	int zonenr;
-	sector_t pba, last_pba;
+	__kernel_ulong_t freeram, available;
+
+	freeram = global_zone_page_state(NR_FREE_PAGES);
+	freeram = (freeram << (PAGE_SHIFT - 10)) >> 10;
+	printk(KERN_ERR "\n %s: free memory: %llu mB", action, freeram);
+	available = si_mem_available();
+	available = (available << (PAGE_SHIFT - 10)) >> 10;
+	printk(KERN_ERR "\n %s : available memory: %llu mB", action, available);
+}
+
+
+int create_gc_extents(struct ctx *ctx, sector_t pba, sector_t last_pba)
+{
+	sector_t diff;
 	struct extent *e = NULL;
 	struct rev_extent *rev_e = NULL;
 	struct extent_entry temp;
-	struct gc_extents *gc_extent;
-	sector_t diff;
-	struct bio *split, *bio;
-	struct rb_node *node = NULL;
-	int ret;
-	struct lsdm_ckpt *ckpt = NULL;
-	struct lsdm_gc_thread *gc_th = ctx->gc_th;
-	wait_queue_head_t *wq = &gc_th->lsdm_gc_wait_queue;
-	refcount_t *ref;
 	unsigned long total_len = 0, total_pages = 0, total_extents = 0;
-	__kernel_ulong_t freeram, available;
-
-	gc_mode = FG_GC;
-		
-	flush_workqueue(ctx->tm_wq);
-	printk(KERN_ERR "\a %s * GC thread polling after every few seconds! gc_mode: %d \n", __func__, gc_mode);
-	
-	/* Take a semaphore lock so that no two gc instances are
-	 * started in parallel.
-	 */
-again:
-	if (!mutex_trylock(&ctx->gc_lock)) {
-		printk(KERN_ERR "\n 1. GC is already running! \n");
-		return -1;
-	}
-	
-	/*
-	if (!list_empty(&ctx->gc_extents->list)) {
-		list_for_each(list_head, &ctx->gc_extents->list) {
-			gc_extent = list_entry(list_head, struct gc_extents, list);
-			printk(KERN_ERR "\n (lba, pba, len): (%llu, %llu, %llu) ", gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
-		}
-	}
-	*/
-	zonenr = select_zone_to_clean(ctx, gc_mode);
-	if (zonenr < 0) {
-		mutex_unlock(&ctx->gc_lock);
-		printk(KERN_ERR "\n No zone found for cleaning!! \n");
-		return -1;
-	}
-	printk(KERN_ERR "\n Selecting zonenr: %d \n", zonenr);
-	pba = get_first_pba_for_zone(ctx, zonenr);
-
-	ref = kzalloc(sizeof(refcount_t), GFP_KERNEL);
-	if (!ref) {
-		mutex_unlock(&ctx->gc_lock);
-		return -ENOMEM;
-	} 
-
-	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u ", zonenr);
-	freeram = global_zone_page_state(NR_FREE_PAGES);
-	freeram = (freeram << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "\n Before GC: free memory: %llu mB", freeram);
-	available = si_mem_available();
-	available = (available << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "\n Before GC: available memory: %llu mB", available);
 
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
 
+	//print_memory_usage(ctx, "Before GC");
 	/* Lookup this pba in the reverse table to find the
 	 * corresponding LBA. 
 	 * TODO: If the valid blocks are sequential, we need to keep
 	 * this segment as an open segment that can append data. We do
 	 * not need to perform GC on this segment.
-	 *
-	 * We need to eventually change the
-	 * translation map in memory and on disk so that the LBA
-	 * points to the new PBA
-	 *
-	 * Note that pba, lba, and len are all in terms of
-	 * 512 byte sectors. ctx->nr_lbas_in_zone are also
-	 * the number of sectors in a zone.
 	 */
-	last_pba = get_last_pba_for_zone(ctx, zonenr);
 
 	//printk(KERN_ERR "\n %s first_pba: %llu last_pba: %llu", __func__, pba, last_pba);
 
@@ -1771,15 +1650,57 @@ again:
 		//printk(KERN_ERR "\n %s total_pages used: %llu",  __func__, total_pages);
 	}
 	printk(KERN_ERR "\n %s Total extents: %llu, total_pages: %llu, total_len: %llu \n", __func__, total_extents, total_pages, total_len);
-	freeram = global_zone_page_state(NR_FREE_PAGES);
-	freeram = (freeram << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "\n After extents: free memory: %llu mB", freeram << (PAGE_SHIFT - 10));
-	available = si_mem_available();
-	available = (available << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "\n After extents: available memory: %llu mB \n", available << (PAGE_SHIFT - 10));
+	return total_extents;
+}
 
-	/* Wait here till the system becomes IO Idle, if system is
-	* iodle don't wait */
+/*
+ * TODO: write code for FG_GC
+ *
+ * if err_flag is set, we have to mark the zone_to_clean erroneous.
+ * This is set in the lsdm_clone_endio() path when a block cannot be
+ * written to some zone because of disk error. We need to read the
+ * remaining blocks from this zone and write to the destn_zone.
+ *
+ */
+static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
+{
+	int zonenr;
+	struct extent *e = NULL;
+	struct rb_node *node = NULL;
+	int ret;
+	struct lsdm_ckpt *ckpt = NULL;
+	struct lsdm_gc_thread *gc_th = ctx->gc_th;
+	wait_queue_head_t *wq = &gc_th->lsdm_gc_wait_queue;
+	sector_t pba, last_pba;
+
+	gc_mode = FG_GC;
+		
+	flush_workqueue(ctx->tm_wq);
+	printk(KERN_ERR "\a %s * GC thread polling after every few seconds! gc_mode: %d \n", __func__, gc_mode);
+	
+	/* Take a semaphore lock so that no two gc instances are
+	 * started in parallel.
+	 */
+again:
+	if (!mutex_trylock(&ctx->gc_lock)) {
+		printk(KERN_ERR "\n 1. GC is already running! \n");
+		return -1;
+	}
+
+	zonenr = select_zone_to_clean(ctx, gc_mode);
+	if (zonenr < 0) {
+		mutex_unlock(&ctx->gc_lock);
+		printk(KERN_ERR "\n No zone found for cleaning!! \n");
+		return -1;
+	}
+	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u ", zonenr);
+	pba = get_first_pba_for_zone(ctx, zonenr);
+	last_pba = get_last_pba_for_zone(ctx, zonenr);
+	
+	create_gc_extents(ctx, pba, last_pba);
+
+	//print_memory_usage(ctx, "After extents");
+	/* Wait here till the system becomes IO Idle, if system is iodle don't wait */
 	if (gc_mode == BG_GC) {
 		wait_event_interruptible_timeout(*wq, is_lsdm_ioidle(ctx) ||
 			kthread_should_stop() || freezing(current) ||
@@ -1795,22 +1716,11 @@ again:
 		goto complete;
 	}
 
-	refcount_set(ref, 1);
-	ret = read_gc_extents(ctx, ref);
+	ret = read_gc_extents(ctx);
 	if (ret)
 		goto failed;
 
-	freeram = global_zone_page_state(NR_FREE_PAGES);
-	freeram = (freeram << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "\n After read: free memory: %llu mB", freeram);
-	available = si_mem_available();
-	available = (available << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "\n After read: available memory: %llu mB \n", available);
-
-	printk(KERN_ERR "\n %s Submitted reads, waiting for them to complete....., value of ref: %d \n", __func__, refcount_read(ref));
-	wait_on_refcount(ctx, ref, &ctx->gc_ref_lock);
-	kfree(ref);
-	//printk(KERN_ERR "%s:%d All GC extents read! \n", __func__, __LINE__);
+	//print_memory_usage(ctx, "After read");
 
 	/* Wait here till the system becomes IO Idle, if system is
 	* iodle don't wait */
@@ -1823,29 +1733,18 @@ again:
 			gc_mode = FG_GC;
 		}
 	}
-	ret = 0;
 	ret = write_valid_gc_extents(ctx, last_pba);
 	if (ret < 0) { 
 		printk(KERN_ERR "\n write_valid_gc_extents() failed, ret: %d ", ret);
 		goto failed;
 	}
-	freeram = global_zone_page_state(NR_FREE_PAGES);
-	freeram = (freeram << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "\n After write: free memory: %llu mB", freeram);
-	available = si_mem_available();
-	available = (available << (PAGE_SHIFT - 10)) >> 10;
-	printk(KERN_ERR "\n After write: available memory: %llu mB", available);
+	
+	//print_memory_usage(ctx, "After write");
 
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
 	do_checkpoint(ctx);
-	/* Complete the GC and then sync the block device */
-	//sync_blockdev(ctx->dev->bdev);
-	/* Zone gets freed when the valid blocks count is adjusted and
-	 * becomes zero. This happens on writes.
-	 */
 complete:
-	remove_zone_from_gc_tree(ctx, zonenr);
 	printk(KERN_ERR "\n %s GC done! \n", __func__);
 	/* Release GC lock */
 
@@ -1855,15 +1754,17 @@ complete:
 
 	/* TODO: Mode: FG_GC */
 	if (gc_mode == FG_GC) {
+		printk(KERN_ERR "\n %s nr of free zones: %llu ", __func__, ctx->nr_freezones);
+		wake_up_all(&ctx->gc_th->fggc_wq);
+		io_schedule();
 		/* check if you have hit higher_watermark or else keep cleaning */
 		if (ctx->nr_freezones <= ctx->higher_watermark) {
 			zonenr = select_zone_to_clean(ctx, FG_GC);
 			if (zonenr >= 0)
 				goto again;
-			wake_up_all(&ctx->gc_th->fggc_wq);
 		}
                 gc_th->gc_wake = 0;
-		wake_up_all(&ctx->gc_th->fggc_wq);
+		//wake_up_all(&ctx->gc_th->fggc_wq);
 	}
 failed:
 	mutex_unlock(&ctx->gc_lock);
@@ -2506,7 +2407,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	bitmap = ctx->freezone_bitmap;
 	bytenr = zonenr / BITS_IN_BYTE;
 	bitnr = zonenr % BITS_IN_BYTE;
-	//printk(KERN_ERR "\n %s zonenr: %lu, bytenr: %d bitnr: %d bitmap[%d]: %d", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr]);
+	//printk(KERN_ERR "\n %s zonenr: %lu, bytenr: %d bitnr: %d bitmap[%d]: %d ", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr]);
 
 	if(unlikely(bytenr > ctx->bitmap_bytes)) {
 		panic("bytenr: %d > bitmap_bytes: %d", bytenr, ctx->bitmap_bytes);
@@ -2528,6 +2429,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
+	printk(KERN_ERR "\n %s zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
 	spin_unlock(&ctx->lock);
 }
@@ -2613,7 +2515,7 @@ try_again:
 		printk(KERN_INFO "No more disk space available for writing!");
 		mark_disk_full(ctx);
 		ctx->hot_wf_pba = 0;
-		return (ctx->hot_wf_pba);
+		return -1;
 	}
 
 	/* get_next_freezone_nr() starts from 0. We need to adjust
@@ -2630,7 +2532,7 @@ try_again:
 	//printk(KERN_ERR "\n %s ctx->nr_freezones: %llu", __func__, ctx->nr_freezones);
 	mark_zone_occupied(ctx, zone_nr);
 	add_ckpt_new_wf(ctx, ctx->hot_wf_pba);
-	return ctx->hot_wf_pba;
+	return 0;
 }
 
 
@@ -2647,8 +2549,9 @@ static int get_new_gc_zone(struct ctx *ctx)
 	if (zone_nr < 0) {
 		mark_disk_full(ctx);
 		printk(KERN_INFO "No more disk space available for writing!");
-		ctx->warm_gc_wf_pba = -1;
-		return (ctx->warm_gc_wf_pba);
+		ctx->warm_gc_wf_pba = ~0;
+		BUG_ON(1);
+		return -1;
 	}
 
 	/* get_next_freezone_nr() starts from 0. We need to adjust
@@ -2663,7 +2566,7 @@ static int get_new_gc_zone(struct ctx *ctx)
 	mark_zone_occupied(ctx, zone_nr);
 	add_ckpt_new_gc_wf(ctx, ctx->warm_gc_wf_pba);
 	printk("\n %s zone0_pba: %llu zone_nr: %ld warm_gc_wf_pba: %llu, gc_wf_end: %llu", __func__,  ctx->sb->zone0_pba, zone_nr, ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
-	return ctx->warm_gc_wf_pba;
+	return 0;
 }
 
 /*
@@ -3021,9 +2924,9 @@ void move_write_frontier(struct ctx *ctx, sector_t s8)
 			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->hot_wf_pba, ctx->hot_wf_end);
 			BUG_ON(ctx->hot_wf_pba != (ctx->hot_wf_end + 1));
 		}
-		get_new_zone(ctx);
-		if (ctx->hot_wf_pba == 0) {
+		if (get_new_zone(ctx)) {
 			printk(KERN_ERR "\No more disk space available for writing!");
+			BUG();
 		}
 	}
 }
@@ -3049,8 +2952,7 @@ void move_gc_write_frontier(struct ctx *ctx, sector_t s8)
 			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
 			BUG_ON(ctx->warm_gc_wf_pba != (ctx->warm_gc_wf_end + 1));
 		}
-		get_new_gc_zone(ctx);
-		if (ctx->warm_gc_wf_pba < 0) {
+		if (get_new_gc_zone(ctx)) {
 			panic("No more disk space available for writing!");
 		}
 	}
@@ -4643,8 +4545,11 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
 		io_schedule();
 		finish_wait(&ctx->gc_th->fggc_wq, &wait);
+		printk(KERN_ERR "\n %s %d woken up lba: %llu, nrsectors: %d ", __func__,  __LINE__, lba, nr_sectors);
 	}
-	else if (ctx->nr_freezones <= ctx->higher_watermark) {
+	/* start fg gc but dont wait here */
+	else if (ctx->nr_freezones < ctx->higher_watermark) {
+		printk(KERN_ERR "\n ctx->nr_freezones: %d, ctx->higher_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->higher_watermark);
 		ctx->gc_th->gc_wake = 1;
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
 	}

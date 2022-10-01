@@ -195,6 +195,7 @@ struct gc_extents {
 	int nrpages;
 	struct extent_entry e;
 	struct bio *bio;
+	refcount_t ref;
 	struct page ** bio_pages;
 	struct list_head list;
 };
