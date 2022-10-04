@@ -196,6 +196,7 @@ struct gc_extents {
 	struct extent_entry e;
 	struct bio *bio;
 	refcount_t ref;
+	int read;
 	struct page ** bio_pages;
 	struct list_head list;
 };
