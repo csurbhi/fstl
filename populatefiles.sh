@@ -90,8 +90,8 @@ sudo ./format
 sudo insmod lsdm.ko 
 #sudo /sbin/dmsetup create TL1 --table '0 2104492032 lsdm /dev/sda TL1 524288 2104492032'
 sudo /sbin/dmsetup create TL1 --table '0 128450560 lsdm /dev/sda TL1 524288 128450560'
-sudo mkfs.ext4 /dev/dm-0
-sudo mount -t ext4 /dev/dm-0 /mnt
+#sudo mkfs.ext4 /dev/dm-0
+#sudo mount -t ext4 /dev/dm-0 /mnt
 nrzones=$1
 out=$2
 DIR="zones/$out/$nrzones"
@@ -102,7 +102,8 @@ for i in {1..1}
 do
 	echo "-----------------------------" >> $DIR/time.out
 	echo "-----------------------------" 
-	fname="/mnt/test$i"
+	#fname="/mnt/test$i"
+	fname="/dev/dm-0"
 	echo "Beginning round: $i" > $outfile
 	echo "Beginning round: $i"
 	iostat -d -h -N -x -y sda 1 > $DIR/sda_iostats.out.before &
@@ -132,7 +133,7 @@ do
 	gettimediff $time1 $time2 "write-read-overwrite-read" $nrzones $outfile
 	nrzones=$(( nrzones * 2 ))
 done
-sudo umount /mnt
+#sudo umount /mnt
 sudo dmsetup remove TL1
 sudo rmmod lsdm.ko
 echo "-----------------------------" >> $DIR/time.out

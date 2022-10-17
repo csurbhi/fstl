@@ -293,7 +293,6 @@ struct ctx {
 					 */
 	wait_queue_head_t refq;
 	wait_queue_head_t rev_blk_flushq;
-	wait_queue_head_t tm_writes_q;
 	wait_queue_head_t sitq;
 	wait_queue_head_t tmq;
 	struct page * revmap_page;

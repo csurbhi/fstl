@@ -105,8 +105,7 @@ __u8 valid_map[VBLK_MAP_SIZE];
 #define TM_ENTRIES_BLK 		(BLK_SIZE/sizeof(struct tm_entry))
 
 struct lsdm_seg_entry {
-	unsigned char temp;
-	unsigned short vblocks;  /* maximum vblocks currently are 65536 */
+	unsigned int vblocks;  /* maximum vblocks currently are 65536 */
 	unsigned long mtime;
 	/* We do not store any valid map here
 	 * as an extent map is stored separately
