@@ -208,6 +208,7 @@ struct mykref {
 /* this has grown kind of organically, and needs to be cleaned up.
 */
 struct ctx {
+	struct request_queue *q;
 	sector_t          nr_lbas_in_zone;	/* in 512B LBAs */
 	u64		  max_pba;
 

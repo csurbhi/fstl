@@ -111,7 +111,7 @@ do
 	dstat -d -c -g -m -i  -r -t > $DIR/sda_dstats.out.before &
 	DPID=$!
 	time1=`date "+%k:%-M:%-S:%-N"`
-	./writezones  $fname $nrzones | tee "$DIR/writezones.out.$nrzones"
+	sudo ./writezones  $fname $nrzones #| tee "$DIR/writezones.out.$nrzones"
 	time2=`date "+%k:%-M:%-S:%-N"`
 	kill $IOPID
 	kill $DPID

@@ -120,7 +120,9 @@ __le32 get_zone_count(int fd)
 	/* we test with a disk capacity of 1 TB */
 	//return 4032;
 	//return 1000;
-	return 256;
+	//return 256;
+	//return 100;
+	return 1024;
 }
 
 /* Note,  that this also account for the first few metadata zones.
@@ -261,7 +263,8 @@ __le32 get_reserved_zone_count()
 	 * for this
 	 */
 	reserved_zone_count = RESERVED_ZONES;
-	return reserved_zone_count;
+	//return reserved_zone_count;
+	return 0;
 }
 
 
@@ -452,7 +455,8 @@ unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
 	int zonenr = get_zone_count(fd);
 
 	//zonenr = zonenr - 20000;
-	zonenr = zonenr - 10;
+	//zonenr = zonenr - 10;
+	zonenr = 5;
 	return (zonenr) * (1 << (sb->log_zone_size - sb->log_sector_size));
 }
 
@@ -794,7 +798,7 @@ long reset_shingled_zones(int fd)
 	printf("\n nr of zones reported: %d", bzr->nr_zones);
 	assert(bzr->nr_zones == zone_count);
 
-	bzr->nr_zones = 256;
+	bzr->nr_zones = 1024;
 	for (i=0; i<bzr->nr_zones; i++) {
 		if ((bzr->zones[i].type == BLK_ZONE_TYPE_SEQWRITE_PREF)  || 
 		   (bzr->zones[i].type == BLK_ZONE_TYPE_SEQWRITE_REQ)) {
@@ -820,7 +824,7 @@ long reset_shingled_zones(int fd)
  *
  */
 
-int main()
+int main(int argc, char * argv[])
 {
 	unsigned int pba = 0;
 	struct lsdm_sb *sb1, *sb2;
@@ -828,11 +832,16 @@ int main()
 	unsigned long nrblks;
 	unsigned int ret = 0;
 	long cmr;
+	char * blkdev;
+	int fd;
 
-	//char * blkdev = "/dev/vdb";
-	//char * blkdev = "/dev/sdb";
-	char * blkdev = "/dev/sda";
-	int fd = open_disk(blkdev);
+	printf("\n %s argc: %d \n ", __func__, argc);
+	if (argc != 2) {
+		fprintf(stderr, "\n Usage: %s device-name \n", argv[0]);
+		exit(EXIT_FAILURE);
+	}
+	blkdev = argv[1];
+	fd = open_disk(blkdev);
 	cmr = reset_shingled_zones(fd);
 	sb1 = write_sb(fd, 0, cmr);
 	printf("\n Superblock written at pba: %d", pba);
