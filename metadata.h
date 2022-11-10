@@ -108,6 +108,7 @@ struct lsdm_sub_bioctx {
 	struct extent_entry extent;
 	struct lsdm_bioctx * bioctx;
 	struct work_struct work;
+	struct bio *clone;
 };
 
 struct cur_zone_info {
@@ -213,6 +214,7 @@ struct ctx {
 	u64		  max_pba;
 
 	spinlock_t        lock;
+	struct mutex	  write_lock;
 	sector_t          hot_wf_pba; /* LBA, protected by lock */
 	sector_t          warm_gc_wf_pba; /* LBA, protected by lock */
 	sector_t          hot_wf_end;

@@ -2169,7 +2169,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		nr_sectors = bio_sectors(clone);
 		lba = clone->bi_iter.bi_sector;
 		lba = round_down(lba, NR_SECTORS_IN_BLK);
-		//printk(KERN_ERR "\n %s -> lba: %llu bio::lba: %llu bio::nrsectors: %d", __func__, lba, clone->bi_iter.bi_sector, nr_sectors);
+		printk(KERN_ERR "\n %s -> lba: %llu bio::lba: %llu bio::nrsectors: %d", __func__, lba, clone->bi_iter.bi_sector, nr_sectors);
 		e = lsdm_rb_geq(ctx, lba, print);
 
 		/* case of no overlap, technically, e->lba + e->len cannot be less than lba
@@ -2472,7 +2472,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
-	printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
+	//printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
 	spin_unlock(&ctx->lock);
 	/* we need to reset the  zone that we are about to use */
@@ -2968,7 +2968,7 @@ void move_write_frontier(struct ctx *ctx, sector_t s8)
 	 * Its how we split the bio
 	 */
 	if (ctx->free_sectors_in_wf < s8) {
-		printk(KERN_ERR "\n Wrong manipulation of wf; used unavailable sectors in a log");
+		printk(KERN_ERR "\n Wrong manipulation of wf; free_sectors_in_wf: %llu s8: %llu \n", ctx->free_sectors_in_wf, s8);
 		BUG();
 	}
 
@@ -4403,7 +4403,7 @@ static int print_bzr(struct blk_zone *zone, unsigned int num, void *data)
 {
 	int i; 
 
-	printk(KERN_ERR "\n %s num: %d ", __func__ , num);
+	printk(KERN_ERR "\n %s #zones reported: %d ", __func__ , num);
 	for (i = 0; i < num; i++) {
 		printk(KERN_ERR "\n start: %llu len: %llu  wp : %llu type: %s ", zone->start, zone->len, zone->wp, (zone->type == 0x1) ? "conventional" : "sequential");
 	}
@@ -4424,6 +4424,7 @@ void write_done(struct kref *kref)
 	struct blk_zone_report *bzr;
 
 	lsdm_bioctx = container_of(kref, struct lsdm_bioctx, ref);
+	ctx = lsdm_bioctx->ctx;
 	bio = lsdm_bioctx->orig;
 	if (bio->bi_status) {
 		printk(KERN_ERR "\n %s bio status: %d ", __func__, bio->bi_status);
@@ -4431,9 +4432,12 @@ void write_done(struct kref *kref)
 end:
 	bio_endio(bio);
 
-	ctx = lsdm_bioctx->ctx;
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
+
+	if (bio->bi_status) {
+		printk(KERN_ERR "\n %s leaving !" , __func__);
+	}
 }
 
 
@@ -4494,7 +4498,6 @@ void sub_write_err(struct work_struct * w)
 	kref_put(&bioctx->ref, write_done);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 
-
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
@@ -4506,20 +4509,10 @@ void sub_write_err(struct work_struct * w)
 	if (!blkdev_report_zones(ctx->dev->bdev, zone_begins, 1, print_bzr, NULL)) {
 		printk(KERN_ERR "\n reporting zones failed! \n");
 	}
+	printk(KERN_ERR "\n %s Leaving!! \n");
 	return;
 }
 
-
-
-/* can you create the translation entry here?
- * What happens if you put a translation entry
- * for some data that did not make it to
- * the disk? Partial writes to such block
- * entries can end up rewriting data that
- * is partially uptodate and correct, and partially
- * stale and wrong. Thus there should be no wrong
- * entry in the translation map.
- */
 void lsdm_clone_endio(struct bio * clone)
 {
 	struct lsdm_sub_bioctx *subbioctx = NULL;
@@ -4534,15 +4527,21 @@ void lsdm_clone_endio(struct bio * clone)
 		bio = bioctx->orig;
 		if (bio && bio->bi_status == BLK_STS_OK) {
 			bio->bi_status = clone->bi_status;
-			if (clone->bi_status != BLK_STS_OK) {
-				ctx->err = 1;
-				INIT_WORK(&subbioctx->work, sub_write_err);
-				queue_work(ctx->writes_wq, &subbioctx->work);
-			}
+			
 		} 
+		if (clone->bi_status != BLK_STS_OK) {
+			ctx->err = 1;
+			INIT_WORK(&subbioctx->work, sub_write_err);
+			queue_work(ctx->writes_wq, &subbioctx->work);
+		} 
+		else {
+			INIT_WORK(&subbioctx->work, sub_write_done);
+			queue_work(ctx->writes_wq, &subbioctx->work);
+		}
+		if (subbioctx->clone != NULL) {
+			bio_put(subbioctx->clone);
+		}
 		bio_put(clone);
-		INIT_WORK(&subbioctx->work, sub_write_done);
-		queue_work(ctx->writes_wq, &subbioctx->work);
 	}
 	return;
 }
@@ -4610,23 +4609,40 @@ int pad_bio_last_page(struct ctx *ctx, struct bio *clone)
 	void * fromdata, *todata;
 	struct bio_vec bv;
 	sector_t nr_sectors, s8;
+	struct bio *bio;
 
 	nr_sectors = bio_sectors(clone);
 	s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+
+	if (s8 == nr_sectors) 
+		return 0;
+
+	bio = bio_alloc(GFP_KERNEL, 1);
+	if (!bio) {
+		return NULL;
+	}
+
 	newpage = alloc_page(__GFP_ZERO|GFP_KERNEL);
 	if (!newpage) {
-		return -1;
+		bio_put(bio);
+		return NULL;
 	}
-	todata = page_address(newpage);
+	
 	bio_get_last_bvec(clone, &bv);
-	oldpage = bv.bv_page;
-	fromdata = page_address(oldpage);
-	memcpy(todata, fromdata, (nr_sectors % 8));
-	bv.bv_page = newpage; 
-	clone->bi_iter.bi_size = s8 << 9;
-	nr_sectors = bio_sectors(clone);
+
+	todata = page_address(newpage) + bv.bv_offset;
+	fromdata = kmap_atomic(bv.bv_page) + bv.bv_offset; 
+	memcpy(todata, fromdata, bv.bv_len);
+	kunmap_atomic(fromdata);
+
+	if (!bio_add_page(bio, newpage, PAGE_SIZE, 0)) {
+		__free_pages(newpage, 0);
+	}
+
+	printk(KERN_ERR "\n %s bv.bv_offset: %d , bv.bv_len: %d ", __func__, bv.bv_offset, bv.bv_len);
+	nr_sectors = bio_sectors(bio);
 	printk(KERN_ERR "\n %s 2) s8: %llu nr_sectors: %llu \n", __func__, s8, nr_sectors);
-	return 0;
+	return bio;
 }
 
 
@@ -4655,7 +4671,7 @@ int pad_bio_last_page(struct ctx *ctx, struct bio *clone)
 int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 {
 	struct bio *split = NULL, *pad = NULL;
-	struct bio * clone;
+	struct bio * clone, *newbio;
 	struct lsdm_bioctx * bioctx;
 	struct lsdm_sub_bioctx *subbio_ctx;
 	unsigned nr_sectors = bio_sectors(bio);
@@ -4667,6 +4683,8 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	struct tm_page *tm_page;
 	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
 	int dosplit = 0, ret = 0;
+	DECLARE_COMPLETION_ONSTACK_MAP(done, bio->bi_bdev->bd_disk->lockdep_map);
+
 
 	ret = lsdm_write_checks(ctx, bio);
 	if (0 > ret) {
@@ -4687,10 +4705,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 	printk(KERN_ERR "\n %s 1) s8: %llu nr_sectors: %llu ", __func__, s8, nr_sectors);
 	if (s8 != nr_sectors) {
-		if (0 > pad_bio_last_page(ctx, clone)) {
-			bio_put(clone);
-			goto memfail;
-		}
+		
 	}
 
 	bioctx = kmem_cache_alloc(ctx->bioctx_cache, GFP_KERNEL);
@@ -4720,6 +4735,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 			kmem_cache_free(ctx->bioctx_cache, bioctx);
 			goto fail;
 		}
+		subbio_ctx->clone = NULL;
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 		dosplit = 0;
 		if (s8 > maxlen) {
@@ -4730,6 +4746,21 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			BUG_ON(s8 != ctx->free_sectors_in_wf);
 			dosplit = 1;
+		}
+		else if (s8 != nr_sectors) {
+			if (s8 > NR_SECTORS_IN_BLK) {
+				s8 = round_down(nr_sectors, NR_SECTORS_IN_BLK);
+				dosplit = 1;
+			} else {
+				newbio = pad_bio_last_page(ctx, clone);
+				if (!newbio) {
+					clone->bi_status = BLK_STS_RESOURCE;
+					bio_endio(clone);
+					goto memfail;
+				}
+				subbio_ctx->clone = clone;
+				clone = newbio;
+			}
 		}
 		split = clone;
 		if (1 == dosplit) {
@@ -4754,19 +4785,21 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		split->bi_private = subbio_ctx;
 		split->bi_end_io = lsdm_clone_endio;
 		bio_set_dev(split, ctx->dev->bdev);
-		spin_lock(&ctx->lock);
+		//mutex_lock(&ctx->write_lock);
 		/*-------------------------------*/
+		spin_lock(&ctx->lock);
 		wf = ctx->hot_wf_pba;
 		subbio_ctx->extent.pba = wf;
 		split->bi_iter.bi_sector = wf; /* we use the saved write frontier */
 		move_write_frontier(ctx, s8);
-		/*-------------------------------*/
 		spin_unlock(&ctx->lock);
+		printk(KERN_ERR "\n %s Submitting: lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
+		printk(KERN_ERR "\n %s nr_sectors: %u, bi_size: %d \n", __func__, bio_sectors(clone), clone->bi_iter.bi_size);
 		submit_bio_noacct(split);
-
+		/*-------------------------------*/
+		//mutex_unlock(&ctx->write_lock);
 		lba = lba + subbio_ctx->extent.len;
 		BUG_ON(lba > ctx->sb->max_pba);
-		//printk(KERN_ERR "\n %s lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	} while (split != clone);
 
 	//blk_finish_plug(&plug);
@@ -6086,8 +6119,19 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
 	*/
+
+	struct gendisk * disk;
+	sector_t zone_begins = zone_start(ctx, 2099200);
+	disk = ctx->dev->bdev->bd_disk;
+	//sd_zbc_report_zones(disk, zone_begins, 1, print_bzr, NULL);
+	if (!blkdev_report_zones(ctx->dev->bdev, zone_begins, 1, print_bzr, NULL)) {
+		printk(KERN_ERR "\n reporting zones failed! \n");
+		goto failed;
+	}
+
 	printk(KERN_ERR "\n ctr() done!!");
 	return 0;
+failed:
 /* failed case */
 	lsdm_gc_thread_stop(ctx);
 free_metadata_pages:
@@ -6242,9 +6286,9 @@ static void lsdm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
         struct ctx *ctx = ti->private;
 	struct lsdm_sb *sb = ctx->sb;
-        unsigned int nrsectors = 1 << (sb->log_zone_size - sb->log_sector_size);
+        unsigned int nrsectors = 1 << (sb->log_zone_size - sb->log_sector_size - 3);
 
-        limits->logical_block_size = SECTOR_SIZE;
+        limits->logical_block_size = BLOCK_SIZE;
         limits->physical_block_size = BLOCK_SIZE;
 
         blk_limits_io_min(limits, BLOCK_SIZE);
@@ -6269,32 +6313,33 @@ static void lsdm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 static struct target_type lsdm_target = {
 	.name            = "lsdm",
 	.version         = {1, 0, 0},
+	.features	 = DM_TARGET_MIXED_ZONED_MODEL,
 	.module          = THIS_MODULE,
 	.ctr             = lsdm_ctr,
 	.dtr             = lsdm_dtr,
 	.map             = lsdm_map_io,
+	.io_hints	 = lsdm_io_hints,
 	.status          = 0 /*lsdm_status*/,
 	.prepare_ioctl   = 0 /*lsdm_prepare_ioctl*/,
 	.message         = 0 /*lsdm_message*/,
 	.iterate_devices = 0 /*lsdm_iterate_devices*/,
-	.io_hints	 = lsdm_io_hints,
 };
 
 /* Called on module entry (insmod) */
-int __init ls_dm_init(void)
+int __init lsdm_init(void)
 {
 	return dm_register_target(&lsdm_target);
 }
 
 /* Called on module exit (rmmod) */
-void __exit ls_dm_exit(void)
+void __exit lsdm_exit(void)
 {
 	dm_unregister_target(&lsdm_target);
 }
 
 
-module_init(ls_dm_init);
-module_exit(ls_dm_exit);
+module_init(lsdm_init);
+module_exit(lsdm_exit);
 
 MODULE_DESCRIPTION(DM_NAME "log structured SMR Translation Layer");
 MODULE_AUTHOR("Surbhi Palande <csurbhi@gmail.com>");
