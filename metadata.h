@@ -190,6 +190,12 @@ struct lsdm_gc_thread {
         unsigned int gc_wake;
 };
 
+struct lsdm_write_thread {
+	struct task_struct *lsdm_write_task;
+	wait_queue_head_t write_waitq;
+	unsigned int write_wake;
+};
+
 
 struct gc_extents {
 	int nrpages;
@@ -211,7 +217,10 @@ struct ctx {
 	struct request_queue *q;
 	sector_t          nr_lbas_in_zone;	/* in 512B LBAs */
 	u64		  max_pba;
+	struct bio_list   bio_list;
 
+
+	struct mutex 	  write_lock;
 	spinlock_t        lock;
 	sector_t          hot_wf_pba; /* LBA, protected by lock */
 	sector_t          warm_gc_wf_pba; /* LBA, protected by lock */
@@ -247,6 +256,7 @@ struct ctx {
 	char              nodename[32];
   
 	struct lsdm_gc_thread *gc_th;
+	struct lsdm_write_thread *write_th;
 	struct lsdm_flush_thread *flush_th;
 	struct page 	*sb_page;
 	struct lsdm_sb 	*sb;
