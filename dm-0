@@ -1,0 +1,26 @@
+sudo ./format /dev/sda
+sudo insmod lsdm.ko
+sudo /sbin/dmsetup create TL1 --table '0 535298048 lsdm /dev/sda TL1 524288 535298048'
+echo "lsdm device created!"
+sudo zpool create -o ashift=12 tank dm-0
+echo "pool created!"
+sudo zfs create tank/fs
+sudo zfs get mountpoint tank/fs
+sudo zfs set mountpoint=/zfs tank/fs
+zfs get mounted tank/fs
+sudo cp /home/surbhi/github/fstl/write_zones.c /zfs
+sudo ls -lh /zfs
+sudo -s
+#cd /zfs
+#gcc write_zones.c
+#./a.out ./test1 1
+#echo "test 1 done!"
+#./a.out ./test2 2
+#echo "test 2 done!"
+#sudo zpool destroy tank
+#echo "pool destroyed!"
+#sudo dmsetup remove TL1
+#sudo rmmod lsdm.ko
+
+
+#cat dmesg | grep pba | tr -s " " | cut -d " " -f 13,15 | sed -n 's/,*\r*$//p' | sed -n 's/}*\r*$/],/p' | sed -e 's/^/[/g'
