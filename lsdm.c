@@ -1952,8 +1952,8 @@ int lsdm_gc_thread_start(struct ctx *ctx)
 
 int lsdm_gc_thread_stop(struct ctx *ctx)
 {
-	wake_up_all(&ctx->gc_th->fggc_wq);
 	kthread_stop(ctx->gc_th->lsdm_gc_task);
+	wake_up_all(&ctx->gc_th->fggc_wq);
 	kvfree(ctx->gc_th);
 	printk(KERN_ERR "\n GC thread stopped! ");
 	return 0;
@@ -2977,7 +2977,7 @@ void move_write_frontier(struct ctx *ctx, sector_t s8)
 		BUG();
 	}
 
-	printk(KERN_ERR "\n %s ctx->hot_wf_pba: %llu ctx->free_sectors_in_wf: %llu \n", __func__, ctx->hot_wf_pba, ctx->free_sectors_in_wf);
+	//printk(KERN_ERR "\n %s ctx->hot_wf_pba: %llu ctx->free_sectors_in_wf: %llu \n", __func__, ctx->hot_wf_pba, ctx->free_sectors_in_wf);
 	ctx->hot_wf_pba = ctx->hot_wf_pba + s8;
 	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - s8;
 	ctx->user_block_count -= s8 / NR_SECTORS_IN_BLK;
@@ -4462,12 +4462,12 @@ void sub_write_done(struct work_struct * w)
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
 
-	down_write(&ctx->metadata_update_lock);
+	//down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
-	lsdm_rb_update_range(ctx, lba, pba, len);
-	add_revmap_entry(ctx, lba, pba, len);
+	//lsdm_rb_update_range(ctx, lba, pba, len);
+	//add_revmap_entry(ctx, lba, pba, len);
 	/*-------------------------------*/
-	up_write(&ctx->metadata_update_lock);
+	//up_write(&ctx->metadata_update_lock);
 	return;
 }
 
@@ -4557,6 +4557,7 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 	sector_t s8, lba = bio->bi_iter.bi_sector;
 	bio->bi_status = BLK_STS_IOERR;
 
+
 	if (ctx->err) {
 		bio->bi_status = BLK_STS_RESOURCE;
 		goto fail;
@@ -4598,37 +4599,28 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 		ctx->gc_th->gc_wake = 1;
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
 	} */
+	//printk(KERN_ERR "\n (%s) bio: lba: %llu nr_sectors: %llu \n", __func__, lba, nr_sectors);
 	return 0;
 fail: 
-	bio_endio(bio);
 	return -1;
 
 }
 
-
-int pad_bio_last_page(struct ctx *ctx, struct bio *clone)
+void fill_bio(struct bio *bio, sector_t pba, sector_t len, struct block_device *bdev, struct lsdm_sub_bioctx * subbio_ctx)
 {
-	struct page * newpage, *oldpage;
-	void * fromdata, *todata;
-	struct bio_vec bv;
-	sector_t nr_sectors, s8;
+	bio_set_dev(bio, bdev);
+	bio->bi_iter.bi_sector = pba; /* we use the saved write frontier */
+	bio->bi_iter.bi_size = len << 9;
+	bio->bi_private = subbio_ctx;
+	bio->bi_end_io = lsdm_clone_endio;
+}
 
-	nr_sectors = bio_sectors(clone);
-	s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
-	newpage = alloc_page(__GFP_ZERO|GFP_KERNEL);
-	if (!newpage) {
-		return -1;
-	}
-	todata = page_address(newpage);
-	bio_get_last_bvec(clone, &bv);
-	oldpage = bv.bv_page;
-	fromdata = page_address(oldpage);
-	memcpy(todata, fromdata, (nr_sectors % 8));
-	bv.bv_page = newpage; 
-	clone->bi_iter.bi_size = s8 << 9;
-	nr_sectors = bio_sectors(clone);
-	printk(KERN_ERR "\n %s 2) s8: %llu nr_sectors: %llu \n", __func__, s8, nr_sectors);
-	return 0;
+void fill_subbioctx(struct lsdm_sub_bioctx * subbio_ctx, struct lsdm_bioctx *bioctx, sector_t lba, sector_t pba, sector_t len)
+{
+	subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
+	subbio_ctx->extent.lba = lba;
+	subbio_ctx->extent.pba = pba;
+	subbio_ctx->extent.len = len;
 }
 
 
@@ -4656,6 +4648,7 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, struc
 	 */
 again:
 	spin_lock(&ctx->lock);
+	/*-------------------------------*/
 	if (s8 > ctx->free_sectors_in_wf){
 		s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 		BUG_ON(s8 != ctx->free_sectors_in_wf);
@@ -4669,31 +4662,19 @@ again:
 		goto again;
 	}
 	/* Next we fetch the LBA that our DM got */
-	kref_get(&bioctx->ref);
-	//mykref_get(&ctx->ongoing_iocount);
-	//atomic_inc(&ctx->nr_app_writes);
-	subbio_ctx->extent.len = s8;
-	subbio_ctx->extent.lba = lba;
-	subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
 
-	split->bi_private = subbio_ctx;
-	split->bi_end_io = lsdm_clone_endio;
-	bio_set_dev(split, ctx->dev->bdev);
-	/*-------------------------------*/
 	wf = ctx->hot_wf_pba;
-	subbio_ctx->extent.pba = wf;
-	split->bi_iter.bi_sector = wf; /* we use the saved write frontier */
 	move_write_frontier(ctx, s8);
+	kref_get(&bioctx->ref);
+	fill_bio(split, wf, s8, ctx->dev->bdev, subbio_ctx);
+	fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
 	/*-------------------------------*/
 	spin_unlock(&ctx->lock);
 	printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
-	//submit_bio_noacct(split);
-	submit_bio_wait(split);
-	lsdm_clone_endio(split);
+	submit_bio_noacct(split);
 	/* we return the second part */
 	return clone;
 }
-
 
 int submit_bio_write(struct ctx *ctx, struct bio *clone)
 {
@@ -4705,76 +4686,69 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	sector_t s8, lba = clone->bi_iter.bi_sector;
 	sector_t wf = 0;
 	struct lsdm_ckpt *ckpt;
-	int count = 0;
 	struct tm_page *tm_page;
 	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
 	int dosplit = 0, ret = 0;
+	struct gendisk *disk;
 
-	/*s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
-	printk(KERN_ERR "\n %s 1) s8: %llu nr_sectors: %llu ", __func__, s8, nr_sectors);
-	if (s8 != nr_sectors) {
-		if (0 > pad_bio_last_page(ctx, clone)) {
-			goto fail;
-		}
-	}*/
+	clone->bi_status = BLK_STS_OK;
+	
+	BUG_ON(!bioctx);
+	BUG_ON(!bioctx->ctx);
+	BUG_ON(!bioctx->orig);
+
+	kref_init(&bioctx->ref);
 	do {
-		nr_sectors = bio_sectors(clone);
-		if (!nr_sectors) {
-			printk(KERN_ERR "\n %s 2)nr_sectors: %d count: %d \n", __func__, nr_sectors, count);
-			dump_stack();
-			BUG_ON(!nr_sectors);
-		}
-		count++;
 		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
 		if (!subbio_ctx) {
-			//trace_printk("\n insufficient memory!");
+			printk(KERN_ERR "\n %s Could not allocate memory to subbio_ctx \n", __func__);
 			kmem_cache_free(ctx->bioctx_cache, bioctx);
 			goto fail;
 		}
-		subbio_ctx->extent.lba = lba;
-		subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
-		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+		mykref_get(&ctx->ongoing_iocount);
+		atomic_inc(&ctx->nr_app_writes);
+		nr_sectors = bio_sectors(clone);
+		if (!nr_sectors) {
+			printk(KERN_ERR "\n %s 2)nr_sectors: %d \n", __func__, nr_sectors);
+			dump_stack();
+			BUG_ON(!nr_sectors);
+		}
 		dosplit = 0;
-		spin_lock(&ctx->lock);
+		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
 		if (s8 > maxlen) {
 			s8 = maxlen;
 			dosplit = 1;
 		}
-		else if (s8 > ctx->free_sectors_in_wf){
+		spin_lock(&ctx->lock);
+		if (s8 > ctx->free_sectors_in_wf){
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			BUG_ON(s8 != ctx->free_sectors_in_wf);
 			dosplit = 1;
 		}
-		split = clone;
 		if (!dosplit) {
 			/* Next we fetch the LBA that our DM got */
-			kref_get(&bioctx->ref);
-			//mykref_get(&ctx->ongoing_iocount);
-			//atomic_inc(&ctx->nr_app_writes);
 			wf = ctx->hot_wf_pba;
-			subbio_ctx->extent.pba = wf;
-			subbio_ctx->extent.len = s8;
-
-			clone->bi_private = subbio_ctx;
-			clone->bi_end_io = lsdm_clone_endio;
-			clone->bi_iter.bi_sector = wf; /* we use the saved write frontier */
-			bio_set_dev(clone, ctx->dev->bdev);
 			move_write_frontier(ctx, s8);
-			printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
+			kref_get(&bioctx->ref);
+			fill_bio(clone, wf, s8, ctx->dev->bdev, subbio_ctx);
+			fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
 			spin_unlock(&ctx->lock);
-			submit_bio_wait(clone);
-			lsdm_clone_endio(clone);
+			printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, subbio_ctx->extent.len, bioctx);
+			submit_bio_noacct(clone);
 			break;
 		}
+		break;
 		//dosplit = 1
 		spin_unlock(&ctx->lock);
 		clone = split_submit(ctx, clone, s8, subbio_ctx);
 		if (!clone)
 			goto fail;
 		lba = lba + subbio_ctx->extent.len;
+
 		BUG_ON(lba > ctx->sb->max_pba);
 	} while (split != clone);
 
+	return 0;
 	//blk_finish_plug(&plug);
 	kref_put(&bioctx->ref, write_done);
 	flush_workqueue(ctx->writes_wq);
@@ -4784,7 +4758,7 @@ fail:
 	printk(KERN_ERR "%s FAIL!!!!\n", __func__);
 	clone->bi_status = BLK_STS_RESOURCE;
 	clone->bi_private = NULL;
-	bio_endio(clone);
+	lsdm_clone_endio(clone);
 	kref_put(&bioctx->ref, write_done);
 	atomic_inc(&ctx->nr_failed_writes);
 	return -1;
@@ -4796,7 +4770,14 @@ void lsdm_handle_write(struct ctx *ctx)
 	struct bio *bio;
 
 	while ((bio = bio_list_pop(&ctx->bio_list))) {
-		submit_bio_write(ctx, bio);
+		if (submit_bio_write(ctx, bio)) {
+			printk(KERN_ERR "\n write failed, cannot proceed! ");
+			break;
+		}
+		if (ctx->err) {
+			printk(KERN_ERR "\n cannot write further, I/O error encountered! ");
+			break;
+		}
 	}
 }
 
@@ -4896,26 +4877,24 @@ int lsdm_write_thread_stop(struct ctx *ctx)
 */
 int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 {
-	struct bio *split = NULL, *pad = NULL;
 	struct bio * clone;
 	struct lsdm_bioctx * bioctx;
-	unsigned nr_sectors = bio_sectors(bio);
-	sector_t s8, lba = bio->bi_iter.bi_sector;
+	sector_t lba = bio->bi_iter.bi_sector;
 	struct lsdm_ckpt *ckpt;
 	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
 	int ret;
 
 	ret = lsdm_write_checks(ctx, bio);
 	if (0 > ret) {
-		return DM_MAPIO_KILL;
+		goto memfail;
 	}
+	
+	atomic_set(&ctx->ioidle, 0);
 	/* ckpt must be updated. The state of the filesystem is
 	 * unclean until checkpoint happens!
 	 */
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
-	nr_sectors = bio_sectors(bio);
-	bio->bi_status = BLK_STS_OK;
 	clone = bio_clone_fast(bio, GFP_KERNEL, &fs_bio_set);
 	if (!clone) {
 		goto memfail;
@@ -4931,14 +4910,8 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	bioctx->ctx = ctx;
 	/* TODO: Initialize refcount in bioctx and increment it every
 	 * time bio is split or padded */
-	kref_init(&bioctx->ref);
-	atomic_set(&ctx->ioidle, 0);
 	clone->bi_private = bioctx;
 	bio_list_add(&ctx->bio_list, clone);
-	/*
-	bio->bi_status = BLK_STS_OK;
-	bio_endio(bio);
-	*/
 	wake_up_all(&ctx->write_th->write_waitq);
 	return DM_MAPIO_SUBMITTED;
 memfail:
@@ -6088,11 +6061,9 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
                 ret = -EINVAL;
                 goto free_ctx;
         }
-
-	ret = blkdev_report_zones(ctx->dev->bdev, 5109710848, 1, print_bzr, NULL);
+	ret = blkdev_report_zones(ctx->dev->bdev, 1572864, 1, print_bzr, NULL);
 	if (!ret) {
 		printk(KERN_ERR "\n reporting zones failed! \n");
-		goto free_ctx;
 	}
 
 	q = bdev_get_queue(ctx->dev->bdev);
@@ -6296,7 +6267,7 @@ static void lsdm_dtr(struct dm_target *dm_target)
 	 * and flushed as well.
 	 */
 	lsdm_gc_thread_stop(ctx);
-	//lsdm_flush_thread_stop(ctx);
+	lsdm_write_thread_stop(ctx);
 	sync_blockdev(ctx->dev->bdev);
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
 	flush_workqueue(ctx->tm_wq);
