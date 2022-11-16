@@ -2472,7 +2472,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
-	printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
+	//printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
 	spin_unlock(&ctx->lock);
 	/* we need to reset the  zone that we are about to use */
@@ -4425,7 +4425,7 @@ void write_done(struct kref *kref)
 
 	lsdm_bioctx = container_of(kref, struct lsdm_bioctx, ref);
 	bio = lsdm_bioctx->orig;
-	if (bio->bi_status) {
+	if (BLK_STS_OK != bio->bi_status) {
 		printk(KERN_ERR "\n %s bio status: %d ", __func__, bio->bi_status);
 	}
 end:
@@ -4462,12 +4462,14 @@ void sub_write_done(struct work_struct * w)
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
 
-	//down_write(&ctx->metadata_update_lock);
+	//printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
+
+	down_write(&ctx->metadata_update_lock);
 	/*------------------------------- */
-	//lsdm_rb_update_range(ctx, lba, pba, len);
-	//add_revmap_entry(ctx, lba, pba, len);
+	lsdm_rb_update_range(ctx, lba, pba, len);
+	add_revmap_entry(ctx, lba, pba, len);
 	/*-------------------------------*/
-	//up_write(&ctx->metadata_update_lock);
+	up_write(&ctx->metadata_update_lock);
 	return;
 }
 
@@ -4495,7 +4497,6 @@ void sub_write_err(struct work_struct * w)
 
 	kref_put(&bioctx->ref, write_done);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
-
 
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
@@ -4532,20 +4533,25 @@ void lsdm_clone_endio(struct bio * clone)
 	subbioctx = clone->bi_private;
 	if (subbioctx) {
 		bioctx = subbioctx->bioctx;
+		BUG_ON(!bioctx);
 		ctx = bioctx->ctx;
+		BUG_ON(!ctx);
 		bio = bioctx->orig;
-		if (bio && bio->bi_status == BLK_STS_OK) {
-			bio->bi_status = clone->bi_status;
-			if (clone->bi_status != BLK_STS_OK) {
-				ctx->err = 1;
-				INIT_WORK(&subbioctx->work, sub_write_err);
-				queue_work(ctx->writes_wq, &subbioctx->work);
+		BUG_ON(!bio);
+		if (clone->bi_status != BLK_STS_OK) {
+			if (bio->bi_status == BLK_STS_OK) {
+				bio->bi_status = clone->bi_status;
 			}
-		} 
-		bio_put(clone);
-		INIT_WORK(&subbioctx->work, sub_write_done);
-		queue_work(ctx->writes_wq, &subbioctx->work);
+			ctx->err = 1;
+			bio->bi_status = clone->bi_status;
+			INIT_WORK(&subbioctx->work, sub_write_err);
+			queue_work(ctx->writes_wq, &subbioctx->work);
+		} else {
+			INIT_WORK(&subbioctx->work, sub_write_done);
+			queue_work(ctx->writes_wq, &subbioctx->work);
+		}
 	}
+	bio_put(clone);
 	return;
 }
 
@@ -4670,7 +4676,7 @@ again:
 	fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
 	/*-------------------------------*/
 	spin_unlock(&ctx->lock);
-	printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
+	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	submit_bio_noacct(split);
 	/* we return the second part */
 	return clone;
@@ -4692,10 +4698,12 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	struct gendisk *disk;
 
 	clone->bi_status = BLK_STS_OK;
-	
+
 	BUG_ON(!bioctx);
 	BUG_ON(!bioctx->ctx);
 	BUG_ON(!bioctx->orig);
+
+	clone->bi_status = BLK_STS_OK;
 
 	kref_init(&bioctx->ref);
 	do {
@@ -4705,6 +4713,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 			kmem_cache_free(ctx->bioctx_cache, bioctx);
 			goto fail;
 		}
+		subbio_ctx->bioctx = bioctx;
 		mykref_get(&ctx->ongoing_iocount);
 		atomic_inc(&ctx->nr_app_writes);
 		nr_sectors = bio_sectors(clone);
@@ -4733,11 +4742,10 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 			fill_bio(clone, wf, s8, ctx->dev->bdev, subbio_ctx);
 			fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
 			spin_unlock(&ctx->lock);
-			printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, subbio_ctx->extent.len, bioctx);
+			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
 			submit_bio_noacct(clone);
 			break;
 		}
-		break;
 		//dosplit = 1
 		spin_unlock(&ctx->lock);
 		clone = split_submit(ctx, clone, s8, subbio_ctx);
@@ -4748,7 +4756,6 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		BUG_ON(lba > ctx->sb->max_pba);
 	} while (split != clone);
 
-	return 0;
 	//blk_finish_plug(&plug);
 	kref_put(&bioctx->ref, write_done);
 	flush_workqueue(ctx->writes_wq);
@@ -4756,10 +4763,8 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	return 0; 
 fail:
 	printk(KERN_ERR "%s FAIL!!!!\n", __func__);
-	clone->bi_status = BLK_STS_RESOURCE;
-	clone->bi_private = NULL;
-	lsdm_clone_endio(clone);
 	kref_put(&bioctx->ref, write_done);
+	bio_put(clone);
 	atomic_inc(&ctx->nr_failed_writes);
 	return -1;
 }
@@ -4911,6 +4916,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	/* TODO: Initialize refcount in bioctx and increment it every
 	 * time bio is split or padded */
 	clone->bi_private = bioctx;
+	bio->bi_status = BLK_STS_OK;
 	bio_list_add(&ctx->bio_list, clone);
 	wake_up_all(&ctx->write_th->write_waitq);
 	return DM_MAPIO_SUBMITTED;

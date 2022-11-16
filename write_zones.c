@@ -14,7 +14,7 @@
 
 
 #define NRZONES 8
-#define NR_BLKS_IN_ZONE 10
+#define NR_BLKS_IN_ZONE 20000
 #define BLKSZ 4096
 
 //char * fname = "/mnt/test";
