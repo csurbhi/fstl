@@ -34,12 +34,12 @@ int main(int argc, char *argv[])
 		printf("\n");
 		return errno;
 	}
-	
 	offset = (65536 * 4096);
 	lseek(fd, offset, SEEK_SET);
 	for(i=0; i<63; i++) {
 		lseek(fd, offset, SEEK_CUR);
 	}
+
 	for(i=0; i<nrzones; i++) {
 		for(j=0; j<NR_BLKS_IN_ZONE; j=j+1) {
 			ret = read(fd, buff, BLKSZ);

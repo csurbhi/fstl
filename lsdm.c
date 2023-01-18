@@ -2046,14 +2046,14 @@ void complete_small_reads(struct bio *clone)
 		goto free;
 	}
 
-	printk(KERN_ERR "\n %s smaller bio's address: %p larger bio's address: %p", __func__, clone, readctx->clone);
-	printk(KERN_ERR "\n readctx->lba: %llu, lba: %llu NR_SECTORS_IN_BLK: %d \n", readctx->lba, lba, NR_SECTORS_IN_BLK);
+	//printk(KERN_ERR "\n %s smaller bio's address: %p larger bio's address: %p", __func__, clone, readctx->clone);
+	//printk(KERN_ERR "\n readctx->lba: %llu, lba: %llu NR_SECTORS_IN_BLK: %d \n", readctx->lba, lba, NR_SECTORS_IN_BLK);
 	if ((readctx->lba - lba) > NR_SECTORS_IN_BLK) {
 		goto free;
 		//BUG();
 	}
 	diff = (readctx->lba - lba) << LOG_SECTOR_SIZE;
-	printk(KERN_ERR "\n %s 1. diff: %llu nrsectors: %d \n", __func__, diff, nrsectors);
+	//printk(KERN_ERR "\n %s 1. diff: %llu nrsectors: %d \n", __func__, diff, nrsectors);
 	bio_for_each_segment(bv, readctx->clone, iter) {
 		todata = page_address(bv.bv_page);
 		todata = todata + bv.bv_offset;
@@ -2061,7 +2061,7 @@ void complete_small_reads(struct bio *clone)
 	}
 	fromdata = readctx->data;
 	memcpy(todata, fromdata + diff, (nrsectors << LOG_SECTOR_SIZE));
-	printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %d  bytes: %d \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
+	//printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %d  bytes: %d \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
 free:
 	readctx->clone->bi_end_io = lsdm_subread_done;
 	bio_endio(readctx->clone);
@@ -2087,7 +2087,7 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 	if (!bio) {
 		__free_pages(page, 0);
 		nrpages--;
-		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
+		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return NULL;
 	}
 
@@ -5878,6 +5878,8 @@ int read_metadata(struct ctx * ctx)
 		 * entries are based on the translation map
 		 */
 		printk(KERN_ERR "\n SIT and checkpoint does not match!");
+		ckpt->nr_free_zones = ctx->nr_freezones;
+		goto out;
 		do_recovery(ctx);
 		__free_pages(ctx->sb_page, 0);
 		nrpages--;
@@ -5888,6 +5890,7 @@ int read_metadata(struct ctx * ctx)
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return -1;
 	}
+out:
 	printk(KERN_ERR "\n Metadata read! \n");
 	return 0;
 }

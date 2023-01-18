@@ -24,3 +24,13 @@ sudo -s
 
 
 #cat dmesg | grep pba | tr -s " " | cut -d " " -f 13,15 | sed -n 's/,*\r*$//p' | sed -n 's/}*\r*$/],/p' | sed -e 's/^/[/g'
+
+
+sudo ./format /dev/sdb; sudo ./format /dev/sdc; sudo ./format /dev/sdd;
+sudo /sbin/dmsetup create  TL1 --table '0 535298048 lsdm /dev/sdb TL1 524288 535298048'
+sudo /sbin/dmsetup create  TL2 --table '0 535298048 lsdm /dev/sdc TL2 524288 535298048'
+sudo /sbin/dmsetup create  TL3 --table '0 535298048 lsdm /dev/sdd TL3 524288 535298048'
+sudo zpool create -o ashift=12 tank mirror dm-0 dm-1
+sudo zfs create tank/fs
+sudo zfs get mountpoint tank/fs
+sudo zfs set mountpoint=/zfs tank/fs

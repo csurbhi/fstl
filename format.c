@@ -120,9 +120,10 @@ __le32 get_zone_count(int fd)
 	/* we test with a disk capacity of 1 TB */
 	//return 4032;
 	//return 1000;
-	//return 256;
+	return 256;
 	//return 100;
-	return 1024;
+	//return 1024;
+	//return 29808;
 }
 
 /* Note,  that this also account for the first few metadata zones.
@@ -870,6 +871,8 @@ int main(int argc, char * argv[])
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 524288; /* nr of sectors in a zone */
 	unsigned long data_zones = sb1->zone_count_main;
+
+	printf("\n sb1->zone_count_main: %d ", data_zones);
 	char * tgtname = "TL1";
 	//volume_size = data_zones * zone_lbas;
 	unsigned long volume_size = data_zones * zone_lbas;
