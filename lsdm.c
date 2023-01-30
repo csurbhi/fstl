@@ -1412,7 +1412,7 @@ int complete_revmap_blk_flush(struct ctx * ctx, struct page *page)
 	submit_bio_wait(bio);
 	bio_put(bio);
 	//printk(KERN_ERR "\n %s added translation entries ! ", __func__);
-	add_block_based_translation(ctx, page, __func__);
+	//add_block_based_translation(ctx, page, __func__);
 	__free_pages(page, 0);
 	nrpages--;
 	return 0;
@@ -2179,7 +2179,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			zero_fill_clone(ctx, read_ctx, clone);
 			break;
 		}
-		//printk(KERN_ERR "\n %s Searching: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu", __func__, lba, nr_sectors, e->lba, e->pba, e->len);
+		//printk(KERN_ERR "\n %s Searching: lba: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu", __func__, lba, nr_sectors, e->lba, e->pba, e->len);
 		/* Case of Overlap, e always overlaps with bio */
 		if (e->lba > lba) {
 		/*   		 [eeeeeeeeeeee]
@@ -2585,7 +2585,7 @@ try_again:
 		panic("wf > wf_end!!, nr_free_sectors: %lld", ctx->free_sectors_in_wf );
 	}
 	ctx->free_sectors_in_wf = ctx->hot_wf_end - ctx->hot_wf_pba + 1;
-	printk(KERN_ERR "\n %s zone_nr: %d  ctx->nr_freezones: %llu", __func__, zone_nr, ctx->nr_freezones);
+	//printk(KERN_ERR "\n %s zone_nr: %d  ctx->nr_freezones: %llu", __func__, zone_nr, ctx->nr_freezones);
 	add_ckpt_new_wf(ctx, ctx->hot_wf_pba);
 	return 0;
 }
@@ -2982,13 +2982,13 @@ void move_write_frontier(struct ctx *ctx, sector_t s8)
 	ctx->free_sectors_in_wf = ctx->free_sectors_in_wf - s8;
 	ctx->user_block_count -= s8 / NR_SECTORS_IN_BLK;
 	if (ctx->free_sectors_in_wf < NR_SECTORS_IN_BLK) {
-		printk(KERN_INFO "Num of free sect.: %llu, about to call get_new_zone() \n", ctx->free_sectors_in_wf);
+		//printk(KERN_INFO "Num of free sect.: %llu, about to call get_new_zone() \n", ctx->free_sectors_in_wf);
 		if ((ctx->hot_wf_pba - 1) != ctx->hot_wf_end) {
 			printk(KERN_INFO "kernel wf before BUG: %llu - %llu\n", ctx->hot_wf_pba, ctx->hot_wf_end);
 			BUG_ON(ctx->hot_wf_pba != (ctx->hot_wf_end + 1));
 		}
 		if (get_new_zone(ctx)) {
-			printk(KERN_ERR "\No more disk space available for writing!");
+			printk(KERN_ERR "\n No more disk space available for writing!");
 			BUG();
 		}
 	}
@@ -4121,7 +4121,7 @@ void process_tm_entries(struct work_struct * w)
 	struct page *page = revmap_bio_ctx->page;
 	struct ctx * ctx = revmap_bio_ctx->ctx;
 
-	add_block_based_translation(ctx, page, __func__);
+	//add_block_based_translation(ctx, page, __func__);
 	__free_pages(page, 0);
 	nrpages--;
 	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
@@ -4186,8 +4186,8 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, sector_t revmap
 	BUG_ON(ctx->revmap_pba > ctx->sb->max_pba);
 	submit_bio(bio);
 	//printk(KERN_ERR "\n flushing revmap at pba: %llu page: %p", bio->bi_iter.bi_sector, page_address(page));
-	INIT_WORK(&revmap_bio_ctx->process_tm_work, process_tm_entries);
-	queue_work(ctx->tm_wq, &revmap_bio_ctx->process_tm_work);
+	//INIT_WORK(&revmap_bio_ctx->process_tm_work, process_tm_entries);
+	//queue_work(ctx->tm_wq, &revmap_bio_ctx->process_tm_work);
 	return 0;
 }
 
@@ -4339,7 +4339,7 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 			if (NR_SECTORS_PER_BLK == (sector_nr + 1)) {
 				BUG_ON(page == NULL);
 				/* Called from the write context */
-				flush_revmap_block_disk(ctx, ctx->revmap_page, ctx->revmap_pba);
+				//flush_revmap_block_disk(ctx, ctx->revmap_page, ctx->revmap_pba);
 				atomic_set(&ctx->revmap_sector_nr, 0);
 				/* Adjust the revmap_pba for the next block 
 				* Addressing is based on 512bytes sector.
@@ -4642,6 +4642,7 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, struc
 	sector_t lba = subbio_ctx->extent.lba;
 	sector_t wf;
 
+	//printk(KERN_ERR "\n %s lba: {%llu, len: %d},", __func__, lba, s8);
 	/* We cannot call bio_split with spinlock held! */
 	if (!(split = bio_split(clone, s8, GFP_NOIO, &fs_bio_set))){
 		printk("\n %s failed at bio_split! ", __func__);

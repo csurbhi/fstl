@@ -139,11 +139,12 @@ retry:
 				printf("\n");
 				return errno;
 			}
-			ret = read(fd, buff, BLKSZ);
-			if (ret < 0) {
-				perror("\n Could not read to file because: ");
-				printf("\n");
-				return errno;
+			for(k=0; k<BLKSZ; k++) {
+				if (buff[k] != origch) {
+					printf("\n b) Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", origch, buff[k], i, j, k);
+					printf("\n");
+					return -1;
+				}
 			}
 		}
 	}
@@ -210,12 +211,28 @@ retry:
 				printf("\n");
 				return errno;
 			}
+			for(k=0; k<BLKSZ; k++) {
+				if (buff[k] != newch) {
+					printf("\n b) Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", newch, buff[k], i, j, k);
+					printf("\n");
+					return -1;
+				}
+			}
+
 			ret = read(fd, buff, BLKSZ);
 			if (ret < 0) {
 				perror("\n Could not read to file because: ");
 				printf("\n");
 				return errno;
 			}
+			for(k=0; k<BLKSZ; k++) {
+				if (buff[k] != origch) {
+					printf("\n b) Expected val: %c and found: %c for zonenr: %d  blknr: %d, k: %d", origch, buff[k], i, j, k);
+					printf("\n");
+					return -1;
+				}
+			}
+
 		}
 	}
 	printf("\n");
