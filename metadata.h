@@ -236,7 +236,8 @@ struct ctx {
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
 	struct rb_root	  gc_cost_root;	  /* GC tree */
 	struct rb_root	  gc_zone_root;
-	struct rw_semaphore metadata_update_lock;
+	struct rw_semaphore lsdm_rb_lock;
+	struct rw_semaphore lsdm_rev_lock;
 	rwlock_t	  sit_rb_lock;
 	int               n_extents;      /* map size */
 	int		  n_sit_extents;

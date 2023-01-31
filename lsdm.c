@@ -205,9 +205,9 @@ static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba, int print)
 {
 	struct extent *e = NULL;
 
-	down_read(&ctx->metadata_update_lock); 
+	down_read(&ctx->lsdm_rb_lock); 
 	e = _lsdm_rb_geq(&ctx->extent_tbl_root, lba, print);
-	up_read(&ctx->metadata_update_lock); 
+	up_read(&ctx->lsdm_rb_lock); 
 
 	return e;
 }
@@ -590,7 +590,6 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
 		} 
 		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, e->lba, e->pba, e->len);
 		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
-		dump_stack();
 		BUG_ON("Bug while adding revmap entry !");
 	}
 	//printk( KERN_ERR "\n %s Inserting pba: %llu, pointing to (lba, len): (%llu, %llu)", __func__, r_new->pba, extent->lba, extent->len);
@@ -651,6 +650,7 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
 	r_insert = lsdm_rb_revmap_insert(ctx, new);
+	/*
 	end = zone_end(ctx, new->pba);
 	r_find = lsdm_rb_revmap_find(ctx, new->pba, new->len, end);
 	if (r_insert != r_find) {
@@ -664,7 +664,7 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 		printk(KERN_ERR "\n revmap_find()::pba: %llu, revmap_insert()::pba: %llu", r_find->pba, r_insert->pba);
 		BUG();
 	}
-
+	*/
 	merge(ctx, root, new);
 	/* new should be physically discontiguous
 	 */
@@ -727,7 +727,6 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 
 	if ((lba > e->lba) && ((lba + len) < (e->lba + e->len))) {
 		u64 temppba;
-		diff =  new->lba - e->lba;
 		split = kmem_cache_alloc(ctx->extent_cache, GFP_KERNEL);
 		if (!split) {
 			kmem_cache_free(ctx->extent_cache, new);
@@ -1381,18 +1380,18 @@ int complete_revmap_blk_flush(struct ctx * ctx, struct page *page)
 	unsigned int revmap_entry_nr, revmap_sector_nr;	
 	sector_t pba;
 	
-	down_write(&ctx->metadata_update_lock);
+	down_write(&ctx->lsdm_rev_lock);
 	pba = ctx->revmap_pba;
 	revmap_entry_nr = atomic_read(&ctx->revmap_entry_nr);
 	revmap_sector_nr = atomic_read(&ctx->revmap_sector_nr);
 	//printk(KERN_ERR "\n %s entry_nr: %d sector_nr: %d page: %p", __func__, revmap_entry_nr, revmap_sector_nr, page_address(page));
 	if ((revmap_entry_nr == 0) && (revmap_sector_nr == 0)) {
-		up_write(&ctx->metadata_update_lock);
+		up_write(&ctx->lsdm_rev_lock);
 		return 0;
 	}
 	atomic_set(&ctx->revmap_entry_nr, 0);
 	atomic_set(&ctx->revmap_sector_nr, 0);
-	up_write(&ctx->metadata_update_lock);
+	up_write(&ctx->lsdm_rev_lock);
 
 	bio = bio_alloc(GFP_KERNEL, 1);
 	if (!bio) {
@@ -1523,10 +1522,10 @@ prep:
 			list_add(&newgc_extent->list, &gc_extent->list);
 			next_ptr = newgc_extent;
 		}
-		down_write(&ctx->metadata_update_lock);
+		down_write(&ctx->lsdm_rb_lock);
 		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, gc_extent->e.len, last_pba);
 		if (!rev_e || (rev_e->pba > gc_extent->e.pba)) {
-			up_write(&ctx->metadata_update_lock);
+			up_write(&ctx->lsdm_rb_lock);
 			goto prep;
 		}
 		len = gc_extent->e.len;
@@ -1534,7 +1533,7 @@ prep:
 		if (ret > 1) 
 			wait_on_refcount(ctx, &gc_extent->ref, &ctx->gc_ref_lock);
 		ret = write_gc_extent(ctx, gc_extent);
-		up_write(&ctx->metadata_update_lock);
+		up_write(&ctx->lsdm_rb_lock);
 		if (ret) {
 			/* write error! disk is in a read mode! we
 			 * cannot perform any further GC
@@ -2176,6 +2175,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 * because of the lsdm_rb_geq() design
 		 */
 		if ((e == NULL) || (e->lba >= lba + nr_sectors) || (e->lba + e->len <= lba))  {
+			//printk(KERN_ERR "\n %s -> (no e) lba: %llu pba: 0 len: 0", __func__, lba);
 			zero_fill_clone(ctx, read_ctx, clone);
 			break;
 		}
@@ -2186,7 +2186,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 *	[---------bio------] 
 		 */
 			zerolen = e->lba - lba;
-			//printk(KERN_ERR "\n 1.  %s e->lba: %llu >  lba: %llu split_sectors: %d \n", __func__, e->lba, lba, nr_sectors);
+			//printk(KERN_ERR "\n 1.  %s lba: %llu > pba: 0 len: %d \n", __func__, lba, 0, zerolen);
 			split = bio_split(clone, zerolen, GFP_NOIO, &fs_bio_set);
 			if (!split) {
 				printk(KERN_ERR "\n Could not split the clone! ERR ");
@@ -2224,11 +2224,13 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 				clone->bi_end_io = lsdm_subread_done;
 				clone->bi_iter.bi_sector = pba;
 				bio_set_dev(clone, ctx->dev->bdev);
-				//printk(KERN_ERR "\n 3* (FINAL) %s lba: %llu, nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, bio_sectors(clone), e->lba, e->pba, e->len);
+				//printk(KERN_ERR "\n 3* (FINAL)  %s lba: %llu > pba: 0 len: %d \n", __func__, lba, e->pba, s8);
+				//printk(KERN_ERR "\n 3* (FINAL)  %s e->lba: %llu e->pba: 0 e->len: %d \n", __func__, e->lba, e->pba, e->len);
+				submit_bio_noacct(clone);
+				break;
 			} else {
 				s8 = round_down(nr_sectors, NR_SECTORS_IN_BLK);
 				if (nr_sectors <= s8) {
-					printk(KERN_ERR "\n %s %d nr_sectors: %d s8: %d ", __func__, __LINE__, nr_sectors, s8);
 					BUG();
 				}
 				if (nr_sectors > NR_SECTORS_IN_BLK) {
@@ -2249,7 +2251,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 					pba = pba + s8;
 					/* let it fall through to the next case */
 				}
-				//(nr_sectors < NR_SECTORS_IN_BLK) 
+				//(nr_sectors < NR_SECTORS_IN_BLK)
 				read_ctx->nrsectors = nr_sectors;
 				read_ctx->lba = clone->bi_iter.bi_sector;
 				//printk(KERN_ERR "\n %s **** lba: %llu nrsectors: %d bio::lba: %llu, bio::len: %d clone: %p \n", __func__, lba, nr_sectors, read_ctx->lba, read_ctx->nrsectors, clone);
@@ -2259,11 +2261,12 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 					printk(KERN_ERR "\n %s could not construct smaller bio! \n");
 					bio_endio(read_ctx->clone);
 				}
-			}
-			//printk(KERN_ERR "\n %s 3* {lba: %llu, pba: %llu, len: %llu}",  __func__, lba, pba, e->len);
+				//printk(KERN_ERR "\n %s (smaller read) -> lba: %llu pba:%llu len:%d", __func__, lba, clone->bi_iter.bi_sector, nr_sectors);
+				submit_bio_noacct(clone);
+				break;
+
+			}	
 			BUG_ON(pba > ctx->sb->max_pba);
-			submit_bio_noacct(clone);
-			break;
 		}
 		/* else e is smaller than bio */
 		split = bio_split(clone, overlap, GFP_NOIO, &fs_bio_set);
@@ -2279,6 +2282,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		split->bi_iter.bi_sector = pba;
 		bio_set_dev(split, ctx->dev->bdev);
 		BUG_ON(pba > ctx->sb->max_pba);
+		//printk(KERN_ERR "\n %s -> lba: %llu pba:%llu len:%d", __func__, lba, pba, overlap);
 		submit_bio_noacct(split);
 		/* Since e was smaller, we want to search for the next e */
 	}
@@ -4121,7 +4125,7 @@ void process_tm_entries(struct work_struct * w)
 	struct page *page = revmap_bio_ctx->page;
 	struct ctx * ctx = revmap_bio_ctx->ctx;
 
-	//add_block_based_translation(ctx, page, __func__);
+	add_block_based_translation(ctx, page, __func__);
 	__free_pages(page, 0);
 	nrpages--;
 	kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
@@ -4186,8 +4190,8 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, sector_t revmap
 	BUG_ON(ctx->revmap_pba > ctx->sb->max_pba);
 	submit_bio(bio);
 	//printk(KERN_ERR "\n flushing revmap at pba: %llu page: %p", bio->bi_iter.bi_sector, page_address(page));
-	//INIT_WORK(&revmap_bio_ctx->process_tm_work, process_tm_entries);
-	//queue_work(ctx->tm_wq, &revmap_bio_ctx->process_tm_work);
+	INIT_WORK(&revmap_bio_ctx->process_tm_work, process_tm_entries);
+	queue_work(ctx->tm_wq, &revmap_bio_ctx->process_tm_work);
 	return 0;
 }
 
@@ -4311,7 +4315,7 @@ int merge_rev_entries(struct ctx * ctx, sector_t lba, sector_t pba, unsigned lon
 
 /* We store only the LBA. We can calculate the PBA from the wf
  * 
- * Always called with the metadata_update_lock held!
+ * Always called with the lsdm_rb_lock held!
  */
 static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsectors)
 {
@@ -4339,7 +4343,7 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 			if (NR_SECTORS_PER_BLK == (sector_nr + 1)) {
 				BUG_ON(page == NULL);
 				/* Called from the write context */
-				//flush_revmap_block_disk(ctx, ctx->revmap_page, ctx->revmap_pba);
+				flush_revmap_block_disk(ctx, ctx->revmap_page, ctx->revmap_pba);
 				atomic_set(&ctx->revmap_sector_nr, 0);
 				/* Adjust the revmap_pba for the next block 
 				* Addressing is based on 512bytes sector.
@@ -4464,12 +4468,18 @@ void sub_write_done(struct work_struct * w)
 
 	//printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
 
-	down_write(&ctx->metadata_update_lock);
+	down_write(&ctx->lsdm_rb_lock);
 	/*------------------------------- */
 	lsdm_rb_update_range(ctx, lba, pba, len);
-	add_revmap_entry(ctx, lba, pba, len);
 	/*-------------------------------*/
-	up_write(&ctx->metadata_update_lock);
+	up_write(&ctx->lsdm_rb_lock);
+
+
+	down_write(&ctx->lsdm_rev_lock);
+	/*------------------------------- */
+	//add_revmap_entry(ctx, lba, pba, len);
+	/*-------------------------------*/
+	up_write(&ctx->lsdm_rev_lock);
 	return;
 }
 
@@ -4640,7 +4650,7 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, struc
 	struct lsdm_bioctx *bioctx = subbio_ctx->bioctx;
 	struct bio *split;
 	sector_t lba = subbio_ctx->extent.lba;
-	sector_t wf;
+	sector_t wf, old;
 
 	//printk(KERN_ERR "\n %s lba: {%llu, len: %d},", __func__, lba, s8);
 	/* We cannot call bio_split with spinlock held! */
@@ -4657,6 +4667,7 @@ again:
 	spin_lock(&ctx->lock);
 	/*-------------------------------*/
 	if (s8 > ctx->free_sectors_in_wf){
+		old = s8;
 		s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 		BUG_ON(s8 != ctx->free_sectors_in_wf);
 		spin_unlock(&ctx->lock);
@@ -4666,15 +4677,16 @@ again:
 		split = split_submit(ctx, split, s8, subbio_ctx);
 		if (!split)
 			return NULL;
+		s8 = old - s8;
 		goto again;
 	}
 	/* Next we fetch the LBA that our DM got */
-
+	BUG_ON(!s8);
 	wf = ctx->hot_wf_pba;
-	move_write_frontier(ctx, s8);
 	kref_get(&bioctx->ref);
 	fill_bio(split, wf, s8, ctx->dev->bdev, subbio_ctx);
 	fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
+	move_write_frontier(ctx, s8);
 	/*-------------------------------*/
 	spin_unlock(&ctx->lock);
 	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
@@ -4708,6 +4720,8 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 
 	kref_init(&bioctx->ref);
 	do {
+		BUG_ON(lba != clone->bi_iter.bi_sector);
+		BUG_ON(lba > ctx->sb->max_pba);
 		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
 		if (!subbio_ctx) {
 			printk(KERN_ERR "\n %s Could not allocate memory to subbio_ctx \n", __func__);
@@ -4725,6 +4739,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		}
 		dosplit = 0;
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
+		BUG_ON(s8 != nr_sectors);
 		if (s8 > maxlen) {
 			s8 = maxlen;
 			dosplit = 1;
@@ -4738,24 +4753,23 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		if (!dosplit) {
 			/* Next we fetch the LBA that our DM got */
 			wf = ctx->hot_wf_pba;
-			move_write_frontier(ctx, s8);
 			kref_get(&bioctx->ref);
 			fill_bio(clone, wf, s8, ctx->dev->bdev, subbio_ctx);
 			fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
+			move_write_frontier(ctx, s8);
 			spin_unlock(&ctx->lock);
-			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
 			submit_bio_noacct(clone);
+			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
 			break;
 		}
 		//dosplit = 1
 		spin_unlock(&ctx->lock);
+		subbio_ctx->extent.lba = lba;
 		clone = split_submit(ctx, clone, s8, subbio_ctx);
 		if (!clone)
 			goto fail;
-		lba = lba + subbio_ctx->extent.len;
-
-		BUG_ON(lba > ctx->sb->max_pba);
-	} while (split != clone);
+		lba = lba + s8;
+	} while (1);
 
 	//blk_finish_plug(&plug);
 	kref_put(&bioctx->ref, write_done);
@@ -5141,9 +5155,9 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 		//printk(KERN_ERR "\n %s entry->lba: %llu entry->pba: %llu", __func__, lba, entry->pba);
 		/* TODO: right now everything should be zeroed out */
 		//panic("Why are there any already mapped extents?");
-		down_write(&ctx->metadata_update_lock);
+		down_write(&ctx->lsdm_rb_lock);
 		lsdm_rb_update_range(ctx, lba, entry->pba, NR_SECTORS_IN_BLK);
-		up_write(&ctx->metadata_update_lock);
+		up_write(&ctx->lsdm_rb_lock);
 		lba = lba + 8; /* Every 512 bytes sector has an LBA in a SMR drive */
 		entry = entry + 1;
 	}
@@ -5236,9 +5250,9 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page)
 		for (j=0; j < NR_EXT_ENTRIES_PER_SEC; j++) {
 			if (extent[j].pba == 0)
 				continue;
-			down_write(&ctx->metadata_update_lock);
+			down_write(&ctx->lsdm_rb_lock);
 			lsdm_rb_update_range(ctx, extent[j].lba, extent[j].pba, extent[j].len);
-			up_write(&ctx->metadata_update_lock);
+			up_write(&ctx->lsdm_rb_lock);
 		}
 		entry_sector = entry_sector + 1;
 		i++;
@@ -6132,7 +6146,8 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	ctx->mounted_time = ktime_get_real_seconds();
 	ctx->extent_tbl_root = RB_ROOT;
 	ctx->rev_tbl_root = RB_ROOT;
-	init_rwsem(&ctx->metadata_update_lock);
+	init_rwsem(&ctx->lsdm_rb_lock);
+	init_rwsem(&ctx->lsdm_rev_lock);
 
 	ctx->tm_rb_root = RB_ROOT;
 	ctx->sit_rb_root = RB_ROOT;
