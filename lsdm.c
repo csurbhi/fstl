@@ -4428,14 +4428,17 @@ void write_done(struct kref *kref)
 	struct blk_zone_report *bzr;
 
 	lsdm_bioctx = container_of(kref, struct lsdm_bioctx, ref);
+	ctx = lsdm_bioctx->ctx;
 	bio = lsdm_bioctx->orig;
+	BUG_ON(!bio);
+	BUG_ON(!ctx);
+
 	if (BLK_STS_OK != bio->bi_status) {
 		printk(KERN_ERR "\n %s bio status: %d ", __func__, bio->bi_status);
 	}
 end:
 	bio_endio(bio);
 
-	ctx = lsdm_bioctx->ctx;
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	//mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 }
@@ -4459,14 +4462,11 @@ void sub_write_done(struct work_struct * w)
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
 
-	kref_put(&bioctx->ref, write_done);
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
-
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
 
-	//printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
+	printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
 
 	down_write(&ctx->lsdm_rb_lock);
 	/*------------------------------- */
@@ -4474,12 +4474,15 @@ void sub_write_done(struct work_struct * w)
 	/*-------------------------------*/
 	up_write(&ctx->lsdm_rb_lock);
 
+	/* Now reads will work! so we can complete the bio */
+	kref_put(&bioctx->ref, write_done);
+	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 
-	down_write(&ctx->lsdm_rev_lock);
+	//down_write(&ctx->lsdm_rev_lock);
 	/*------------------------------- */
 	//add_revmap_entry(ctx, lba, pba, len);
 	/*-------------------------------*/
-	up_write(&ctx->lsdm_rev_lock);
+	//up_write(&ctx->lsdm_rev_lock);
 	return;
 }
 
@@ -4541,25 +4544,24 @@ void lsdm_clone_endio(struct bio * clone)
 	struct lsdm_bioctx *bioctx;
 
 	subbioctx = clone->bi_private;
-	if (subbioctx) {
-		bioctx = subbioctx->bioctx;
-		BUG_ON(!bioctx);
-		ctx = bioctx->ctx;
-		BUG_ON(!ctx);
-		bio = bioctx->orig;
-		BUG_ON(!bio);
-		if (clone->bi_status != BLK_STS_OK) {
-			if (bio->bi_status == BLK_STS_OK) {
-				bio->bi_status = clone->bi_status;
-			}
-			ctx->err = 1;
+	BUG_ON(!subbioctx);
+	bioctx = subbioctx->bioctx;
+	BUG_ON(!bioctx);
+	ctx = bioctx->ctx;
+	BUG_ON(!ctx);
+	bio = bioctx->orig;
+	BUG_ON(!bio);
+	if (clone->bi_status != BLK_STS_OK) {
+		if (bio->bi_status == BLK_STS_OK) {
 			bio->bi_status = clone->bi_status;
-			INIT_WORK(&subbioctx->work, sub_write_err);
-			queue_work(ctx->writes_wq, &subbioctx->work);
-		} else {
-			INIT_WORK(&subbioctx->work, sub_write_done);
-			queue_work(ctx->writes_wq, &subbioctx->work);
 		}
+		ctx->err = 1;
+		bio->bi_status = clone->bi_status;
+		INIT_WORK(&subbioctx->work, sub_write_err);
+		queue_work(ctx->writes_wq, &subbioctx->work);
+	} else {
+		INIT_WORK(&subbioctx->work, sub_write_done);
+		queue_work(ctx->writes_wq, &subbioctx->work);
 	}
 	bio_put(clone);
 	return;
@@ -4639,24 +4641,51 @@ void fill_subbioctx(struct lsdm_sub_bioctx * subbio_ctx, struct lsdm_bioctx *bio
 	subbio_ctx->extent.len = len;
 }
 
+int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8)
+{
+	struct lsdm_sub_bioctx *subbio_ctx;
+	sector_t wf = 0;
+	struct lsdm_bioctx * bioctx = clone->bi_private;
+	sector_t lba = clone->bi_iter.bi_sector;
+
+	subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
+	if (!subbio_ctx) {
+		printk(KERN_ERR "\n %s Could not allocate memory to subbio_ctx \n", __func__);
+		kmem_cache_free(ctx->bioctx_cache, bioctx);
+		return -1;
+	}
+
+	/* Next we fetch the LBA that our DM got */
+	wf = ctx->hot_wf_pba;
+	kref_get(&bioctx->ref);
+	fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
+	fill_bio(clone, wf, s8, ctx->dev->bdev, subbio_ctx);
+	move_write_frontier(ctx, s8);
+	return 0;
+}
 
 /*
  * Returns the second part of the split bio.
  * submits the first part
  */
-struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, struct lsdm_sub_bioctx *subbio_ctx)
+struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8)
 {
 
-	struct lsdm_bioctx *bioctx = subbio_ctx->bioctx;
+	struct lsdm_bioctx *bioctx = clone->bi_private;
 	struct bio *split;
-	sector_t lba = subbio_ctx->extent.lba;
+	sector_t lba = 0;
 	sector_t wf, old;
+	
+	BUG_ON(!s8);
+	BUG_ON(!ctx);
+	BUG_ON(!bioctx);
+
+	lba = clone->bi_iter.bi_sector;
 
 	//printk(KERN_ERR "\n %s lba: {%llu, len: %d},", __func__, lba, s8);
 	/* We cannot call bio_split with spinlock held! */
 	if (!(split = bio_split(clone, s8, GFP_NOIO, &fs_bio_set))){
 		printk("\n %s failed at bio_split! ", __func__);
-		kmem_cache_free(ctx->subbio_ctx_cache, subbio_ctx);
 		kmem_cache_free(ctx->bioctx_cache, bioctx);
 		return NULL;
 	}
@@ -4664,6 +4693,7 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, struc
 	 * we need to split again.
 	 */
 again:
+	split->bi_private = bioctx;
 	spin_lock(&ctx->lock);
 	/*-------------------------------*/
 	if (s8 > ctx->free_sectors_in_wf){
@@ -4674,41 +4704,37 @@ again:
 		/* we are splitting our split. The second part of split will be returned.
 		 * When we return, we will submit this second part of split.
 		 */
-		split = split_submit(ctx, split, s8, subbio_ctx);
+		split = split_submit(ctx, split, s8);
 		if (!split)
 			return NULL;
 		s8 = old - s8;
 		goto again;
 	}
 	/* Next we fetch the LBA that our DM got */
-	BUG_ON(!s8);
-	wf = ctx->hot_wf_pba;
-	kref_get(&bioctx->ref);
-	fill_bio(split, wf, s8, ctx->dev->bdev, subbio_ctx);
-	fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
-	move_write_frontier(ctx, s8);
-	/*-------------------------------*/
+	if (prepare_bio(ctx, split, s8))
+		goto fail;
 	spin_unlock(&ctx->lock);
 	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	submit_bio_noacct(split);
 	/* we return the second part */
 	return clone;
+fail:
+	return NULL;
 }
+
 
 int submit_bio_write(struct ctx *ctx, struct bio *clone)
 {
 
 	struct bio *split = NULL, *pad = NULL;
-	struct lsdm_bioctx * bioctx = clone->bi_private;
-	struct lsdm_sub_bioctx *subbio_ctx;
 	unsigned nr_sectors = bio_sectors(clone);
 	sector_t s8, lba = clone->bi_iter.bi_sector;
-	sector_t wf = 0;
 	struct lsdm_ckpt *ckpt;
 	struct tm_page *tm_page;
 	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
 	int dosplit = 0, ret = 0;
 	struct gendisk *disk;
+	struct lsdm_bioctx * bioctx = clone->bi_private;
 
 	clone->bi_status = BLK_STS_OK;
 
@@ -4717,24 +4743,15 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	BUG_ON(!bioctx->orig);
 
 	clone->bi_status = BLK_STS_OK;
-
 	kref_init(&bioctx->ref);
 	do {
 		BUG_ON(lba != clone->bi_iter.bi_sector);
 		BUG_ON(lba > ctx->sb->max_pba);
-		subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
-		if (!subbio_ctx) {
-			printk(KERN_ERR "\n %s Could not allocate memory to subbio_ctx \n", __func__);
-			kmem_cache_free(ctx->bioctx_cache, bioctx);
-			goto fail;
-		}
-		subbio_ctx->bioctx = bioctx;
 		mykref_get(&ctx->ongoing_iocount);
 		atomic_inc(&ctx->nr_app_writes);
 		nr_sectors = bio_sectors(clone);
 		if (!nr_sectors) {
 			printk(KERN_ERR "\n %s 2)nr_sectors: %d \n", __func__, nr_sectors);
-			dump_stack();
 			BUG_ON(!nr_sectors);
 		}
 		dosplit = 0;
@@ -4751,12 +4768,9 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 			dosplit = 1;
 		}
 		if (!dosplit) {
-			/* Next we fetch the LBA that our DM got */
-			wf = ctx->hot_wf_pba;
-			kref_get(&bioctx->ref);
-			fill_bio(clone, wf, s8, ctx->dev->bdev, subbio_ctx);
-			fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
-			move_write_frontier(ctx, s8);
+			clone->bi_private = bioctx;
+			if (prepare_bio(ctx, clone, s8))
+				goto fail;
 			spin_unlock(&ctx->lock);
 			submit_bio_noacct(clone);
 			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
@@ -4764,8 +4778,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		}
 		//dosplit = 1
 		spin_unlock(&ctx->lock);
-		subbio_ctx->extent.lba = lba;
-		clone = split_submit(ctx, clone, s8, subbio_ctx);
+		clone = split_submit(ctx, clone, s8);
 		if (!clone)
 			goto fail;
 		lba = lba + s8;
@@ -4790,12 +4803,12 @@ void lsdm_handle_write(struct ctx *ctx)
 	struct bio *bio;
 
 	while ((bio = bio_list_pop(&ctx->bio_list))) {
-		if (submit_bio_write(ctx, bio)) {
-			printk(KERN_ERR "\n write failed, cannot proceed! ");
-			break;
-		}
 		if (ctx->err) {
 			printk(KERN_ERR "\n cannot write further, I/O error encountered! ");
+			break;
+		}
+		if (submit_bio_write(ctx, bio)) {
+			printk(KERN_ERR "\n write failed, cannot proceed! ");
 			break;
 		}
 	}
