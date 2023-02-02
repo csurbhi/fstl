@@ -2422,13 +2422,13 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	ptr->vblocks = BLOCKS_IN_ZONE;
 	ptr->mtime = 0;
 
-	spin_lock(&ctx->lock);
+	mutex_lock(&ctx->wf_lock);
 	/*-----------------------------------------------*/
 	ctx->nr_invalid_zones++;
 	pba = get_new_zone(ctx);
 	destn_zonenr = get_zone_nr(ctx, pba);
 	/*-----------------------------------------------*/
-	spin_unlock(&ctx->lock);
+	mutex_unlock(&ctx->wf_lock);
 	if (0 > pba) {
 		printk(KERN_INFO "No more disk space available for writing!");
 		return;
@@ -2450,7 +2450,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 		panic("This is a ctx bug");
 	}
 		
-	spin_lock(&ctx->lock);
+	mutex_lock(&ctx->wf_lock);
 	bitmap = ctx->freezone_bitmap;
 	bytenr = zonenr / BITS_IN_BYTE;
 	bitnr = zonenr % BITS_IN_BYTE;
@@ -2478,7 +2478,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	ctx->nr_freezones = ctx->nr_freezones + 1;
 	//printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
-	spin_unlock(&ctx->lock);
+	mutex_unlock(&ctx->wf_lock);
 	/* we need to reset the  zone that we are about to use */
 	if (zonenr > ctx->sb->nr_cmr_zones) {
 		ret = blkdev_zone_mgmt(ctx->dev->bdev, REQ_OP_ZONE_RESET, get_first_pba_for_zone(ctx, zonenr), ctx->sb->nr_lbas_in_zone, GFP_NOIO);
@@ -4466,7 +4466,7 @@ void sub_write_done(struct work_struct * w)
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
 
-	printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
+	printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, lba, pba, len, kref_read(&bioctx->ref));
 
 	down_write(&ctx->lsdm_rb_lock);
 	/*------------------------------- */
@@ -4641,10 +4641,9 @@ void fill_subbioctx(struct lsdm_sub_bioctx * subbio_ctx, struct lsdm_bioctx *bio
 	subbio_ctx->extent.len = len;
 }
 
-int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8)
+int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8, sector_t wf)
 {
 	struct lsdm_sub_bioctx *subbio_ctx;
-	sector_t wf = 0;
 	struct lsdm_bioctx * bioctx = clone->bi_private;
 	sector_t lba = clone->bi_iter.bi_sector;
 
@@ -4656,11 +4655,9 @@ int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8)
 	}
 
 	/* Next we fetch the LBA that our DM got */
-	wf = ctx->hot_wf_pba;
 	kref_get(&bioctx->ref);
 	fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
 	fill_bio(clone, wf, s8, ctx->dev->bdev, subbio_ctx);
-	move_write_frontier(ctx, s8);
 	return 0;
 }
 
@@ -4668,13 +4665,12 @@ int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8)
  * Returns the second part of the split bio.
  * submits the first part
  */
-struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8)
+struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, sector_t wf)
 {
 
 	struct lsdm_bioctx *bioctx = clone->bi_private;
 	struct bio *split;
 	sector_t lba = 0;
-	sector_t wf, old;
 	
 	BUG_ON(!s8);
 	BUG_ON(!ctx);
@@ -4694,26 +4690,9 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8)
 	 */
 again:
 	split->bi_private = bioctx;
-	spin_lock(&ctx->lock);
-	/*-------------------------------*/
-	if (s8 > ctx->free_sectors_in_wf){
-		old = s8;
-		s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
-		BUG_ON(s8 != ctx->free_sectors_in_wf);
-		spin_unlock(&ctx->lock);
-		/* we are splitting our split. The second part of split will be returned.
-		 * When we return, we will submit this second part of split.
-		 */
-		split = split_submit(ctx, split, s8);
-		if (!split)
-			return NULL;
-		s8 = old - s8;
-		goto again;
-	}
 	/* Next we fetch the LBA that our DM got */
-	if (prepare_bio(ctx, split, s8))
+	if (prepare_bio(ctx, split, s8, wf))
 		goto fail;
-	spin_unlock(&ctx->lock);
 	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	submit_bio_noacct(split);
 	/* we return the second part */
@@ -4728,7 +4707,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 
 	struct bio *split = NULL, *pad = NULL;
 	unsigned nr_sectors = bio_sectors(clone);
-	sector_t s8, lba = clone->bi_iter.bi_sector;
+	sector_t s8, lba = clone->bi_iter.bi_sector, wf = 0;
 	struct lsdm_ckpt *ckpt;
 	struct tm_page *tm_page;
 	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
@@ -4761,24 +4740,28 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 			s8 = maxlen;
 			dosplit = 1;
 		}
-		spin_lock(&ctx->lock);
+		mutex_lock(&ctx->wf_lock);
 		if (s8 > ctx->free_sectors_in_wf){
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			BUG_ON(s8 != ctx->free_sectors_in_wf);
 			dosplit = 1;
 		}
+		wf = ctx->hot_wf_pba;
+		move_write_frontier(ctx, s8);
 		if (!dosplit) {
 			clone->bi_private = bioctx;
-			if (prepare_bio(ctx, clone, s8))
+			if (prepare_bio(ctx, clone, s8, wf)) {
+				mutex_unlock(&ctx->wf_lock);
 				goto fail;
-			spin_unlock(&ctx->lock);
+			}
 			submit_bio_noacct(clone);
 			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
+			mutex_unlock(&ctx->wf_lock);
 			break;
 		}
 		//dosplit = 1
-		spin_unlock(&ctx->lock);
-		clone = split_submit(ctx, clone, s8);
+		clone = split_submit(ctx, clone, s8, wf);
+		mutex_unlock(&ctx->wf_lock);
 		if (!clone)
 			goto fail;
 		lba = lba + s8;
@@ -4822,7 +4805,6 @@ static int lsdm_write_thread_fn(void * data)
 	struct lsdm_write_thread *write_th = ctx->write_th;
 	wait_queue_head_t *wq = &write_th->write_waitq;
 
-	mutex_init(&ctx->write_lock);
 	printk(KERN_ERR "\n %s executing! ", __func__);
 	set_freezable();
 	do {
@@ -5642,9 +5624,9 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 		if ((*zonenr == get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) ||
 		    (*zonenr == get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
 			//printk(KERN_ERR "\n zonenr: %d vblocks: %llu is our cur_frontier! not marking it free!", *zonenr, entry->vblocks);
-			spin_lock(&ctx->lock);
+			mutex_lock(&ctx->wf_lock);
 			mark_zone_occupied(ctx , *zonenr);
-			spin_unlock(&ctx->lock);
+			mutex_unlock(&ctx->wf_lock);
 
 			entry = entry + 1;
 			*zonenr= *zonenr + 1;
@@ -6122,12 +6104,11 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	ctx->tm_wq = create_workqueue("tm_queue");
 	
 	bio_list_init(&ctx->bio_list);
-	mutex_init(&ctx->write_lock);
+	mutex_init(&ctx->wf_lock);
 	mutex_init(&ctx->tm_lock);
 	mutex_init(&ctx->sit_kv_store_lock);
 	mutex_init(&ctx->tm_kv_store_lock);
 
-	spin_lock_init(&ctx->lock);
 	spin_lock_init(&ctx->tm_ref_lock);
 	spin_lock_init(&ctx->tm_flush_lock);
 	mutex_init(&ctx->sit_flush_lock);
