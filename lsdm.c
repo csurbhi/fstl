@@ -2158,6 +2158,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		bio_endio(bio);
 		return -ENOMEM;
 	}
+	//printk(KERN_ERR "\n %s -> bio::lba: %llu bio::nrsectors: %d", __func__, clone->bi_iter.bi_sector, nr_sectors);
 
 	clone->bi_private = read_ctx;
 	bio_set_dev(clone, ctx->dev->bdev);
@@ -2168,7 +2169,6 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		nr_sectors = bio_sectors(clone);
 		lba = clone->bi_iter.bi_sector;
 		lba = round_down(lba, NR_SECTORS_IN_BLK);
-		//printk(KERN_ERR "\n %s -> lba: %llu bio::lba: %llu bio::nrsectors: %d", __func__, lba, clone->bi_iter.bi_sector, nr_sectors);
 		e = lsdm_rb_geq(ctx, lba, print);
 
 		/* case of no overlap, technically, e->lba + e->len cannot be less than lba
@@ -2226,7 +2226,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 				bio_set_dev(clone, ctx->dev->bdev);
 				//printk(KERN_ERR "\n 3* (FINAL)  %s lba: %llu > pba: 0 len: %d \n", __func__, lba, e->pba, s8);
 				//printk(KERN_ERR "\n 3* (FINAL)  %s e->lba: %llu e->pba: 0 e->len: %d \n", __func__, e->lba, e->pba, e->len);
-				submit_bio_noacct(clone);
+				submit_bio(clone);
 				break;
 			} else {
 				s8 = round_down(nr_sectors, NR_SECTORS_IN_BLK);
@@ -2246,7 +2246,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 					split->bi_iter.bi_sector = pba;
 					bio_set_dev(split, ctx->dev->bdev);
 					BUG_ON(pba > ctx->sb->max_pba);
-					submit_bio_noacct(split);
+					submit_bio(split);
 					nr_sectors = bio_sectors(clone);
 					pba = pba + s8;
 					/* let it fall through to the next case */
@@ -2262,7 +2262,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 					bio_endio(read_ctx->clone);
 				}
 				//printk(KERN_ERR "\n %s (smaller read) -> lba: %llu pba:%llu len:%d", __func__, lba, clone->bi_iter.bi_sector, nr_sectors);
-				submit_bio_noacct(clone);
+				submit_bio(clone);
 				break;
 
 			}	
@@ -2283,10 +2283,10 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		bio_set_dev(split, ctx->dev->bdev);
 		BUG_ON(pba > ctx->sb->max_pba);
 		//printk(KERN_ERR "\n %s -> lba: %llu pba:%llu len:%d", __func__, lba, pba, overlap);
-		submit_bio_noacct(split);
+		submit_bio(split);
 		/* Since e was smaller, we want to search for the next e */
 	}
-	//printk(KERN_INFO "\n %s end", __func__);
+	//printk(KERN_INFO "\t %s end \n", __func__);
 	return 0;
 }
 
@@ -2584,7 +2584,7 @@ try_again:
 	ctx->hot_wf_pba = ctx->sb->zone0_pba + (zone_nr << (ctx->sb->log_zone_size - ctx->sb->log_sector_size));
 	ctx->hot_wf_end = zone_end(ctx, ctx->hot_wf_pba);
 
-	//printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d hot_wf_pba: %llu, wf_end: %llu", ctx->sb->zone0_pba, zone_nr, ctx->hot_wf_pba, ctx->hot_wf_end);
+	//printk(KERN_ERR "\n !!!!!!!!!!!!!!! get_new_zone():: zone0_pba: %u zone_nr: %d hot_wf_pba: %llu, wf_end: %llu \n", ctx->sb->zone0_pba, zone_nr, ctx->hot_wf_pba, ctx->hot_wf_end);
 	if (ctx->hot_wf_pba > ctx->hot_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %lld", ctx->free_sectors_in_wf );
 	}
@@ -4466,7 +4466,7 @@ void sub_write_done(struct work_struct * w)
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
 
-	printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, lba, pba, len, kref_read(&bioctx->ref));
+	//printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, lba, pba, len, kref_read(&bioctx->ref));
 
 	down_write(&ctx->lsdm_rb_lock);
 	/*------------------------------- */
@@ -4646,6 +4646,7 @@ int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8, sector_t wf)
 	struct lsdm_sub_bioctx *subbio_ctx;
 	struct lsdm_bioctx * bioctx = clone->bi_private;
 	sector_t lba = clone->bi_iter.bi_sector;
+	BUG_ON(lba > ctx->sb->max_pba);
 
 	subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
 	if (!subbio_ctx) {
@@ -4677,6 +4678,7 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, secto
 	BUG_ON(!bioctx);
 
 	lba = clone->bi_iter.bi_sector;
+	BUG_ON(lba > ctx->sb->max_pba);
 
 	//printk(KERN_ERR "\n %s lba: {%llu, len: %d},", __func__, lba, s8);
 	/* We cannot call bio_split with spinlock held! */
@@ -4689,12 +4691,13 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, secto
 	 * we need to split again.
 	 */
 again:
+	split->bi_iter.bi_sector = lba;
 	split->bi_private = bioctx;
 	/* Next we fetch the LBA that our DM got */
 	if (prepare_bio(ctx, split, s8, wf))
 		goto fail;
 	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
-	submit_bio_noacct(split);
+	submit_bio(split);
 	/* we return the second part */
 	return clone;
 fail:
@@ -4754,12 +4757,13 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 				mutex_unlock(&ctx->wf_lock);
 				goto fail;
 			}
-			submit_bio_noacct(clone);
+			submit_bio(clone);
 			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
 			mutex_unlock(&ctx->wf_lock);
 			break;
 		}
 		//dosplit = 1
+		clone->bi_iter.bi_sector = lba;
 		clone = split_submit(ctx, clone, s8, wf);
 		mutex_unlock(&ctx->wf_lock);
 		if (!clone)
