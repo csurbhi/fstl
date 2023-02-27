@@ -52,10 +52,6 @@
 #define NR_EXT_ENTRIES_PER_SEC          25
 #define NR_EXT_ENTRIES_PER_BLK          200
 
-extern int blkdev_zone_mgmt(struct block_device *bdev, enum req_opf op,
-                            sector_t sectors, sector_t nr_sectors,
-                            gfp_t gfp_mask);
-
 long nrpages;
 
 
@@ -1150,7 +1146,7 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
 	 * individually to the bio vectors
 	 */
-	bio = bio_alloc_bioset(GFP_KERNEL, pagecount, ctx->gc_bs);
+	bio = bio_alloc_bioset(ctx->dev->bdev, pagecount, REQ_OP_READ, GFP_KERNEL, ctx->gc_bs);
 	if (!bio) {
 		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
 		return -ENOMEM;
@@ -1169,8 +1165,6 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 		gc_extent->bio_pages[i] = page;
 	}
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
-	bio_set_dev(bio, ctx->dev->bdev);
-	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio->bi_private = gc_extent;
 	bio->bi_end_io = read_gcextent_done;
 	gc_extent->bio = bio;
@@ -1317,7 +1311,7 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
 	 * individually to the bio vectors
 	 */
-	bio = bio_alloc_bioset(GFP_KERNEL, bio_pages, ctx->gc_bs);
+	bio = bio_alloc_bioset(ctx->dev->bdev, bio_pages, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
 	if (!bio) {
 		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
 		return -ENOMEM;
@@ -1338,8 +1332,6 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 		}
 	}
 	//printk(KERN_ERR "\n %s bio_sectors(bio): %llu nr_pages: %d", __func__,  bio_sectors(bio), bio_pages);
-	bio_set_dev(bio, ctx->dev->bdev);
-	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	gc_extent->bio = bio;
 	return 0;
 }
@@ -1393,7 +1385,7 @@ int complete_revmap_blk_flush(struct ctx * ctx, struct page *page)
 	atomic_set(&ctx->revmap_sector_nr, 0);
 	up_write(&ctx->lsdm_rev_lock);
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		return -ENOMEM;
 	}
@@ -1405,8 +1397,6 @@ int complete_revmap_blk_flush(struct ctx * ctx, struct page *page)
 
 	bio->bi_iter.bi_sector = pba;
 	//printk(KERN_ERR "%s Flushing revmap blk at pba:%llu ctx->revmap_pba: %llu", __func__, bio->bi_iter.bi_sector, ctx->revmap_pba);
-	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
-	bio_set_dev(bio, ctx->dev->bdev);
 	BUG_ON(ctx->revmap_pba > ctx->sb->max_pba);
 	submit_bio_wait(bio);
 	bio_put(bio);
@@ -2082,7 +2072,7 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 	if (!page )
 		return NULL;
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		__free_pages(page, 0);
 		nrpages--;
@@ -2108,8 +2098,6 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 		//printk(KERN_ERR "\n %s (new small bio) data: %p ", __func__, data);
 		readctx->data = data;
 	}
-	bio_set_op_attrs(bio, REQ_OP_READ, 0);
-	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_end_io = complete_small_reads;
 	bio->bi_private = readctx;
@@ -2150,7 +2138,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 
 	atomic_set(&ctx->ioidle, 0);
 	mykref_get(&ctx->ongoing_iocount);
-	clone = bio_clone_fast(bio, GFP_KERNEL, &fs_bio_set);
+	clone = bio_alloc_clone(ctx->dev->bdev, bio, GFP_KERNEL, &fs_bio_set);
 	if (!clone) {
 		printk(KERN_ERR "\n %s could not allocate memory to clone", __func__);
 		kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
@@ -2161,7 +2149,6 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	//printk(KERN_ERR "\n %s -> bio::lba: %llu bio::nrsectors: %d", __func__, clone->bi_iter.bi_sector, nr_sectors);
 
 	clone->bi_private = read_ctx;
-	bio_set_dev(clone, ctx->dev->bdev);
 	split = NULL;
 	origlba = clone->bi_iter.bi_sector;
 	read_ctx->lba = origlba;
@@ -2223,7 +2210,6 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 				atomic_inc(&ctx->nr_reads);
 				clone->bi_end_io = lsdm_subread_done;
 				clone->bi_iter.bi_sector = pba;
-				bio_set_dev(clone, ctx->dev->bdev);
 				//printk(KERN_ERR "\n 3* (FINAL)  %s lba: %llu > pba: 0 len: %d \n", __func__, lba, e->pba, s8);
 				//printk(KERN_ERR "\n 3* (FINAL)  %s e->lba: %llu e->pba: 0 e->len: %d \n", __func__, e->lba, e->pba, e->len);
 				submit_bio(clone);
@@ -2244,7 +2230,6 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 					}
 					bio_chain(split, clone);
 					split->bi_iter.bi_sector = pba;
-					bio_set_dev(split, ctx->dev->bdev);
 					BUG_ON(pba > ctx->sb->max_pba);
 					submit_bio(split);
 					nr_sectors = bio_sectors(clone);
@@ -2280,7 +2265,6 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		//printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d e->lba: %llu e->pba: %llu e->len:%llu ", __func__, lba, pba, bio_sectors(split), e->lba, e->pba, e->len);
 		bio_chain(split, clone);
 		split->bi_iter.bi_sector = pba;
-		bio_set_dev(split, ctx->dev->bdev);
 		BUG_ON(pba > ctx->sb->max_pba);
 		//printk(KERN_ERR "\n %s -> lba: %llu pba:%llu len:%d", __func__, lba, pba, overlap);
 		submit_bio(split);
@@ -2695,7 +2679,7 @@ void flush_revmap_bitmap(struct ctx *ctx)
 	if (!page)
 		return;
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		return;
 	}
@@ -2707,8 +2691,6 @@ void flush_revmap_bitmap(struct ctx *ctx)
 	//trace_printk("\n %s flushing revmap bitmap at pba: %u", __func__, ctx->sb->revmap_bm_pba);
 	pba = ctx->sb->revmap_bm_pba;
 	bio->bi_iter.bi_sector = pba;
-	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
-	bio_set_dev(bio, ctx->dev->bdev);
 	/* Not doing this right now as the conventional zones are too little.
 	 * we need to log structurize the metadata
 	 */
@@ -2749,7 +2731,7 @@ void flush_checkpoint(struct ctx *ctx)
 	/* TODO: GC will not change the checkpoint, but will change
 	 * the SIT Info.
 	 */
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		printk(KERN_ERR "\n %s could not alloc bio ", __func__);
 		return;
@@ -2772,10 +2754,8 @@ void flush_checkpoint(struct ctx *ctx)
 		//printk(KERN_ERR "\n Updating the first checkpoint! pba: %lld", ctx->ckpt_pba);
 	}
 	pba = ctx->ckpt_pba;
-	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio->bi_iter.bi_sector = pba;
 	//printk(KERN_ERR "\n flushing checkpoint at pba: %llu", pba);
-	bio_set_dev(bio, ctx->dev->bdev);
 
 	/* Not doing this right now as the conventional zones are too little.
 	 * we need to log structurize the metadata
@@ -3448,7 +3428,7 @@ struct page * read_block(struct ctx *ctx, u64 base, u64 sectornr)
 
 	nrpages++;
 	//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_READ, GFP_KERNEL);
 	if (!bio) {
 		__free_pages(page, 0);
 		nrpages--;
@@ -3464,7 +3444,6 @@ struct page * read_block(struct ctx *ctx, u64 base, u64 sectornr)
 		printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return NULL;
 	}
-	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio->bi_iter.bi_sector = pba;
 	bio_set_dev(bio, ctx->dev->bdev);
 	submit_bio_wait(bio);
@@ -3608,7 +3587,7 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 		return;
 
 	//printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		__free_pages(page, 0);
 		nrpages--;
@@ -3635,7 +3614,6 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 
 	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  tm_page->blknr, ctx->sb->blk_count_tm);
 
-	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_iter.bi_sector = pba;
 	BUG_ON(pba > ctx->sb->max_pba);
@@ -3790,7 +3768,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	pba = sit_page->blknr;
 	//printk(KERN_ERR "\n %s sit_ctx: %p", __func__, sit_ctx);
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		return;
 	}
@@ -3803,7 +3781,6 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	}
 
 	bio_set_dev(bio, ctx->dev->bdev);
-	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	/* Sector addressing */
 	pba = (pba * NR_SECTORS_IN_BLK) + ctx->sb->sit_pba;
 	bio->bi_iter.bi_sector = pba;
@@ -4165,7 +4142,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, sector_t revmap
 		return -ENOMEM;
 	}
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
 		return -ENOMEM;
@@ -4183,7 +4160,6 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, sector_t revmap
 	bio->bi_iter.bi_sector = revmap_pba;
 	//printk(KERN_ERR "%s Flushing revmap blk at pba:%llu ctx->revmap_pba: %llu", __func__, bio->bi_iter.bi_sector, ctx->revmap_pba);
 	bio->bi_end_io = revmap_blk_flushed;
-	bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio->bi_private = revmap_bio_ctx;
 	atomic_inc(&ctx->nr_revmap_flushes);
@@ -4914,7 +4890,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	 */
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
-	clone = bio_clone_fast(bio, GFP_KERNEL, &fs_bio_set);
+	clone = bio_alloc_clone(ctx->dev->bdev, bio, GFP_KERNEL, &fs_bio_set);
 	if (!clone) {
 		goto memfail;
 	}
@@ -6090,8 +6066,8 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	}
 
 	q = bdev_get_queue(ctx->dev->bdev);
-	printk(KERN_ERR "\n number of sectors in a zone: %llu", blk_queue_zone_sectors(q));
-	printk(KERN_ERR "\n number of zones in device: %u", blkdev_nr_zones(ctx->dev->bdev->bd_disk));
+	printk(KERN_ERR "\n number of sectors in a zone: %llu", bdev_zone_sectors(ctx->dev->bdev));
+	printk(KERN_ERR "\n number of zones in device: %u", bdev_nr_zones(ctx->dev->bdev));
 	printk(KERN_ERR "\n block size in sectors: %u ", q->limits.logical_block_size);
 
 	ctx->q = q;
