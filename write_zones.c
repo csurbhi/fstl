@@ -13,9 +13,9 @@
 #include <sys/ioctl.h>
 
 
-#define NRZONES 8
-#define NR_BLKS_IN_ZONE 65536
-#define BLKSZ 4096
+#define NRZONES 1
+#define NR_BLKS_IN_ZONE 8
+#define BLKSZ 512
 
 //char * fname = "/mnt/test";
 //char * fname = "/dev/dm-0";
@@ -180,7 +180,7 @@ retry:
 			}
 			ret = read(fd, buff, BLKSZ);
 			if (ret < 0) {
-				perror("\n Could not read to file because: ");
+				perror("\n b) Could not read to file because: ");
 				printf("\n");
 				return errno;
 			}

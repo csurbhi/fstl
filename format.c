@@ -119,11 +119,12 @@ __le32 get_zone_count(int fd)
 	//return (capacity/ZONE_SZ);
 	/* we test with a disk capacity of 1 TB */
 	//return 4032;
-	return 500;
+	//return 500;
 	//return 256;
 	//return 100;
 	//return 1024;
 	//return 29808;
+	return 50;
 }
 
 /* Note,  that this also account for the first few metadata zones.
