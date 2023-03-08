@@ -2003,11 +2003,11 @@ void lsdm_subread_done(struct bio *clone)
 	struct ctx *ctx = read_ctx->ctx;
 	struct bio * bio = read_ctx->bio;
 
+	//printk(KERN_ERR "\n %s read lba: %llu ! \n", __func__, read_ctx->lba);
 	bio_endio(bio);
 	mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 	bio_put(clone);
 	kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
-	printk(KERN_ERR "\n %s done! ", __func__);
 }
 
 static int zero_fill_clone(struct ctx *ctx, struct app_read_ctx *read_ctx, struct bio *clone) 
@@ -2016,10 +2016,11 @@ static int zero_fill_clone(struct ctx *ctx, struct app_read_ctx *read_ctx, struc
 	zero_fill_bio(clone);
 	clone->bi_private = read_ctx;
 	clone->bi_end_io = lsdm_subread_done;
-	/* This bio could be the parent of other chained bios. Its necessary to call
-	 * bio_endio and not the endio function directly.
+	/* This bio could be the parent of other
+	 * chained bios. Its necessary to call
+	 * bio_endio and not the endio function
+	 * directly
 	 */
-	printk(KERN_ERR "\n %s calling bio_endio() \n", __func__);
 	bio_endio(clone);
 	atomic_inc(&ctx->nr_reads);
 	return 0;
@@ -2044,8 +2045,8 @@ void complete_small_reads(struct bio *clone)
 		goto free;
 	}
 
-	printk(KERN_ERR "\n %s smaller bio's address: %p larger bio's address: %p", __func__, clone, readctx->clone);
-	printk(KERN_ERR "\n readctx->lba: %llu, lba: %llu NR_SECTORS_IN_BLK: %d \n", readctx->lba, lba, NR_SECTORS_IN_BLK);
+	//printk(KERN_ERR "\n %s smaller bio's address: %p larger bio's address: %p", __func__, clone, readctx->clone);
+	//printk(KERN_ERR "\n readctx->lba: %llu, lba: %llu NR_SECTORS_IN_BLK: %d \n", readctx->lba, lba, NR_SECTORS_IN_BLK);
 	if ((readctx->lba - lba) > NR_SECTORS_IN_BLK) {
 		goto free;
 		//BUG();
@@ -2057,16 +2058,14 @@ void complete_small_reads(struct bio *clone)
 		todata = todata + bv.bv_offset;
 		break;
 	}
-	todata = todata + diff;
 	fromdata = readctx->data;
-	memcpy(todata, fromdata, (nrsectors << LOG_SECTOR_SIZE));
-	printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %d  bytes: %d \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
-	readctx->clone->bi_end_io = lsdm_subread_done;
+	memcpy(todata, fromdata + diff, (nrsectors << LOG_SECTOR_SIZE));
+	//printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %d  bytes: %d \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
 free:
+	readctx->clone->bi_end_io = lsdm_subread_done;
 	bio_endio(readctx->clone);
 	bio_free_pages(clone);
 	bio_put(clone);
-	printk(KERN_ERR "\n %s done! ", __func__);
 }
 
 
@@ -2078,8 +2077,6 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 	struct bio_vec bv, last_bv;
 	struct bvec_iter iter;
 	char * data;
-	sector_t aligned_pba = round_down(pba, NR_SECTORS_IN_BLK);
-	int diff = pba - aligned_pba;
 
 	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
 	if (!page )
@@ -2104,26 +2101,20 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 		printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
 		return NULL;
 	}
-	/* Only one segment with one page */
 	bio_for_each_segment(bv, bio, iter) {
 		page = bv.bv_page;
 		data = page_address(page);
 		data = data + bv.bv_offset;
-		printk(KERN_ERR "\n %s (new small bio) data: %p ", __func__, data);
+		//printk(KERN_ERR "\n %s (new small bio) data: %p ", __func__, data);
 		readctx->data = data;
 	}
-	//readctx->data += diff << LOG_SECTOR_SIZE;
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
-	//bio->bi_iter.bi_sector = aligned_pba;
 	bio->bi_iter.bi_sector = pba;
-	bio->bi_iter.bi_size = 4096;
-	printk(KERN_ERR "\n %s new bio: %p, nr_sectors: %d pba: %llu ", __func__, bio, bio_sectors(bio), bio->bi_iter.bi_sector);
 	bio->bi_end_io = complete_small_reads;
 	bio->bi_private = readctx;
 	return bio;
 }
-
 
 void request_start_unaligned(struct ctx *ctx, struct bio *clone, struct app_read_ctx *read_ctx, sector_t pba, sector_t zerolen)
 {
@@ -2164,12 +2155,12 @@ int zero_fill_inital_bio(struct ctx *ctx, struct bio *bio, struct bio *clone, se
 	return 0;
 }
 
-int handle_partial_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, sector_t len, struct app_read_ctx *read_ctx, sector_t pba)
+int handle_partial_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, sector_t overlap, struct app_read_ctx *read_ctx, sector_t pba)
 {
 	struct bio * split;
 
-	printk(KERN_ERR "\n clone: %p clone::nr_sectors: %d len: %d ", clone, bio_sectors(clone), len);
-	split = bio_split(clone, len, GFP_KERNEL, &fs_bio_set);
+	printk(KERN_ERR "\n clone: %p clone::nr_sectors: %d len: %d ", clone, bio_sectors(clone), overlap);
+	split = bio_split(clone, overlap, GFP_KERNEL, &fs_bio_set);
 	if (!split) {
 		printk(KERN_INFO "\n Could not split the clone! ERR ");
 		bio->bi_status = -ENOMEM;
@@ -2224,7 +2215,6 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 			nr_sectors = bio_sectors(clone);
 			pba = pba + s8;
 			/* let it fall through to the next case */
-			BUG_ON(nr_sectors < NR_SECTORS_IN_BLK);
 		}
 		//(nr_sectors < NR_SECTORS_IN_BLK)
 		read_ctx->nrsectors = nr_sectors;
@@ -2283,15 +2273,17 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		bio_endio(bio);
 		return -ENOMEM;
 	}
-	printk(KERN_ERR "\n %s -> bio::lba: %llu bio::nrsectors: %d", __func__, clone->bi_iter.bi_sector, bio_sectors(clone));
+	//printk(KERN_ERR "\n %s -> bio::lba: %llu bio::nrsectors: %d", __func__, clone->bi_iter.bi_sector, bio_sectors(clone));
 
 	clone->bi_private = read_ctx;
 	bio_set_dev(clone, ctx->dev->bdev);
 	split = NULL;
+	origlba = clone->bi_iter.bi_sector;
 	read_ctx->lba = origlba;
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
-		lba = clone->bi_iter.bi_sector;
+		origlba = clone->bi_iter.bi_sector;
+		lba = round_down(origlba, NR_SECTORS_IN_BLK);
 		e = lsdm_rb_geq(ctx, lba, print);
 
 		/* case of no overlap */
@@ -2300,22 +2292,8 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			printk(KERN_ERR "\n case of zero overlap!");
 			break;
 		}
-
-		origlba = clone->bi_iter.bi_sector;
-		lba = round_down(origlba, NR_SECTORS_IN_BLK);
 		printk(KERN_ERR "\n %s Searching: origlba: %llu lba: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu \n", 
 				__func__, origlba, lba, nr_sectors, e->lba, e->pba, e->len);
-
-		if ((lba < origlba) && nr_sectors > NR_SECTORS_IN_BLK) {
-			/* Initial request is not sector aligned. Make this into a smaller request */
-			zerolen = origlba - lba;
-			BUG_ON(1);
-			/* What should pba be here ? depends on e and lba position. so this should
-			 * be a corner case of the next two cases
-			 */
-			//request_start_unaligned(ctx, clone, read_ctx, pba, zerolen);
-		}
-
 
 		/* Case of Overlap, e always overlaps with bio */
 		if (e->lba > lba) {
@@ -2330,17 +2308,17 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			/* bio is front filled with zeroes, but we need to compare 'clone' now with
 			 * the same e
 			 */
-			lba = clone->bi_iter.bi_sector;
-			BUG_ON(lba != e->lba);
+			lba = lba + zerolen;
 			nr_sectors = bio_sectors(clone);
+			BUG_ON(lba != e->lba);
 			/* we fall through as e->lba == lba now */
 		} 
 		//(e->lba <= lba) 
 		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
 		 */
 		/*  [---------bio------] */
-		overlap = e->lba + e->len - origlba;
-		diff = origlba - e->lba;
+		overlap = e->lba + e->len - lba;
+		diff = lba - e->lba;
 		BUG_ON(diff < 0);
 		pba = e->pba + diff;
 		printk(KERN_ERR "\n %s overlap: %llu, nr_sectors: %llu diff: %d", __func__, overlap, nr_sectors, diff);
@@ -4502,24 +4480,23 @@ static int print_bzr(struct blk_zone *zone, unsigned int num, void *data)
 void write_done(struct kref *kref)
 {
 	struct bio *bio;
-	struct lsdm_bioctx * bioctx;
+	struct lsdm_bioctx * lsdm_bioctx;
 	struct ctx *ctx;
 	struct blk_zone_report *bzr;
 
-	bioctx = container_of(kref, struct lsdm_bioctx, ref);
-	ctx = bioctx->ctx;
-	bio = bioctx->orig;
+	lsdm_bioctx = container_of(kref, struct lsdm_bioctx, ref);
+	ctx = lsdm_bioctx->ctx;
+	bio = lsdm_bioctx->orig;
 	BUG_ON(!bio);
 	BUG_ON(!ctx);
 
 	if (BLK_STS_OK != bio->bi_status) {
 		printk(KERN_ERR "\n %s bio status: %d ", __func__, bio->bi_status);
 	}
-	//printk(KERN_ERR "\n %s done: (lba: %llu, len: %llu)", __func__, bioctx->lba, bioctx->len);
 end:
 	bio_endio(bio);
 
-	kmem_cache_free(ctx->bioctx_cache, bioctx);
+	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	//mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 }
 
@@ -4776,7 +4753,7 @@ again:
 	/* Next we fetch the LBA that our DM got */
 	if (prepare_bio(ctx, split, s8, wf))
 		goto fail;
-	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, s8);
+	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	submit_bio(split);
 	/* we return the second part */
 	return clone;
@@ -4796,16 +4773,15 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
 	int dosplit = 0, ret = 0;
 	struct gendisk *disk;
-	struct lsdm_bioctx * bioctx = (struct lsdm_bioctx *)clone->bi_private;
+	struct lsdm_bioctx * bioctx = clone->bi_private;
 
 	clone->bi_status = BLK_STS_OK;
 
-	BUG_ON(bioctx == NULL);
+	BUG_ON(!bioctx);
 	BUG_ON(!bioctx->ctx);
 	BUG_ON(!bioctx->orig);
-	//printk(KERN_ERR "\n %s 2.a) clone: %p clone->bi_private: %p bioctx: %p ", __func__, clone, clone->bi_private, bioctx);
-	//printk(KERN_ERR "\n %s 2.b) Request: lba: {%llu, len: %d}", __func__, lba, nr_sectors);
 
+	clone->bi_status = BLK_STS_OK;
 	kref_init(&bioctx->ref);
 	do {
 		BUG_ON(lba != clone->bi_iter.bi_sector);
@@ -4839,7 +4815,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 				goto fail;
 			}
 			submit_bio(clone);
-			printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
+			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
 			mutex_unlock(&ctx->wf_lock);
 			break;
 		}
@@ -5008,13 +4984,10 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	}
 	bioctx->orig = bio;
 	bioctx->ctx = ctx;
-	bioctx->lba = bio->bi_iter.bi_sector;
-	bioctx->len = bio_sectors(bio);
 	/* TODO: Initialize refcount in bioctx and increment it every
 	 * time bio is split or padded */
 	clone->bi_private = bioctx;
 	bio->bi_status = BLK_STS_OK;
-	//printk(KERN_ERR "\n %s 1) clone: %p clone->bi_private: %p bioctx: %p", __func__, clone, clone->bi_private, bioctx);
 	bio_list_add(&ctx->bio_list, clone);
 	wake_up_all(&ctx->write_th->write_waitq);
 	return DM_MAPIO_SUBMITTED;
