@@ -2159,7 +2159,7 @@ int handle_partial_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone,
 {
 	struct bio * split;
 
-	printk(KERN_ERR "\n clone: %p clone::nr_sectors: %d len: %d ", clone, bio_sectors(clone), overlap);
+	//printk(KERN_ERR "\n clone: %p clone::nr_sectors: %d len: %d ", clone, bio_sectors(clone), overlap);
 	split = bio_split(clone, overlap, GFP_KERNEL, &fs_bio_set);
 	if (!split) {
 		printk(KERN_INFO "\n Could not split the clone! ERR ");
@@ -2168,12 +2168,12 @@ int handle_partial_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone,
 		zero_fill_clone(ctx, read_ctx, clone);
 		return -ENOMEM;
 	}
-	printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d ", __func__, split->bi_iter.bi_sector, pba, bio_sectors(split));
+	//printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d ", __func__, split->bi_iter.bi_sector, pba, bio_sectors(split));
 	bio_chain(split, clone);
 	split->bi_iter.bi_sector = pba;
 	bio_set_dev(split, ctx->dev->bdev);
 	BUG_ON(pba > ctx->sb->max_pba);
-	printk(KERN_ERR "\n %s submitted split! ", __func__);
+	//printk(KERN_ERR "\n %s submitted split! ", __func__);
 	submit_bio(split);
 	return 0;
 }
@@ -2184,19 +2184,19 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 	sector_t s8;
 	struct bio *split;
 
-	printk(KERN_ERR "\n %s pba: %llu len: %llu \n", __func__, pba, nr_sectors);
+	//printk(KERN_ERR "\n %s pba: %llu len: %llu \n", __func__, pba, nr_sectors);
 
 	s8 = round_down(nr_sectors, NR_SECTORS_IN_BLK);
 	if (nr_sectors == s8) {
-		printk(KERN_ERR "\n %s aligned read \n", __func__);
+		//printk(KERN_ERR "\n %s aligned read \n", __func__);
 		atomic_inc(&ctx->nr_reads);
 		clone->bi_end_io = lsdm_subread_done;
 		clone->bi_iter.bi_sector = pba;
 		bio_set_dev(clone, ctx->dev->bdev);
-		printk(KERN_ERR "\n %s aligned read submitting....\n", __func__);
+		//printk(KERN_ERR "\n %s aligned read submitting....\n", __func__);
 		submit_bio(clone);
 	} else {
-		printk(KERN_ERR "\n %s Unaligned read \n", __func__);
+		//printk(KERN_ERR "\n %s Unaligned read \n", __func__);
 		/* nr_sectors is not divisible by NR_SECTORS_IN_BLK*/
 		if (nr_sectors > NR_SECTORS_IN_BLK) {
 			split = bio_split(clone, s8, GFP_NOIO, &fs_bio_set);
@@ -2225,7 +2225,7 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 			printk(KERN_ERR "\n %s could not construct smaller bio! \n");
 			bio_endio(read_ctx->clone);
 		}
-		printk(KERN_ERR "\n %s (smaller read) -> lba: %llu pba:%llu len:%d", __func__, read_ctx->lba, clone->bi_iter.bi_sector, nr_sectors);
+		//printk(KERN_ERR "\n %s (smaller read) -> lba: %llu pba:%llu len:%d", __func__, read_ctx->lba, clone->bi_iter.bi_sector, nr_sectors);
 		submit_bio(clone);
 	}	
 	BUG_ON(pba > ctx->sb->max_pba);
@@ -2289,11 +2289,12 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		/* case of no overlap */
 		if ((e == NULL) || (e->lba >= (lba + nr_sectors)) || ((e->lba + e->len) <= lba))  {
 			zero_fill_clone(ctx, read_ctx, clone);
-			printk(KERN_ERR "\n case of zero overlap!");
+			//printk(KERN_ERR "\n case of zero overlap!");
 			break;
 		}
-		printk(KERN_ERR "\n %s Searching: origlba: %llu lba: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu \n", 
+		/*printk(KERN_ERR "\n %s Searching: origlba: %llu lba: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu \n", 
 				__func__, origlba, lba, nr_sectors, e->lba, e->pba, e->len);
+		 */
 
 		/* Case of Overlap, e always overlaps with bio */
 		if (e->lba > lba) {
@@ -2301,7 +2302,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 *	[---------bio------] 
 		 */
 			zerolen = e->lba - lba;
-			printk(KERN_ERR "\n Case of partial overlap! (no left overlap)");
+			//printk(KERN_ERR "\n Case of partial overlap! (no left overlap)");
 			ret = zero_fill_inital_bio(ctx, bio, clone, zerolen, read_ctx);
 			if (!ret)
 				return ret;
@@ -2321,29 +2322,29 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		diff = lba - e->lba;
 		BUG_ON(diff < 0);
 		pba = e->pba + diff;
-		printk(KERN_ERR "\n %s overlap: %llu, nr_sectors: %llu diff: %d", __func__, overlap, nr_sectors, diff);
+		//printk(KERN_ERR "\n %s overlap: %llu, nr_sectors: %llu diff: %d", __func__, overlap, nr_sectors, diff);
 		if (overlap >= nr_sectors) { 
 		/* e is bigger than bio, so overlap >= nr_sectors, no further
 		 * splitting is required. Previous splits if any, are chained
 		 * to the last one as 'clone' is their parent.
 		 */
 			ret = handle_full_overlap(ctx, bio, clone, nr_sectors, pba, read_ctx);
-			printk(KERN_ERR "\n 1) ret: %d ", ret);
+			//printk(KERN_ERR "\n 1) ret: %d ", ret);
 			if (ret)
 				return ret;
 			break;
 
 		} else {
 			/* overlap is smaller than nr_sectors remaining. */
-			printk(KERN_ERR "\n clone: %p clone::nr_sectors: %d e->len: %d overlap: %d", clone, bio_sectors(clone), e->len, overlap);
+			//printk(KERN_ERR "\n clone: %p clone::nr_sectors: %d e->len: %d overlap: %d", clone, bio_sectors(clone), e->len, overlap);
 			ret = handle_partial_overlap(ctx, bio, clone, overlap, read_ctx, pba);
-			printk(KERN_ERR "\n 2) ret: %d clone::lba: %llu", ret, clone->bi_iter.bi_sector);
+			//printk(KERN_ERR "\n 2) ret: %d clone::lba: %llu", ret, clone->bi_iter.bi_sector);
 			if (ret)
 				return ret;
 			/* Since e was smaller, we want to search for the next e */
 		}
 	}
-	printk(KERN_INFO "\t %s end \n", __func__);
+	//printk(KERN_INFO "\t %s end \n", __func__);
 	return 0;
 }
 
@@ -4749,10 +4750,7 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, secto
 	 */
 again:
 	split->bi_iter.bi_sector = lba;
-	split->bi_private = bioctx;
-	/* Next we fetch the LBA that our DM got */
-	if (prepare_bio(ctx, split, s8, wf))
-		goto fail;
+	bio_chain(split, clone);
 	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	submit_bio(split);
 	/* we return the second part */
