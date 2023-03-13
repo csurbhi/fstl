@@ -4472,75 +4472,45 @@ static int print_bzr(struct blk_zone *zone, unsigned int num, void *data)
 	return 0;
 }
 
-/* 
- * TODO: If status is not OK, remove the translation
- * entries for this bio
- * We need to go back to the older values.
- * But right now, we have not saved them.
- */
-void write_done(struct kref *kref)
-{
-	struct bio *bio;
-	struct lsdm_bioctx * lsdm_bioctx;
-	struct ctx *ctx;
-	struct blk_zone_report *bzr;
-
-	lsdm_bioctx = container_of(kref, struct lsdm_bioctx, ref);
-	ctx = lsdm_bioctx->ctx;
-	bio = lsdm_bioctx->orig;
-	BUG_ON(!bio);
-	BUG_ON(!ctx);
-
-	if (BLK_STS_OK != bio->bi_status) {
-		printk(KERN_ERR "\n %s bio status: %d ", __func__, bio->bi_status);
-	}
-end:
-	bio_endio(bio);
-
-	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
-	//mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
-}
-
-
 void sub_write_done(struct work_struct * w)
 {
 
-	struct lsdm_sub_bioctx *subbioctx = NULL;
 	struct lsdm_bioctx * bioctx;
 	struct ctx *ctx;
 	sector_t lba, pba;
 	unsigned int len;
 	struct tm_page *tm_page;
+	struct bio * bio = bioctx->orig;
 
-	subbioctx = container_of(w, struct lsdm_sub_bioctx, work);
-	bioctx = subbioctx->bioctx;
+	bioctx = container_of(w, struct lsdm_bioctx, work);
 	ctx = bioctx->ctx;
 	/* task completed successfully */
-	lba = subbioctx->extent.lba;
-	pba = subbioctx->extent.pba;
-	len = subbioctx->extent.len;
+	lba = bioctx->extent.lba;
+	pba = bioctx->extent.pba;
+	len = bioctx->extent.len;
 
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
 
-	//printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, lba, pba, len, kref_read(&bioctx->ref));
+	//printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u \n", __func__, lba, pba, len);
 
 	down_write(&ctx->lsdm_rb_lock);
 	/*------------------------------- */
 	lsdm_rb_update_range(ctx, lba, pba, len);
 	/*-------------------------------*/
 	up_write(&ctx->lsdm_rb_lock);
+	bio_endio(bio);
+	kmem_cache_free(ctx->bioctx_cache, bioctx);
 
 	/* Now reads will work! so we can complete the bio */
-	kref_put(&bioctx->ref, write_done);
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 
 	//down_write(&ctx->lsdm_rev_lock);
 	/*------------------------------- */
 	//add_revmap_entry(ctx, lba, pba, len);
 	/*-------------------------------*/
 	//up_write(&ctx->lsdm_rev_lock);
+	//mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 	return;
 }
 
@@ -4548,7 +4518,6 @@ void sub_write_done(struct work_struct * w)
 void sub_write_err(struct work_struct * w)
 {
 
-	struct lsdm_sub_bioctx *subbioctx = NULL;
 	struct lsdm_bioctx * bioctx;
 	struct ctx *ctx;
 	sector_t lba, pba, zone_begins;
@@ -4558,16 +4527,12 @@ void sub_write_err(struct work_struct * w)
 
 	WARN_ONCE(1, "\n %s write error received, future writes will be non sequential! \n", __func__);
 
-	subbioctx = container_of(w, struct lsdm_sub_bioctx, work);
-	bioctx = subbioctx->bioctx;
+	bioctx = container_of(w, struct lsdm_bioctx, work);
 	ctx = bioctx->ctx;
 	/* task completed successfully */
-	lba = subbioctx->extent.lba;
-	pba = subbioctx->extent.pba;
-	len = subbioctx->extent.len;
-
-	kref_put(&bioctx->ref, write_done);
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
+	lba = bioctx->extent.lba;
+	pba = bioctx->extent.pba;
+	len = bioctx->extent.len;
 
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
@@ -4580,6 +4545,7 @@ void sub_write_err(struct work_struct * w)
 	if (!blkdev_report_zones(ctx->dev->bdev, zone_begins, 1, print_bzr, NULL)) {
 		printk(KERN_ERR "\n reporting zones failed! \n");
 	}
+	//mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 	return;
 }
 
@@ -4596,14 +4562,11 @@ void sub_write_err(struct work_struct * w)
  */
 void lsdm_clone_endio(struct bio * clone)
 {
-	struct lsdm_sub_bioctx *subbioctx = NULL;
 	struct bio *bio = NULL;
 	struct ctx *ctx;
 	struct lsdm_bioctx *bioctx;
 
-	subbioctx = clone->bi_private;
-	BUG_ON(!subbioctx);
-	bioctx = subbioctx->bioctx;
+	bioctx = clone->bi_private;
 	BUG_ON(!bioctx);
 	ctx = bioctx->ctx;
 	BUG_ON(!ctx);
@@ -4615,12 +4578,11 @@ void lsdm_clone_endio(struct bio * clone)
 		}
 		ctx->err = 1;
 		bio->bi_status = clone->bi_status;
-		INIT_WORK(&subbioctx->work, sub_write_err);
-		queue_work(ctx->writes_wq, &subbioctx->work);
+		INIT_WORK(&bioctx->work, sub_write_err);
 	} else {
-		INIT_WORK(&subbioctx->work, sub_write_done);
-		queue_work(ctx->writes_wq, &subbioctx->work);
+		INIT_WORK(&bioctx->work, sub_write_done);
 	}
+	queue_work(ctx->writes_wq, &bioctx->work);
 	bio_put(clone);
 	return;
 }
@@ -4682,41 +4644,26 @@ fail:
 
 }
 
-void fill_bio(struct bio *bio, sector_t pba, sector_t len, struct block_device *bdev, struct lsdm_sub_bioctx * subbio_ctx)
+void fill_bio(struct bio *bio, sector_t lba, sector_t pba, sector_t len, struct block_device *bdev, struct lsdm_bioctx *bioctx)
 {
 	bio_set_dev(bio, bdev);
 	bio->bi_iter.bi_sector = pba; /* we use the saved write frontier */
 	bio->bi_iter.bi_size = len << 9;
-	bio->bi_private = subbio_ctx;
+	bio->bi_private = bioctx;
 	bio->bi_end_io = lsdm_clone_endio;
-}
-
-void fill_subbioctx(struct lsdm_sub_bioctx * subbio_ctx, struct lsdm_bioctx *bioctx, sector_t lba, sector_t pba, sector_t len)
-{
-	subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
-	subbio_ctx->extent.lba = lba;
-	subbio_ctx->extent.pba = pba;
-	subbio_ctx->extent.len = len;
+	bioctx->extent.lba = lba;
+	bioctx->extent.pba = pba;
+	bioctx->extent.len = len;
 }
 
 int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8, sector_t wf)
 {
-	struct lsdm_sub_bioctx *subbio_ctx;
 	struct lsdm_bioctx * bioctx = clone->bi_private;
 	sector_t lba = clone->bi_iter.bi_sector;
 	BUG_ON(lba > ctx->sb->max_pba);
 
-	subbio_ctx = kmem_cache_alloc(ctx->subbio_ctx_cache, GFP_KERNEL);
-	if (!subbio_ctx) {
-		printk(KERN_ERR "\n %s Could not allocate memory to subbio_ctx \n", __func__);
-		kmem_cache_free(ctx->bioctx_cache, bioctx);
-		return -1;
-	}
-
 	/* Next we fetch the LBA that our DM got */
-	kref_get(&bioctx->ref);
-	fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
-	fill_bio(clone, wf, s8, ctx->dev->bdev, subbio_ctx);
+	fill_bio(clone, lba, wf, s8, ctx->dev->bdev, bioctx);
 	return 0;
 }
 
@@ -4780,7 +4727,8 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	BUG_ON(!bioctx->orig);
 
 	clone->bi_status = BLK_STS_OK;
-	kref_init(&bioctx->ref);
+	clone->bi_private = NULL;
+	clone->bi_end_io = NULL;
 	do {
 		BUG_ON(lba != clone->bi_iter.bi_sector);
 		BUG_ON(lba > ctx->sb->max_pba);
@@ -4809,6 +4757,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		if (!dosplit) {
 			clone->bi_private = bioctx;
 			if (prepare_bio(ctx, clone, s8, wf)) {
+				printk(KERN_ERR "\n prepare_bio failed!!");
 				mutex_unlock(&ctx->wf_lock);
 				goto fail;
 			}
@@ -4821,19 +4770,19 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		clone->bi_iter.bi_sector = lba;
 		clone = split_submit(ctx, clone, s8, wf);
 		mutex_unlock(&ctx->wf_lock);
-		if (!clone)
+		if (!clone) {
+			printk(KERN_ERR "\n split_submit failed!!");
 			goto fail;
+		}
 		lba = lba + s8;
 	} while (1);
 
 	//blk_finish_plug(&plug);
-	kref_put(&bioctx->ref, write_done);
 	flush_workqueue(ctx->writes_wq);
 	flush_workqueue(ctx->tm_wq);
 	return 0; 
 fail:
 	printk(KERN_ERR "%s FAIL!!!!\n", __func__);
-	kref_put(&bioctx->ref, write_done);
 	bio_put(clone);
 	atomic_inc(&ctx->nr_failed_writes);
 	return -1;
@@ -6007,7 +5956,6 @@ static void destroy_caches(struct ctx *ctx)
 	kmem_cache_destroy(ctx->rev_extent_cache);
 	kmem_cache_destroy(ctx->app_read_ctx_cache);
 	kmem_cache_destroy(ctx->gc_extents_cache);
-	kmem_cache_destroy(ctx->subbio_ctx_cache);
 	kmem_cache_destroy(ctx->tm_page_cache);
 	kmem_cache_destroy(ctx->gc_cost_node_cache);
 	kmem_cache_destroy(ctx->gc_zone_node_cache);
@@ -6043,13 +5991,9 @@ static int create_caches(struct ctx *ctx)
 	if (!ctx->gc_zone_node_cache) {
 		goto destroy_gc_cost_node_cache;
 	}
-	ctx->subbio_ctx_cache = kmem_cache_create("subbio_ctx_cache", sizeof(struct lsdm_sub_bioctx), 0, SLAB_RED_ZONE|SLAB_ACCOUNT, NULL);
-	if (!ctx->subbio_ctx_cache) {
-		goto destroy_gc_zone_node_cache;
-	}
 	ctx->gc_extents_cache = kmem_cache_create("gc_extents_cache", sizeof(struct gc_extents), 0, SLAB_RED_ZONE|SLAB_ACCOUNT, NULL);
 	if (!ctx->gc_extents_cache) {
-		goto destroy_subbio_ctx_cache;
+		goto destroy_gc_zone_node_cache;
 	}
 	//trace_printk("\n gc_extents_cache initialized to address: %p", ctx->gc_extents_cache);
 	ctx->app_read_ctx_cache = kmem_cache_create("app_read_ctx_cache", sizeof(struct app_read_ctx), 0, SLAB_RED_ZONE|SLAB_ACCOUNT, NULL);
@@ -6080,8 +6024,6 @@ destroy_app_read_ctx_cache:
 	kmem_cache_destroy(ctx->app_read_ctx_cache);
 destroy_gc_extents_cache:
 	kmem_cache_destroy(ctx->gc_extents_cache);
-destroy_subbio_ctx_cache:
-	kmem_cache_destroy(ctx->subbio_ctx_cache);
 destroy_gc_cost_node_cache:
 	kmem_cache_destroy(ctx->gc_cost_node_cache);
 destroy_gc_zone_node_cache:
