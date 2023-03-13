@@ -4863,8 +4863,9 @@ static int lsdm_write_thread_fn(void * data)
 	struct ctx *ctx = (struct ctx *) data;
 	struct lsdm_write_thread *write_th = ctx->write_th;
 	wait_queue_head_t *wq = &write_th->write_waitq;
+	struct task_struct *tsk;
 
-	printk(KERN_ERR "\n %s executing! ", __func__);
+	printk(KERN_ERR "\n %s executing! pid: %d ", __func__, tsk->pid);
 	set_freezable();
 	do {
 		wait_event_interruptible(*wq,
@@ -4875,10 +4876,11 @@ static int lsdm_write_thread_fn(void * data)
                         continue;
                 }
                 if (kthread_should_stop()) {
-			printk(KERN_ERR "\n GC thread is stopping! ");
+			printk(KERN_ERR "\n Write thread is stopping! ");
                         break;
 		}
 		lsdm_handle_write(ctx);
+		printk(KERN_ERR "\n write thread sleeping! ");
 
 	} while(!kthread_should_stop());
 	return 0;
