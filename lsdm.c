@@ -1150,7 +1150,7 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
 	 * individually to the bio vectors
 	 */
-	bio = bio_alloc_bioset(GFP_KERNEL, pagecount, ctx->gc_bs);
+	bio = bio_alloc_bioset(ctx->dev->bdev, pagecount, REQ_OP_READ, GFP_KERNEL, ctx->gc_bs);
 	if (!bio) {
 		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
 		return -ENOMEM;
@@ -1317,7 +1317,7 @@ static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
 	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
 	 * individually to the bio vectors
 	 */
-	bio = bio_alloc_bioset(GFP_KERNEL, bio_pages, ctx->gc_bs);
+	bio = bio_alloc_bioset(ctx->dev->bdev, bio_pages, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
 	if (!bio) {
 		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
 		return -ENOMEM;
@@ -1393,7 +1393,7 @@ int complete_revmap_blk_flush(struct ctx * ctx, struct page *page)
 	atomic_set(&ctx->revmap_sector_nr, 0);
 	up_write(&ctx->lsdm_rev_lock);
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		return -ENOMEM;
 	}
@@ -2082,7 +2082,7 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 	if (!page )
 		return NULL;
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_READ, GFP_KERNEL);
 	if (!bio) {
 		__free_pages(page, 0);
 		nrpages--;
@@ -2265,7 +2265,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 
 	atomic_set(&ctx->ioidle, 0);
 	mykref_get(&ctx->ongoing_iocount);
-	clone = bio_clone_fast(bio, GFP_KERNEL, &fs_bio_set);
+	clone = bio_alloc_clone(ctx->dev->bdev, bio, GFP_KERNEL, &fs_bio_set);
 	if (!clone) {
 		printk(KERN_ERR "\n %s could not allocate memory to clone", __func__);
 		kmem_cache_free(ctx->app_read_ctx_cache, read_ctx);
@@ -2753,7 +2753,7 @@ void flush_revmap_bitmap(struct ctx *ctx)
 	if (!page)
 		return;
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		return;
 	}
@@ -2807,7 +2807,7 @@ void flush_checkpoint(struct ctx *ctx)
 	/* TODO: GC will not change the checkpoint, but will change
 	 * the SIT Info.
 	 */
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		printk(KERN_ERR "\n %s could not alloc bio ", __func__);
 		return;
@@ -3506,7 +3506,7 @@ struct page * read_block(struct ctx *ctx, u64 base, u64 sectornr)
 
 	nrpages++;
 	//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_READ, GFP_KERNEL);
 	if (!bio) {
 		__free_pages(page, 0);
 		nrpages--;
@@ -3666,7 +3666,7 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 		return;
 
 	//printk(KERN_ERR "\n %s: 1 tm_page:%p, tm_page->page:%p \n", __func__, tm_page, page_address(tm_page->page));
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		__free_pages(page, 0);
 		nrpages--;
@@ -3848,7 +3848,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	pba = sit_page->blknr;
 	//printk(KERN_ERR "\n %s sit_ctx: %p", __func__, sit_ctx);
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		return;
 	}
@@ -4223,7 +4223,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, sector_t revmap
 		return -ENOMEM;
 	}
 
-	bio = bio_alloc(GFP_KERNEL, 1);
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
 	if (!bio) {
 		kmem_cache_free(ctx->revmap_bioctx_cache, revmap_bio_ctx);
 		return -ENOMEM;
@@ -4969,7 +4969,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	 */
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
-	clone = bio_clone_fast(bio, GFP_KERNEL, &fs_bio_set);
+	clone = bio_alloc_clone(ctx->dev->bdev, bio, GFP_KERNEL, &fs_bio_set);
 	if (!clone) {
 		goto memfail;
 	}
