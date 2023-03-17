@@ -4762,7 +4762,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 				goto fail;
 			}
 			submit_bio(clone);
-			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
+			printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
 			mutex_unlock(&ctx->wf_lock);
 			break;
 		}
@@ -4937,6 +4937,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	 * time bio is split or padded */
 	clone->bi_private = bioctx;
 	bio->bi_status = BLK_STS_OK;
+	printk(KERN_ERR "\n Adding bio to the biolist ");
 	bio_list_add(&ctx->bio_list, clone);
 	wake_up_all(&ctx->write_th->write_waitq);
 	return DM_MAPIO_SUBMITTED;

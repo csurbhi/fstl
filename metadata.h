@@ -92,23 +92,20 @@ struct sit_page {
 	int flag;
 };
 
-struct lsdm_bioctx {
-	struct kref ref;
-	struct bio * orig;
-	struct ctx *ctx;
-	sector_t lba;
-	sector_t len;
-};
-
 struct extent_entry {
 	sector_t lba;
 	sector_t pba;
 	size_t len;
 };
 
-struct lsdm_sub_bioctx {
+
+struct lsdm_bioctx {
+	struct kref ref;
+	struct bio * orig;
+	struct ctx *ctx;
+	sector_t lba;
+	sector_t len;
 	struct extent_entry extent;
-	struct lsdm_bioctx * bioctx;
 	struct work_struct work;
 };
 
@@ -284,7 +281,6 @@ struct ctx {
 	struct kmem_cache * bioctx_cache;
 	struct kmem_cache * extent_cache;
 	struct kmem_cache * rev_extent_cache;
-	struct kmem_cache * subbio_ctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
 	struct kmem_cache *reflist_cache;
