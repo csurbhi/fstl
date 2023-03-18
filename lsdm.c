@@ -4480,10 +4480,16 @@ void sub_write_done(struct work_struct * w)
 	sector_t lba, pba;
 	unsigned int len;
 	struct tm_page *tm_page;
-	struct bio * bio = bioctx->orig;
+	struct bio * bio;
 
 	bioctx = container_of(w, struct lsdm_bioctx, work);
+	bio = bioctx->orig;
+
+	//printk(KERN_ERR "\n %s bioctx: %p ", __func__, bioctx);
+
+	BUG_ON(!bioctx);
 	ctx = bioctx->ctx;
+	BUG_ON(!bioctx->ctx);
 	/* task completed successfully */
 	lba = bioctx->extent.lba;
 	pba = bioctx->extent.pba;
@@ -4664,6 +4670,7 @@ int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8, sector_t wf)
 
 	/* Next we fetch the LBA that our DM got */
 	fill_bio(clone, lba, wf, s8, ctx->dev->bdev, bioctx);
+	bioctx->ctx = ctx;
 	return 0;
 }
 
@@ -4674,13 +4681,11 @@ int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8, sector_t wf)
 struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, sector_t wf)
 {
 
-	struct lsdm_bioctx *bioctx = clone->bi_private;
 	struct bio *split;
 	sector_t lba = 0;
 	
 	BUG_ON(!s8);
 	BUG_ON(!ctx);
-	BUG_ON(!bioctx);
 
 	lba = clone->bi_iter.bi_sector;
 	BUG_ON(lba > ctx->sb->max_pba);
@@ -4689,7 +4694,6 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, secto
 	/* We cannot call bio_split with spinlock held! */
 	if (!(split = bio_split(clone, s8, GFP_NOIO, &fs_bio_set))){
 		printk("\n %s failed at bio_split! ", __func__);
-		kmem_cache_free(ctx->bioctx_cache, bioctx);
 		return NULL;
 	}
 	/* we split and we realize that free_sectors_in_wf has reduced further by a parallel i/o
@@ -4756,13 +4760,9 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		move_write_frontier(ctx, s8);
 		if (!dosplit) {
 			clone->bi_private = bioctx;
-			if (prepare_bio(ctx, clone, s8, wf)) {
-				printk(KERN_ERR "\n prepare_bio failed!!");
-				mutex_unlock(&ctx->wf_lock);
-				goto fail;
-			}
+			prepare_bio(ctx, clone, s8, wf);
+			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
 			submit_bio(clone);
-			printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
 			mutex_unlock(&ctx->wf_lock);
 			break;
 		}
@@ -4771,6 +4771,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		clone = split_submit(ctx, clone, s8, wf);
 		mutex_unlock(&ctx->wf_lock);
 		if (!clone) {
+			kmem_cache_free(ctx->bioctx_cache, bioctx);
 			printk(KERN_ERR "\n split_submit failed!!");
 			goto fail;
 		}
@@ -4812,7 +4813,7 @@ static int lsdm_write_thread_fn(void * data)
 	struct ctx *ctx = (struct ctx *) data;
 	struct lsdm_write_thread *write_th = ctx->write_th;
 	wait_queue_head_t *wq = &write_th->write_waitq;
-	struct task_struct *tsk;
+	struct task_struct *tsk = write_th->lsdm_write_task;
 
 	printk(KERN_ERR "\n %s executing! pid: %d ", __func__, tsk->pid);
 	set_freezable();
@@ -4829,7 +4830,7 @@ static int lsdm_write_thread_fn(void * data)
                         break;
 		}
 		lsdm_handle_write(ctx);
-		printk(KERN_ERR "\n write thread sleeping! ");
+		//printk(KERN_ERR "\n write thread sleeping! ");
 
 	} while(!kthread_should_stop());
 	return 0;
