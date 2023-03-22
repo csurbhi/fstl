@@ -4699,10 +4699,11 @@ void fill_subbioctx(struct lsdm_sub_bioctx * subbio_ctx, struct lsdm_bioctx *bio
 	subbio_ctx->extent.len = len;
 }
 
-int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8, sector_t wf)
+int prepare_bio(struct bio * clone, sector_t s8, sector_t wf)
 {
 	struct lsdm_sub_bioctx *subbio_ctx;
 	struct lsdm_bioctx * bioctx = clone->bi_private;
+	struct ctx *ctx = bioctx->ctx;
 	sector_t lba = clone->bi_iter.bi_sector;
 	BUG_ON(lba > ctx->sb->max_pba);
 
@@ -4710,7 +4711,7 @@ int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8, sector_t wf)
 	if (!subbio_ctx) {
 		printk(KERN_ERR "\n %s Could not allocate memory to subbio_ctx \n", __func__);
 		kmem_cache_free(ctx->bioctx_cache, bioctx);
-		return -1;
+		return -ENOMEM;
 	}
 
 	/* Next we fetch the LBA that our DM got */
@@ -4724,17 +4725,14 @@ int prepare_bio(struct ctx * ctx, struct bio * clone, sector_t s8, sector_t wf)
  * Returns the second part of the split bio.
  * submits the first part
  */
-struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, sector_t wf)
+struct bio * split_submit(struct bio *clone, sector_t s8, sector_t wf)
 {
-
+	struct lsdm_sub_bioctx *subbio_ctx;
 	struct lsdm_bioctx *bioctx = clone->bi_private;
+	struct ctx *ctx = bioctx->ctx;
 	struct bio *split;
 	sector_t lba = 0;
 	
-	BUG_ON(!s8);
-	BUG_ON(!ctx);
-	BUG_ON(!bioctx);
-
 	lba = clone->bi_iter.bi_sector;
 	BUG_ON(lba > ctx->sb->max_pba);
 
@@ -4743,14 +4741,18 @@ struct bio * split_submit(struct ctx *ctx, struct bio *clone, sector_t s8, secto
 	if (!(split = bio_split(clone, s8, GFP_NOIO, &fs_bio_set))){
 		printk("\n %s failed at bio_split! ", __func__);
 		kmem_cache_free(ctx->bioctx_cache, bioctx);
-		return NULL;
+		goto fail;
 	}
 	/* we split and we realize that free_sectors_in_wf has reduced further by a parallel i/o
 	 * we need to split again.
 	 */
 again:
 	split->bi_iter.bi_sector = lba;
-	bio_chain(split, clone);
+	/* for the sake of prepare_bio */
+	split->bi_private = bioctx;
+	if (prepare_bio(split, s8, wf)) {
+		goto fail;
+	}
 	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
 	submit_bio(split);
 	/* we return the second part */
@@ -4804,9 +4806,9 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		}
 		wf = ctx->hot_wf_pba;
 		move_write_frontier(ctx, s8);
+		clone->bi_private = bioctx;
 		if (!dosplit) {
-			clone->bi_private = bioctx;
-			if (prepare_bio(ctx, clone, s8, wf)) {
+			if (prepare_bio(clone, s8, wf)) {
 				mutex_unlock(&ctx->wf_lock);
 				goto fail;
 			}
@@ -4817,7 +4819,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		}
 		//dosplit = 1
 		clone->bi_iter.bi_sector = lba;
-		clone = split_submit(ctx, clone, s8, wf);
+		clone = split_submit(clone, s8, wf);
 		mutex_unlock(&ctx->wf_lock);
 		if (!clone)
 			goto fail;
@@ -4861,7 +4863,7 @@ static int lsdm_write_thread_fn(void * data)
 	struct ctx *ctx = (struct ctx *) data;
 	struct lsdm_write_thread *write_th = ctx->write_th;
 	wait_queue_head_t *wq = &write_th->write_waitq;
-	struct task_struct *tsk = &write_th->lsdm_write_task;
+	struct task_struct *tsk = write_th->lsdm_write_task;
 
 	printk(KERN_ERR "\n %s executing! pid: %d ", __func__, tsk->pid);
 	set_freezable();
