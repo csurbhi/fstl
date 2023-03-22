@@ -4682,13 +4682,14 @@ void fill_bio(struct bio *bio, sector_t pba, sector_t len, struct block_device *
 {
 	bio_set_dev(bio, bdev);
 	bio->bi_iter.bi_sector = pba; /* we use the saved write frontier */
-	bio->bi_iter.bi_size = len << 9;
+	//bio->bi_iter.bi_size = len << 9;
 	bio->bi_private = subbio_ctx;
 	bio->bi_end_io = lsdm_clone_endio;
 }
 
 void fill_subbioctx(struct lsdm_sub_bioctx * subbio_ctx, struct lsdm_bioctx *bioctx, sector_t lba, sector_t pba, sector_t len)
 {
+	BUG_ON(!len);
 	subbio_ctx->bioctx = bioctx; /* This is common to all the subdivided bios */
 	subbio_ctx->extent.lba = lba;
 	subbio_ctx->extent.pba = pba;
@@ -4798,6 +4799,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		if (s8 > ctx->free_sectors_in_wf){
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			BUG_ON(s8 != ctx->free_sectors_in_wf);
+			BUG_ON(!s8);
 			dosplit = 1;
 		}
 		wf = ctx->hot_wf_pba;
@@ -4987,6 +4989,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	bio->bi_status = BLK_STS_OK;
 	bio_list_add(&ctx->bio_list, clone);
 	wake_up_all(&ctx->write_th->write_waitq);
+	flush_workqueue(ctx->writes_wq);
 	return DM_MAPIO_SUBMITTED;
 memfail:
 	bio->bi_status = BLK_STS_RESOURCE;
