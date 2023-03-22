@@ -4773,8 +4773,6 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	struct gendisk *disk;
 	struct lsdm_bioctx * bioctx = clone->bi_private;
 
-	clone->bi_status = BLK_STS_OK;
-
 	BUG_ON(!bioctx);
 	BUG_ON(!bioctx->ctx);
 	BUG_ON(!bioctx->orig);
@@ -4863,7 +4861,7 @@ static int lsdm_write_thread_fn(void * data)
 	struct ctx *ctx = (struct ctx *) data;
 	struct lsdm_write_thread *write_th = ctx->write_th;
 	wait_queue_head_t *wq = &write_th->write_waitq;
-	struct task_struct *tsk;
+	struct task_struct *tsk = &write_th->lsdm_write_task;
 
 	printk(KERN_ERR "\n %s executing! pid: %d ", __func__, tsk->pid);
 	set_freezable();
