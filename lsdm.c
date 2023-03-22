@@ -4475,7 +4475,7 @@ static int print_bzr(struct blk_zone *zone, unsigned int num, void *data)
 /* 
  * TODO: If status is not OK, remove the translation
  * entries for this bio
- * We need to go back to the older values.
+	 * We need to go back to the older values.
  * But right now, we have not saved them.
  */
 void write_done(struct kref *kref)
@@ -4610,17 +4610,13 @@ void lsdm_clone_endio(struct bio * clone)
 	bio = bioctx->orig;
 	BUG_ON(!bio);
 	if (clone->bi_status != BLK_STS_OK) {
-		if (bio->bi_status == BLK_STS_OK) {
-			bio->bi_status = clone->bi_status;
-		}
-		ctx->err = 1;
 		bio->bi_status = clone->bi_status;
+		ctx->err = 1;
 		INIT_WORK(&subbioctx->work, sub_write_err);
-		queue_work(ctx->writes_wq, &subbioctx->work);
 	} else {
 		INIT_WORK(&subbioctx->work, sub_write_done);
-		queue_work(ctx->writes_wq, &subbioctx->work);
 	}
+	queue_work(ctx->writes_wq, &subbioctx->work);
 	bio_put(clone);
 	return;
 }
@@ -4821,8 +4817,9 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		clone->bi_iter.bi_sector = lba;
 		clone = split_submit(clone, s8, wf);
 		mutex_unlock(&ctx->wf_lock);
-		if (!clone)
+		if (!clone) {
 			goto fail;
+		}
 		lba = lba + s8;
 	} while (1);
 
@@ -4833,6 +4830,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	return 0; 
 fail:
 	printk(KERN_ERR "%s FAIL!!!!\n", __func__);
+	BUG_ON(1);
 	kref_put(&bioctx->ref, write_done);
 	bio_put(clone);
 	atomic_inc(&ctx->nr_failed_writes);
@@ -4880,7 +4878,6 @@ static int lsdm_write_thread_fn(void * data)
                         break;
 		}
 		lsdm_handle_write(ctx);
-		printk(KERN_ERR "\n write thread sleeping! ");
 
 	} while(!kthread_should_stop());
 	return 0;
