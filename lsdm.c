@@ -40,6 +40,11 @@
 #include <linux/workqueue.h>
 #include <linux/vmstat.h>
 #include <linux/mm.h>
+#include <linux/debug_locks.h>
+#include <linux/mutex.h>
+#include <linux/lockdep.h>
+#include <linux/spinlock.h>
+#include <linux/rwlock.h>
 
 #include "metadata.h"
 #define DM_MSG_PREFIX "lsdm"
@@ -205,9 +210,9 @@ static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba, int print)
 {
 	struct extent *e = NULL;
 
-	down_read(&ctx->lsdm_rb_lock); 
+	//down_read(&ctx->lsdm_rb_lock); 
 	e = _lsdm_rb_geq(&ctx->extent_tbl_root, lba, print);
-	up_read(&ctx->lsdm_rb_lock); 
+	//up_read(&ctx->lsdm_rb_lock); 
 
 	return e;
 }
@@ -2174,7 +2179,7 @@ int handle_partial_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone,
 	bio_set_dev(split, ctx->dev->bdev);
 	BUG_ON(pba > ctx->sb->max_pba);
 	//printk(KERN_ERR "\n %s submitted split! ", __func__);
-	submit_bio(split);
+	submit_bio_noacct(split);
 	return 0;
 }
 
@@ -2194,7 +2199,7 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 		clone->bi_iter.bi_sector = pba;
 		bio_set_dev(clone, ctx->dev->bdev);
 		//printk(KERN_ERR "\n %s aligned read submitting....\n", __func__);
-		submit_bio(clone);
+		submit_bio_noacct(clone);
 	} else {
 		//printk(KERN_ERR "\n %s Unaligned read \n", __func__);
 		/* nr_sectors is not divisible by NR_SECTORS_IN_BLK*/
@@ -2211,7 +2216,7 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 			split->bi_iter.bi_sector = pba;
 			bio_set_dev(split, ctx->dev->bdev);
 			BUG_ON(pba > ctx->sb->max_pba);
-			submit_bio(split);
+			submit_bio_noacct(split);
 			nr_sectors = bio_sectors(clone);
 			pba = pba + s8;
 			/* let it fall through to the next case */
@@ -2226,7 +2231,7 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 			bio_endio(read_ctx->clone);
 		}
 		//printk(KERN_ERR "\n %s (smaller read) -> lba: %llu pba:%llu len:%d", __func__, read_ctx->lba, clone->bi_iter.bi_sector, nr_sectors);
-		submit_bio(clone);
+		submit_bio_noacct(clone);
 	}	
 	BUG_ON(pba > ctx->sb->max_pba);
 	return 0;
@@ -2463,7 +2468,7 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	int index;
 	int zonenr, destn_zonenr;
 
-	mutex_lock(&ctx->sit_kv_store_lock);
+	//mutex_lock(&ctx->sit_kv_store_lock);
 	/*-----------------------------------------------*/
 	sit_page = add_sit_page_kv_store(ctx, pba, __func__);
 	if (!sit_page) {
@@ -2471,7 +2476,7 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 		panic("Low memory, couldnt allocate sit entry");
 	}
 	/*-----------------------------------------------*/
-	mutex_unlock(&ctx->sit_kv_store_lock);
+	//mutex_unlock(&ctx->sit_kv_store_lock);
 
 	ptr = (struct lsdm_seg_entry *) page_address(sit_page->page);
 	zonenr = get_zone_nr(ctx, pba);
@@ -2480,13 +2485,13 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	ptr->vblocks = BLOCKS_IN_ZONE;
 	ptr->mtime = 0;
 
-	mutex_lock(&ctx->wf_lock);
+	//mutex_lock(&ctx->wf_lock);
 	/*-----------------------------------------------*/
 	ctx->nr_invalid_zones++;
 	pba = get_new_zone(ctx);
 	destn_zonenr = get_zone_nr(ctx, pba);
 	/*-----------------------------------------------*/
-	mutex_unlock(&ctx->wf_lock);
+	//mutex_unlock(&ctx->wf_lock);
 	if (0 > pba) {
 		printk(KERN_INFO "No more disk space available for writing!");
 		return;
@@ -2508,7 +2513,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 		panic("This is a ctx bug");
 	}
 		
-	mutex_lock(&ctx->wf_lock);
+	//mutex_lock(&ctx->wf_lock);
 	bitmap = ctx->freezone_bitmap;
 	bytenr = zonenr / BITS_IN_BYTE;
 	bitnr = zonenr % BITS_IN_BYTE;
@@ -2536,7 +2541,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	ctx->nr_freezones = ctx->nr_freezones + 1;
 	//printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
-	mutex_unlock(&ctx->wf_lock);
+	//mutex_unlock(&ctx->wf_lock);
 	/* we need to reset the  zone that we are about to use */
 	if (zonenr > ctx->sb->nr_cmr_zones) {
 		ret = blkdev_zone_mgmt(ctx->dev->bdev, REQ_OP_ZONE_RESET, get_first_pba_for_zone(ctx, zonenr), ctx->sb->nr_lbas_in_zone, GFP_NOIO);
@@ -3207,7 +3212,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 
-	mutex_lock(&ctx->sit_kv_store_lock);
+	//mutex_lock(&ctx->sit_kv_store_lock);
 	/*--------------------------------------------*/
 	sit_page= add_sit_page_kv_store(ctx, pba, __func__);
 	if (!sit_page) {
@@ -3241,7 +3246,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 			
 		}
 	}
-	mutex_unlock(&ctx->sit_kv_store_lock);
+	//mutex_unlock(&ctx->sit_kv_store_lock);
 }
 
 
@@ -3266,7 +3271,7 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 
-	mutex_lock(&ctx->sit_kv_store_lock);
+	//mutex_lock(&ctx->sit_kv_store_lock);
 	sit_page = add_sit_page_kv_store(ctx, pba, __func__);
 	if (!sit_page) {
 		/* TODO: do something, low memory */
@@ -3285,7 +3290,7 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 		if (ctx->max_mtime < ptr->mtime)
 			ctx->max_mtime = ptr->mtime;
 	}
-	mutex_unlock(&ctx->sit_kv_store_lock);
+	//mutex_unlock(&ctx->sit_kv_store_lock);
 	if(vblocks > BLOCKS_IN_ZONE) {
 		if (!print) {
 			printk(KERN_ERR "\n !!!!!!!!!!!!!!!!!!!!! zone: %llu has more than %d blocks! ", zonenr, ptr->vblocks);
@@ -3310,7 +3315,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 
-	mutex_lock(&ctx->sit_kv_store_lock);
+	//mutex_lock(&ctx->sit_kv_store_lock);
 	sit_page = add_sit_page_kv_store(ctx, pba, __func__);
 	if (!sit_page) {
 		/* TODO: do something, low memory */
@@ -3328,7 +3333,7 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 	ptr->mtime = get_elapsed_time(ctx);
 	if (ctx->max_mtime < ptr->mtime)
 		ctx->max_mtime = ptr->mtime;
-	mutex_unlock(&ctx->sit_kv_store_lock);
+	//mutex_unlock(&ctx->sit_kv_store_lock);
 }
 
 struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node **parent);
@@ -3607,9 +3612,9 @@ void free_translation_pages(struct ctx *ctx)
 		//printk(KERN_ERR "\n %s tm node is NULL!", __func__);
 		return;
 	}
-	mutex_lock(&ctx->tm_kv_store_lock);
+	//mutex_lock(&ctx->tm_kv_store_lock);
 	remove_translation_pages(ctx);
-	mutex_unlock(&ctx->tm_kv_store_lock);
+	//mutex_unlock(&ctx->tm_kv_store_lock);
 }
 
 void remove_sit_page(struct ctx *ctx, struct rb_node *node)
@@ -3640,13 +3645,13 @@ void free_sit_pages(struct ctx *ctx)
 	struct rb_root *root = &ctx->sit_rb_root;
 	struct rb_node * node = NULL;
 
-	mutex_lock(&ctx->sit_kv_store_lock);
+	//mutex_lock(&ctx->sit_kv_store_lock);
 	node = root->rb_node;
 	while(node) {
 		remove_sit_page(ctx, node);
 		node = root->rb_node;
 	}
-	mutex_unlock(&ctx->sit_kv_store_lock);
+	//mutex_unlock(&ctx->sit_kv_store_lock);
 	BUG_ON(root->rb_node);
 	printk(KERN_ERR "\n %s Removed all SIT Pages!", __func__);
 }
@@ -4496,6 +4501,7 @@ void write_done(struct kref *kref)
 	}
 end:
 	bio_endio(bio);
+	trace_printk("%s done lba: %llu len: %llu ", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
 
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
 	//mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
@@ -4524,16 +4530,17 @@ void sub_write_done(struct work_struct * w)
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
 
-	//printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, lba, pba, len, kref_read(&bioctx->ref));
+	trace_printk("\n %s Entering lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, lba, pba, len, kref_read(&bioctx->ref));
 
-	down_write(&ctx->lsdm_rb_lock);
+	//down_write(&ctx->lsdm_rb_lock);
 	/*------------------------------- */
 	lsdm_rb_update_range(ctx, lba, pba, len);
 	/*-------------------------------*/
-	up_write(&ctx->lsdm_rb_lock);
+	//up_write(&ctx->lsdm_rb_lock);
 
 	/* Now reads will work! so we can complete the bio */
 	kref_put(&bioctx->ref, write_done);
+	trace_printk("\n %s Done !! lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, lba, pba, len, kref_read(&bioctx->ref));
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 
 	//down_write(&ctx->lsdm_rev_lock);
@@ -4724,7 +4731,6 @@ int prepare_bio(struct bio * clone, sector_t s8, sector_t wf)
  */
 struct bio * split_submit(struct bio *clone, sector_t s8, sector_t wf)
 {
-	struct lsdm_sub_bioctx *subbio_ctx;
 	struct lsdm_bioctx *bioctx = clone->bi_private;
 	struct ctx *ctx = bioctx->ctx;
 	struct bio *split;
@@ -4750,8 +4756,8 @@ again:
 	if (prepare_bio(split, s8, wf)) {
 		goto fail;
 	}
-	//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, subbio_ctx->extent.len);
-	submit_bio(split);
+	trace_printk("\n %s Submitting lba: {%llu, pba: %llu, len: %d},", __func__, lba, wf, s8);
+	submit_bio_noacct(split);
 	/* we return the second part */
 	return clone;
 fail:
@@ -4795,30 +4801,30 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 			s8 = maxlen;
 			dosplit = 1;
 		}
-		mutex_lock(&ctx->wf_lock);
+		//mutex_lock(&ctx->wf_lock);
 		if (s8 > ctx->free_sectors_in_wf){
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			BUG_ON(s8 != ctx->free_sectors_in_wf);
-			BUG_ON(!s8);
 			dosplit = 1;
 		}
+		BUG_ON(!s8);
 		wf = ctx->hot_wf_pba;
 		move_write_frontier(ctx, s8);
 		clone->bi_private = bioctx;
 		if (!dosplit) {
 			if (prepare_bio(clone, s8, wf)) {
-				mutex_unlock(&ctx->wf_lock);
+				//mutex_unlock(&ctx->wf_lock);
 				goto fail;
 			}
-			submit_bio(clone);
-			//printk(KERN_ERR "\n %s Submitting lba: {%llu, pba: %llu, len: %d} bioctx: %p,", __func__, lba, wf, s8, bioctx);
-			mutex_unlock(&ctx->wf_lock);
+			submit_bio_noacct(clone);
+			trace_printk("\n %s Submitting lba: {%llu, pba: %llu, len: %d}", __func__, lba, wf, s8);
+			//mutex_unlock(&ctx->wf_lock);
 			break;
 		}
 		//dosplit = 1
 		clone->bi_iter.bi_sector = lba;
 		clone = split_submit(clone, s8, wf);
-		mutex_unlock(&ctx->wf_lock);
+		//mutex_unlock(&ctx->wf_lock);
 		if (!clone) {
 			goto fail;
 		}
@@ -4827,8 +4833,6 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 
 	//blk_finish_plug(&plug);
 	kref_put(&bioctx->ref, write_done);
-	flush_workqueue(ctx->writes_wq);
-	flush_workqueue(ctx->tm_wq);
 	return 0; 
 fail:
 	printk(KERN_ERR "%s FAIL!!!!\n", __func__);
@@ -4849,6 +4853,7 @@ void lsdm_handle_write(struct ctx *ctx)
 			printk(KERN_ERR "\n cannot write further, I/O error encountered! ");
 			break;
 		}
+		trace_printk("\n %s Processing bio: lba: %llu, len: %d to biolist", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
 		if (submit_bio_write(ctx, bio)) {
 			printk(KERN_ERR "\n write failed, cannot proceed! ");
 			break;
@@ -4880,7 +4885,8 @@ static int lsdm_write_thread_fn(void * data)
                         break;
 		}
 		lsdm_handle_write(ctx);
-
+		flush_workqueue(ctx->writes_wq);
+		flush_workqueue(ctx->tm_wq);
 	} while(!kthread_should_stop());
 	return 0;
 }
@@ -4987,6 +4993,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	 * time bio is split or padded */
 	clone->bi_private = bioctx;
 	bio->bi_status = BLK_STS_OK;
+	trace_printk("%\n s Adding bio: lba: %llu, len: %d to biolist", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
 	bio_list_add(&ctx->bio_list, clone);
 	wake_up_all(&ctx->write_th->write_waitq);
 	flush_workqueue(ctx->writes_wq);
@@ -5306,9 +5313,9 @@ void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page)
 		for (j=0; j < NR_EXT_ENTRIES_PER_SEC; j++) {
 			if (extent[j].pba == 0)
 				continue;
-			down_write(&ctx->lsdm_rb_lock);
+			//down_write(&ctx->lsdm_rb_lock);
 			lsdm_rb_update_range(ctx, extent[j].lba, extent[j].pba, extent[j].len);
-			up_write(&ctx->lsdm_rb_lock);
+			//up_write(&ctx->lsdm_rb_lock);
 		}
 		entry_sector = entry_sector + 1;
 		i++;
@@ -5685,9 +5692,9 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 		if ((*zonenr == get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) ||
 		    (*zonenr == get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
 			//printk(KERN_ERR "\n zonenr: %d vblocks: %llu is our cur_frontier! not marking it free!", *zonenr, entry->vblocks);
-			mutex_lock(&ctx->wf_lock);
+			//mutex_lock(&ctx->wf_lock);
 			mark_zone_occupied(ctx , *zonenr);
-			mutex_unlock(&ctx->wf_lock);
+			//mutex_unlock(&ctx->wf_lock);
 
 			entry = entry + 1;
 			*zonenr= *zonenr + 1;
@@ -6440,6 +6447,7 @@ int lsdm_map_io(struct dm_target *dm_target, struct bio *bio)
 			break;
 		default:
 			printk(KERN_ERR "\n %s Received bio, op: %d ! doing nothing with it", __func__, bio_op(bio));
+			bio_endio(bio);
 			break;
 	}
 	
