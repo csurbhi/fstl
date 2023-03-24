@@ -210,9 +210,9 @@ static struct extent *lsdm_rb_geq(struct ctx *ctx, off_t lba, int print)
 {
 	struct extent *e = NULL;
 
-	//down_read(&ctx->lsdm_rb_lock); 
+	down_read(&ctx->lsdm_rb_lock); 
 	e = _lsdm_rb_geq(&ctx->extent_tbl_root, lba, print);
-	//up_read(&ctx->lsdm_rb_lock); 
+	up_read(&ctx->lsdm_rb_lock); 
 
 	return e;
 }
@@ -2485,13 +2485,13 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	ptr->vblocks = BLOCKS_IN_ZONE;
 	ptr->mtime = 0;
 
-	//mutex_lock(&ctx->wf_lock);
+	mutex_lock(&ctx->wf_lock);
 	/*-----------------------------------------------*/
 	ctx->nr_invalid_zones++;
 	pba = get_new_zone(ctx);
 	destn_zonenr = get_zone_nr(ctx, pba);
 	/*-----------------------------------------------*/
-	//mutex_unlock(&ctx->wf_lock);
+	mutex_unlock(&ctx->wf_lock);
 	if (0 > pba) {
 		printk(KERN_INFO "No more disk space available for writing!");
 		return;
@@ -2513,7 +2513,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 		panic("This is a ctx bug");
 	}
 		
-	//mutex_lock(&ctx->wf_lock);
+	mutex_lock(&ctx->wf_lock);
 	bitmap = ctx->freezone_bitmap;
 	bytenr = zonenr / BITS_IN_BYTE;
 	bitnr = zonenr % BITS_IN_BYTE;
@@ -2541,7 +2541,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	ctx->nr_freezones = ctx->nr_freezones + 1;
 	//printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
-	//mutex_unlock(&ctx->wf_lock);
+	mutex_unlock(&ctx->wf_lock);
 	/* we need to reset the  zone that we are about to use */
 	if (zonenr > ctx->sb->nr_cmr_zones) {
 		ret = blkdev_zone_mgmt(ctx->dev->bdev, REQ_OP_ZONE_RESET, get_first_pba_for_zone(ctx, zonenr), ctx->sb->nr_lbas_in_zone, GFP_NOIO);
@@ -4532,11 +4532,11 @@ void sub_write_done(struct work_struct * w)
 
 	trace_printk("\n %s Entering lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, lba, pba, len, kref_read(&bioctx->ref));
 
-	//down_write(&ctx->lsdm_rb_lock);
+	down_write(&ctx->lsdm_rb_lock);
 	/*------------------------------- */
 	lsdm_rb_update_range(ctx, lba, pba, len);
 	/*-------------------------------*/
-	//up_write(&ctx->lsdm_rb_lock);
+	up_write(&ctx->lsdm_rb_lock);
 
 	/* Now reads will work! so we can complete the bio */
 	kref_put(&bioctx->ref, write_done);
@@ -4801,7 +4801,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 			s8 = maxlen;
 			dosplit = 1;
 		}
-		//mutex_lock(&ctx->wf_lock);
+		mutex_lock(&ctx->wf_lock);
 		if (s8 > ctx->free_sectors_in_wf){
 			s8 = round_down(ctx->free_sectors_in_wf, NR_SECTORS_IN_BLK);
 			BUG_ON(s8 != ctx->free_sectors_in_wf);
@@ -4813,18 +4813,18 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		clone->bi_private = bioctx;
 		if (!dosplit) {
 			if (prepare_bio(clone, s8, wf)) {
-				//mutex_unlock(&ctx->wf_lock);
+				mutex_unlock(&ctx->wf_lock);
 				goto fail;
 			}
 			submit_bio_noacct(clone);
 			trace_printk("\n %s Submitting lba: {%llu, pba: %llu, len: %d}", __func__, lba, wf, s8);
-			//mutex_unlock(&ctx->wf_lock);
+			mutex_unlock(&ctx->wf_lock);
 			break;
 		}
 		//dosplit = 1
 		clone->bi_iter.bi_sector = lba;
 		clone = split_submit(clone, s8, wf);
-		//mutex_unlock(&ctx->wf_lock);
+		mutex_unlock(&ctx->wf_lock);
 		if (!clone) {
 			goto fail;
 		}
@@ -4993,9 +4993,12 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	 * time bio is split or padded */
 	clone->bi_private = bioctx;
 	bio->bi_status = BLK_STS_OK;
-	trace_printk("%\n s Adding bio: lba: %llu, len: %d to biolist", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
+	trace_printk("\n %s Adding bio: lba: %llu, len: %d to biolist", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
+	submit_bio_write(ctx, clone);
+	/*
 	bio_list_add(&ctx->bio_list, clone);
 	wake_up_all(&ctx->write_th->write_waitq);
+	*/
 	flush_workqueue(ctx->writes_wq);
 	return DM_MAPIO_SUBMITTED;
 memfail:
@@ -6295,10 +6298,11 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	if (ret) {
 		goto free_metadata_pages;
 	}
+	/*
 	ret = lsdm_write_thread_start(ctx);
 	if (ret) {
 		goto stop_gc_thread;
-	} 
+	} */
 	/*
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
@@ -6354,7 +6358,7 @@ static void lsdm_dtr(struct dm_target *dm_target)
 	 * and flushed as well.
 	 */
 	lsdm_gc_thread_stop(ctx);
-	lsdm_write_thread_stop(ctx);
+	//lsdm_write_thread_stop(ctx);
 	sync_blockdev(ctx->dev->bdev);
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
 	flush_workqueue(ctx->tm_wq);
