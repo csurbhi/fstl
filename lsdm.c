@@ -1527,6 +1527,8 @@ prep:
 			list_add(&newgc_extent->list, &gc_extent->list);
 			next_ptr = newgc_extent;
 		}
+		/* Now you verify all this after holding a lock */
+		/*
 		down_write(&ctx->lsdm_rb_lock);
 		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, gc_extent->e.len, last_pba);
 		if (!rev_e || (rev_e->pba > gc_extent->e.pba)) {
@@ -1535,10 +1537,14 @@ prep:
 		}
 		len = gc_extent->e.len;
 		ret = refcount_read(&gc_extent->ref);
-		if (ret > 1) 
+		if (ret > 1) {
+			printk(KERN_ERR "\n waiting on refcount \n");
 			wait_on_refcount(ctx, &gc_extent->ref, &ctx->gc_ref_lock);
+		}
 		ret = write_gc_extent(ctx, gc_extent);
 		up_write(&ctx->lsdm_rb_lock);
+		*/
+		ret = 0;
 		if (ret) {
 			/* write error! disk is in a read mode! we
 			 * cannot perform any further GC
@@ -1709,23 +1715,27 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 
 	gc_mode = FG_GC;
 		
-	flush_workqueue(ctx->tm_wq);
 	//printk(KERN_ERR "\a %s * GC thread polling after every few seconds! gc_mode: %d \n", __func__, gc_mode);
 	
 	/* Take a semaphore lock so that no two gc instances are
 	 * started in parallel.
 	 */
 	if (!mutex_trylock(&ctx->gc_lock)) {
-		//printk(KERN_ERR "\n 1. GC is already running! \n");
+		printk(KERN_ERR "\n 1. GC is already running! \n");
 		return -1;
 	}
+
+	printk(KERN_ERR "\n %s Inside !!! \n ", __func__);
 
 	zonenr = select_zone_to_clean(ctx, gc_mode, __func__);
 	if (zonenr < 0) {
 		mutex_unlock(&ctx->gc_lock);
-		//printk(KERN_ERR "\n No zone found for cleaning!! \n");
+		printk(KERN_ERR "\n No zone found for cleaning!! \n");
+		wake_up_all(&ctx->gc_th->fggc_wq);
+		io_schedule();
 		return -1;
 	}
+	flush_workqueue(ctx->tm_wq);
 	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "BG_GC");
 again:
 	if (!list_empty(&ctx->gc_extents->list)) {
@@ -1762,11 +1772,12 @@ again:
 		goto complete;
 	}
 
+	/*
 	ret = read_gc_extents(ctx);
 	if (ret)
 		goto failed;
-
-	//print_memory_usage(ctx, "After read");
+	*/
+	print_memory_usage(ctx, "After read");
 
 	/* Wait here till the system becomes IO Idle, if system is
 	* iodle don't wait */
@@ -1802,7 +1813,7 @@ complete:
 	if (gc_mode == FG_GC) {
 		cleaned++;
 		drain_workqueue(ctx->tm_wq);
-		printk(KERN_ERR "\n %s nr of free zones: %llu, #cleaned: %d", __func__, ctx->nr_freezones, cleaned);
+		printk(KERN_ERR "\n %s nr of free zones: %llu, #cleaned: %d low watermark: %d high watermark: %d", __func__, ctx->nr_freezones, cleaned, ctx->lower_watermark, ctx->higher_watermark);
 		/* check if you have hit higher_watermark or else keep cleaning */
 		if (ctx->nr_freezones <= ctx->higher_watermark) {
 			zonenr = select_zone_to_clean(ctx, FG_GC, __func__);
@@ -1862,10 +1873,11 @@ static int gc_thread_fn(void * data)
 	wait_queue_head_t *wq = &gc_th->lsdm_gc_wait_queue;
 	unsigned int wait_ms;
 	int mode = BG_GC;
+	struct task_struct *tsk = gc_th->lsdm_gc_task;
 
 	wait_ms = gc_th->max_sleep_time * 10;
 	mutex_init(&ctx->gc_lock);
-	printk(KERN_ERR "\n %s executing! ", __func__);
+	printk(KERN_ERR "\n %s executing! pid: %d", __func__, tsk->pid);
 	set_freezable();
 	do {
 		wait_event_interruptible(*wq,
@@ -1901,6 +1913,9 @@ static int gc_thread_fn(void * data)
 		}*/
 		/* Doing this for now! ret part */
 		lsdm_gc(ctx, mode, 0);
+		if (mode == FG_GC) {
+			ctx->gc_th->gc_wake = 0;
+		}
 
 	} while(!kthread_should_stop());
 	return 0;
@@ -5486,7 +5501,7 @@ int remove_zone_from_gc_tree(struct ctx *ctx, unsigned int zonenr)
 			rb_erase(&znode->rb, root);
 			kmem_cache_free(ctx->gc_zone_node_cache, znode);
 			/*
-			if (zonenr == select_zone_to_clean(ctx, BG_GC)) {
+			if (zonenr == select_zone_to_clean(ctx, BG_GC, __func__)) {
 				printk(KERN_ERR "\n %s zonenr selected next time: %d is same as removed!! \n", __func__, zonenr);
 				BUG_ON(1);
 			} */
@@ -5666,8 +5681,10 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 	rb_link_node(&new->rb, parent, link);
 	rb_insert_color(&new->rb, root);
 
-	//zonenr = select_zone_to_clean(ctx, BG_GC);
-	//printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
+	/*
+	zonenr = select_zone_to_clean(ctx, BG_GC, __func__);
+	printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
+	*/
 	return 0;
 }
 
@@ -6272,8 +6289,8 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	/* lower watermark is at 5 %, watermark represents nrfreezones */
 	//ctx->lower_watermark = ctx->sb->zone_count / 20; 
 	//ctx->higher_watermark = ctx->lower_watermark + 20;
-	ctx->lower_watermark = 3;
-	ctx->higher_watermark = 5;
+	ctx->lower_watermark = 5;
+	ctx->higher_watermark = 10;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->higher_watermark);
 	//ctx->higher_watermark = ctx->lower_watermark >> 2; 
 	/*
