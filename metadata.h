@@ -269,6 +269,7 @@ struct ctx {
 	char *gc_zone_bitmap;
 	int nr_gc_zones;
 	int	bitmap_bytes;
+	int 	bitmap_bit;
 	time64_t mounted_time;
 	time64_t elapsed_time;
 	time64_t min_mtime;
