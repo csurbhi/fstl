@@ -14,8 +14,8 @@
 
 
 #define NRZONES 1
-#define NR_BLKS_IN_ZONE 8
-#define BLKSZ 512
+#define NR_BLKS_IN_ZONE 65536
+#define BLKSZ 4096
 
 //char * fname = "/mnt/test";
 //char * fname = "/dev/dm-0";

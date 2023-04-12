@@ -1,6 +1,7 @@
 #!/bin/bash
 
 #grep "Copied" dmesg | tr -s " " | cut -d " " -f 14,16 | sed 's/)$//' | sed 's/ /, /' > pba-len-create
+# grep "write_gc_extent" dmesg | tr -s  " " | cut -d " " -f 12,15 | sed -s 's/ /, /' > pba-len-final 
 
 filen=$1
 lines=`cat $filen | wc -l`

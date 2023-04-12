@@ -124,7 +124,7 @@ __le32 get_zone_count(int fd)
 	//return 100;
 	//return 1024;
 	//return 29808;
-	return 50;
+	return 64;
 }
 
 /* Note,  that this also account for the first few metadata zones.
