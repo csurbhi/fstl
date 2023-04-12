@@ -6445,8 +6445,8 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	/* lower watermark is at 5 %, watermark represents nrfreezones */
 	//ctx->lower_watermark = ctx->sb->zone_count / 20; 
 	//ctx->higher_watermark = ctx->lower_watermark + 20;
-	ctx->lower_watermark = 5;
-	ctx->higher_watermark = 10;
+	ctx->lower_watermark = 3;
+	ctx->higher_watermark = 5;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->higher_watermark);
 	//ctx->higher_watermark = ctx->lower_watermark >> 2; 
 	/*
