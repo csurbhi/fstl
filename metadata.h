@@ -248,7 +248,7 @@ struct ctx {
 
 	atomic_t          io_count;
 
-	atomic_t          nr_reads;
+	u64		  nr_reads;
 	sector_t          target;	/* in our case now points to the segment getting GCed */
 	unsigned          sectors_copied;
 	atomic_t          pages_alloced;
@@ -275,8 +275,8 @@ struct ctx {
 	time64_t min_mtime;
 	time64_t max_mtime;
 	unsigned int flag_ckpt;
-	atomic_t nr_app_writes;
-	atomic_t nr_gc_writes;
+	u64 	nr_app_writes;
+	u64	nr_gc_writes;
        	atomic_t nr_failed_writes;
        	atomic_t revmap_sector_nr;
        	atomic_t revmap_entry_nr;
