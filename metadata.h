@@ -207,6 +207,12 @@ struct gc_extents {
 	struct list_head list;
 };
 
+struct lsdm_gcctx {
+	struct ctx * ctx;
+	struct gc_extents * gc_extent;
+	struct work_struct work;
+};
+
 struct mykref {
 	refcount_t refcount;
 };
@@ -287,6 +293,7 @@ struct ctx {
 	struct kmem_cache * extent_cache;
 	struct kmem_cache * rev_extent_cache;
 	struct kmem_cache * subbio_ctx_cache;
+	struct kmem_cache * gcctx_cache;
 	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
 	struct kmem_cache *reflist_cache;
