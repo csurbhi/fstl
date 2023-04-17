@@ -1200,9 +1200,9 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 #endif
 	gc_extent->read = 1;
 	/* submiting the bio in read_all_bios_and_wait */
-	submit_bio_wait(gc_extent->bio);
-	refcount_dec(&gc_extent->ref);
-	bio_put(bio);
+	submit_bio(gc_extent->bio);
+	//refcount_dec(&gc_extent->ref);
+	//bio_put(bio);
 	return 0;
 }
 
@@ -1880,10 +1880,11 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 	struct list_head *pos;
 	struct gc_extents *gc_extent;
 	int cleaned = 0;
+	u64 start_t, end_t, interval = 0, gc_count = 0;
 
 	gc_mode = FG_GC;
 		
-	printk(KERN_ERR "\a %s * GC thread polling after every few seconds! gc_mode: %d \n", __func__, gc_mode);
+	//printk(KERN_ERR "\a %s * GC thread polling after every few seconds! gc_mode: %d \n", __func__, gc_mode);
 	
 	/* Take a semaphore lock so that no two gc instances are
 	 * started in parallel.
@@ -1893,6 +1894,7 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 		return -1;
 	}
 	//printk(KERN_ERR "\n %s Inside !!! \n ", __func__);
+	start_t = ktime_get_ns();	
 
 	zonenr = select_zone_to_clean(ctx, gc_mode, __func__);
 	if (zonenr < 0) {
@@ -1963,6 +1965,10 @@ again:
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
 	ckpt->clean = 0;
 	do_checkpoint(ctx);
+	end_t = ktime_get_ns();	
+	interval += (end_t - start_t)/1000000;
+	gc_count++;
+
 complete:
 	//printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	/* Release GC lock */
@@ -1975,7 +1981,7 @@ complete:
 	if (gc_mode == FG_GC) {
 		cleaned++;
 		drain_workqueue(ctx->tm_wq);
-		//printk(KERN_ERR "\n %s nr of free zones: %llu, #cleaned: %d low watermark: %d high watermark: %d", __func__, ctx->nr_freezones, cleaned, ctx->lower_watermark, ctx->higher_watermark);
+		printk(KERN_ERR "\n %s nr of free zones: %llu, #cleaned: %d low watermark: %d high watermark: %d zonenr", __func__, ctx->nr_freezones, cleaned, ctx->lower_watermark, ctx->higher_watermark, zonenr);
 		/* check if you have hit higher_watermark or else keep cleaning */
 		if (ctx->nr_freezones <= ctx->higher_watermark) {
 			zonenr = select_zone_to_clean(ctx, FG_GC, __func__);
@@ -1988,6 +1994,10 @@ complete:
 	}
 failed:
 	mutex_unlock(&ctx->gc_lock);
+	ctx->gc_total += interval;
+	ctx->gc_average = interval / gc_count;
+	ctx->gc_count += gc_count;
+	printk(KERN_ERR "\n %s end_t: %llu start_t: %llu, gc_count: %d total time: %llu (milliseconds)", __func__, end_t, start_t, gc_count, interval);
 	//printk(KERN_ERR "\n %s going out! \n nr gc writes: %d ", __func__, ctx->nr_gc_writes);
 	//wake_up_all(&ctx->gc_th->fggc_wq);
 	return 0;
@@ -2721,7 +2731,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
-	//printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
+	printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
 	mutex_unlock(&ctx->wf_lock);
 	/* we need to reset the  zone that we are about to use */
@@ -6465,7 +6475,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	//ctx->lower_watermark = ctx->sb->zone_count / 20; 
 	//ctx->higher_watermark = ctx->lower_watermark + 20;
 	ctx->lower_watermark = 3;
-	ctx->higher_watermark = 4;
+	ctx->higher_watermark = 5;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->higher_watermark);
 	//ctx->higher_watermark = ctx->lower_watermark >> 2; 
 	/*
@@ -6604,6 +6614,9 @@ static void lsdm_dtr(struct dm_target *dm_target)
 	printk(KERN_ERR "\n nr_app_writes: %d", ctx->nr_app_writes);
 	printk(KERN_ERR "\n nr_gc_writes: %d", ctx->nr_gc_writes);
 	printk(KERN_ERR "\n nr_failed_writes: %u", atomic_read(&ctx->nr_failed_writes));
+	printk(KERN_ERR "\n gc cleaning time average: %llu", ctx->gc_average);
+	printk(KERN_ERR "\n gc total nr of segments cleaned: %d", ctx->gc_count);
+	printk(KERN_ERR "\n gc total time spent cleaning: %d", ctx->gc_total);
 	destroy_caches(ctx);
 	dm_put_device(dm_target, ctx->dev);
 	kfree(ctx);
