@@ -1149,8 +1149,9 @@ void read_gcextent_done(struct bio * bio)
 {
 	struct gc_extents *gc_extent = (struct gc_extents *) bio->bi_private;
 	
-	refcount_dec(&gc_extent->ref);
+	//refcount_dec(&gc_extent->ref);
 	bio_put(bio);
+	gc_extent->bio = NULL;
 }
 
 static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
@@ -1162,7 +1163,7 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	unsigned int len, s8, pagecount;
 	int i;
 
-	refcount_inc(&gc_extent->ref);
+	//refcount_inc(&gc_extent->ref);
 	s8 = gc_extent->e.len;
 	BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_SHIFT));
 	pagecount = (s8 >> SECTOR_SHIFT);
@@ -1192,7 +1193,7 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio_set_dev(bio, ctx->dev->bdev);
 	bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio->bi_private = gc_extent;
-	bio->bi_end_io = read_gcextent_done;
+	//bio->bi_end_io = read_gcextent_done;
 	gc_extent->bio = bio;
 #ifdef LSDM_DEBUG
 	if (gc_extent->read == 1)
@@ -1200,9 +1201,9 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 #endif
 	gc_extent->read = 1;
 	/* submiting the bio in read_all_bios_and_wait */
-	submit_bio(gc_extent->bio);
+	submit_bio_wait(gc_extent->bio);
 	//refcount_dec(&gc_extent->ref);
-	//bio_put(bio);
+	bio_put(bio);
 	return 0;
 }
 
@@ -1288,7 +1289,7 @@ int add_translation_entry(struct ctx *, sector_t , sector_t , size_t );
  * from the disk, we are sure that the length is in terms of what is
  * found on disk.
  */
-static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
+static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 {
 	struct bio *bio;
 	struct gc_ctx *gc_ctx;
@@ -1298,11 +1299,12 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	int ret;
 	u64 lba, pba, len;
 
+	/*
 	ret = refcount_read(&gc_extent->ref);
 	if (ret > 1) {
 		printk(KERN_ERR "\n waiting on refcount \n");
 		wait_on_refcount(ctx, &gc_extent->ref, &ctx->gc_ref_lock);
-	}
+	}*/
 	setup_extent_bio_write(ctx, gc_extent);
 	bio = gc_extent->bio;
 	bio->bi_iter.bi_sector = ctx->warm_gc_wf_pba;
@@ -1316,11 +1318,7 @@ static int write_gc_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	BUG_ON(gc_extent->e.lba >= ctx->sb->max_pba);
 #endif
 	bio->bi_status = BLK_STS_OK;
-	submit_bio_wait(bio);
-	ctx->nr_gc_writes += s8;
-	if (bio->bi_status != BLK_STS_OK) {
-		panic("GC writes failed! Perhaps a resource error");
-	}
+	
 	//down_write(&ctx->lsdm_rev_lock);
 	/*---------------------*/
 	//add_revmap_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
@@ -1501,6 +1499,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		if (!rev_e) {
 			/* snip all the gc_extents from this onwards */
 			list_for_each_entry_safe_from(gc_extent, temp_ptr, &ctx->gc_extents->list, list) {
+				gc_extent->bio = NULL;
 				free_gc_extent(ctx, gc_extent);
 			}
 			return 0;
@@ -1508,6 +1507,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		if (!rev_e) {
 			/* snip all the gc_extents from this onwards */
 			list_for_each_entry_safe_from(gc_extent, temp_ptr, &ctx->gc_extents->list, list) {
+				gc_extent->bio = NULL;
 				free_gc_extent(ctx, gc_extent);
 			}
 			break;
@@ -1516,6 +1516,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		/* entire extent is lost by interim overwrites */
 		if (e->pba >= (gc_extent->e.pba + gc_extent->e.len)) {
 			//printk(KERN_ERR "\n %s:%d entire extent is lost! \n", __func__, __LINE__);
+			gc_extent->bio = NULL;
 			free_gc_extent(ctx, gc_extent);
 			continue;
 		}
@@ -1593,10 +1594,18 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 			//printk(KERN_ERR "\n %s gc_extent::len: %d newgc_extent::len: %d ", __func__, gc_extent->e.len, newgc_extent->e.len);
 		}
 		/* Now you verify all this after holding a lock */
-		ret = write_gc_extent(ctx, gc_extent);
+		ret = write_metadata_extent(ctx, gc_extent);
 		up_write(&ctx->lsdm_rb_lock);
 		total += gc_extent->e.len;
-		flush_workqueue(ctx->tm_wq);
+		/* We do not want to do disk I/O with a lock held. So we write the metadata
+		 * and then submit_bio. Now we can have a read on this, before the write completes.
+		 * We need to take care of that - such a read will have to wait.
+		 * TODO: fix this - read the same block that is about to be written by GC problem.
+		 * Mark such a read.
+		 */
+		submit_bio(gc_extent->bio);
+		ctx->nr_gc_writes += s8;
+		//flush_workqueue(ctx->tm_wq);
 		if (ret) {
 			/* write error! disk is in a read mode! we
 			 * cannot perform any further GC
@@ -1607,8 +1616,8 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		}
 		free_gc_extent(ctx, gc_extent);
 		count++;
-		vblks = get_sit_ent_vblocks(ctx, zonenr);
 #ifdef LSDM_DEBUG
+		vblks = get_sit_ent_vblocks(ctx, zonenr);
 		BUG_ON(vblks > (total_vblks - (gc_extent->e.len >> SECTOR_SHIFT)));
 		//printk(KERN_ERR "\n %s validblks: %d ", __func__, vblks);
 #endif
@@ -1905,7 +1914,7 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 		return -1;
 	}
 	//flush_workqueue(ctx->tm_wq);
-	//printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "BG_GC");
+	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "BG_GC");
 again:
 	if (!list_empty(&ctx->gc_extents->list)) {
 		list_for_each(pos, &ctx->gc_extents->list) {
@@ -1981,7 +1990,7 @@ complete:
 	if (gc_mode == FG_GC) {
 		cleaned++;
 		drain_workqueue(ctx->tm_wq);
-		printk(KERN_ERR "\n %s nr of free zones: %llu, #cleaned: %d low watermark: %d high watermark: %d zonenr", __func__, ctx->nr_freezones, cleaned, ctx->lower_watermark, ctx->higher_watermark, zonenr);
+		//printk(KERN_ERR "\n %s nr of free zones: %llu, #cleaned: %d low watermark: %d high watermark: %d zonenr", __func__, ctx->nr_freezones, cleaned, ctx->lower_watermark, ctx->higher_watermark, zonenr);
 		/* check if you have hit higher_watermark or else keep cleaning */
 		if (ctx->nr_freezones <= ctx->higher_watermark) {
 			zonenr = select_zone_to_clean(ctx, FG_GC, __func__);
@@ -1997,7 +2006,7 @@ failed:
 	ctx->gc_total += interval;
 	ctx->gc_average = interval / gc_count;
 	ctx->gc_count += gc_count;
-	printk(KERN_ERR "\n %s end_t: %llu start_t: %llu, gc_count: %d total time: %llu (milliseconds)", __func__, end_t, start_t, gc_count, interval);
+	//printk(KERN_ERR "\n %s end_t: %llu start_t: %llu, gc_count: %d total time: %llu (milliseconds)", __func__, end_t, start_t, gc_count, interval);
 	//printk(KERN_ERR "\n %s going out! \n nr gc writes: %d ", __func__, ctx->nr_gc_writes);
 	//wake_up_all(&ctx->gc_th->fggc_wq);
 	return 0;
@@ -2187,13 +2196,24 @@ void lsdm_ioidle(struct mykref *kref)
 
 
 void no_op(struct kref *kref) { }
+int is_zone_free(struct ctx *ctx, unsigned int zonenr);
 
 void lsdm_subread_done(struct bio *clone)
 {
 	struct app_read_ctx *read_ctx = clone->bi_private;
 	struct ctx *ctx = read_ctx->ctx;
 	struct bio * bio = read_ctx->bio;
+	u64 zonenr;
 
+	if (read_ctx->pba < ctx->sb->max_pba) {
+		zonenr = get_zone_nr(ctx, read_ctx->pba);
+		if ((zonenr > 0) && (zonenr < ctx->sb->zone_count)) {
+			if (is_zone_free(ctx, zonenr)) {
+				/* fail this read */
+				bio->bi_status = BLK_STS_AGAIN;
+			}
+		}
+	}
 	//printk(KERN_ERR "\n %s read lba: %llu ! \n", __func__, read_ctx->lba);
 	bio_endio(bio);
 	mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
@@ -2303,6 +2323,7 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 	bio->bi_iter.bi_sector = pba;
 	bio->bi_end_io = complete_small_reads;
 	bio->bi_private = readctx;
+	readctx->pba = pba;
 	return bio;
 }
 
@@ -2363,6 +2384,7 @@ int handle_partial_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone,
 	//printk(KERN_ERR "\n 2. (SPLIT) %s lba: %llu, pba: %llu nr_sectors: %d ", __func__, split->bi_iter.bi_sector, pba, bio_sectors(split));
 	bio_chain(split, clone);
 	split->bi_iter.bi_sector = pba;
+	read_ctx->pba = pba;
 	bio_set_dev(split, ctx->dev->bdev);
 	BUG_ON(pba > ctx->sb->max_pba);
 	//printk(KERN_ERR "\n %s submitted split! ", __func__);
@@ -2371,24 +2393,30 @@ int handle_partial_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone,
 }
 
 
-int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, sector_t nr_sectors, sector_t pba, struct app_read_ctx *read_ctx)
+int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, sector_t nr_sectors, sector_t pba, struct app_read_ctx *read_ctx, int print)
 {
 	sector_t s8;
 	struct bio *split;
+	BUG_ON(pba > ctx->sb->max_pba);
 
-	//printk(KERN_ERR "\n %s pba: %llu len: %llu \n", __func__, pba, nr_sectors);
+	if (print)
+		printk(KERN_ERR "\n %s pba: %llu len: %llu \n", __func__, pba, nr_sectors);
 
 	s8 = round_down(nr_sectors, NR_SECTORS_IN_BLK);
 	if (nr_sectors == s8) {
-		//printk(KERN_ERR "\n %s aligned read \n", __func__);
+		if (print)
+			printk(KERN_ERR "\n %s aligned read \n", __func__);
 		ctx->nr_reads += s8;
 		clone->bi_end_io = lsdm_subread_done;
 		clone->bi_iter.bi_sector = pba;
+		read_ctx->pba = pba;
 		bio_set_dev(clone, ctx->dev->bdev);
-		//printk(KERN_ERR "\n %s aligned read submitting....\n", __func__);
+		if (print)
+			printk(KERN_ERR "\n %s aligned read submitting....\n", __func__);
 		submit_bio_noacct(clone);
 	} else {
-		//printk(KERN_ERR "\n %s Unaligned read \n", __func__);
+		if (print)
+			printk(KERN_ERR "\n %s Unaligned read \n", __func__);
 		/* nr_sectors is not divisible by NR_SECTORS_IN_BLK*/
 		if (nr_sectors > NR_SECTORS_IN_BLK) {
 			ctx->nr_reads += s8;
@@ -2402,6 +2430,7 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 			}
 			bio_chain(split, clone);
 			split->bi_iter.bi_sector = pba;
+			read_ctx->pba = pba;
 			bio_set_dev(split, ctx->dev->bdev);
 			BUG_ON(pba > ctx->sb->max_pba);
 			submit_bio_noacct(split);
@@ -2413,16 +2442,17 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 		read_ctx->nrsectors = nr_sectors;
 		read_ctx->lba = clone->bi_iter.bi_sector;
 		read_ctx->clone = clone;
+		read_ctx->pba = pba;
 		ctx->nr_reads += nr_sectors;
 		clone = construct_smaller_bios(ctx, pba, read_ctx);
 		if (clone  == NULL) {
 			printk(KERN_ERR "\n %s could not construct smaller bio! \n");
 			bio_endio(read_ctx->clone);
 		}
-		//printk(KERN_ERR "\n %s (smaller read) -> lba: %llu pba:%llu len:%d", __func__, read_ctx->lba, clone->bi_iter.bi_sector, nr_sectors);
+		if (print)
+			printk(KERN_ERR "\n %s (smaller read) -> lba: %llu pba:%llu len:%d", __func__, read_ctx->lba, clone->bi_iter.bi_sector, nr_sectors);
 		submit_bio_noacct(clone);
 	}	
-	BUG_ON(pba > ctx->sb->max_pba);
 	return 0;
 }
 
@@ -2467,7 +2497,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		bio_endio(bio);
 		return -ENOMEM;
 	}
-	//printk(KERN_ERR "\n %s -> bio::lba: %llu bio::nrsectors: %d", __func__, clone->bi_iter.bi_sector, bio_sectors(clone));
+	//printk(KERN_ERR "\n %s Read bio::lba: %llu bio::nrsectors: %d", __func__, clone->bi_iter.bi_sector, bio_sectors(clone));
 
 	clone->bi_private = read_ctx;
 	bio_set_dev(clone, ctx->dev->bdev);
@@ -2483,12 +2513,16 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		/* case of no overlap */
 		if ((e == NULL) || (e->lba >= (lba + nr_sectors)) || ((e->lba + e->len) <= lba))  {
 			zero_fill_clone(ctx, read_ctx, clone);
-			//printk(KERN_ERR "\n case of zero overlap!");
+			if (origlba >= 15597042700) {
+				printk(KERN_ERR "\n %s case of zero overlap! origlba: %llu", __func__, origlba);
+			}
 			break;
 		}
-		/*printk(KERN_ERR "\n %s Searching: origlba: %llu lba: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu \n", 
+
+		if (origlba >= 15597042700) {
+			printk(KERN_ERR "\n %s Searching: origlba: %llu lba: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu \n", 
 				__func__, origlba, lba, nr_sectors, e->lba, e->pba, e->len);
-		 */
+		}
 
 		/* Case of Overlap, e always overlaps with bio */
 		if (e->lba > lba) {
@@ -2496,7 +2530,9 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 *	[---------bio------] 
 		 */
 			zerolen = e->lba - lba;
-			//printk(KERN_ERR "\n Case of partial overlap! (no left overlap)");
+			if (origlba >= 15597042700) {
+				printk(KERN_ERR "\n %s Case of partial overlap! (no left overlap), origlba: %llu", __func__, origlba);
+			}
 			ret = zero_fill_inital_bio(ctx, bio, clone, zerolen, read_ctx);
 			if (!ret)
 				return ret;
@@ -2516,14 +2552,16 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		diff = lba - e->lba;
 		BUG_ON(diff < 0);
 		pba = e->pba + diff;
-		//printk(KERN_ERR "\n %s overlap: %llu, nr_sectors: %llu diff: %d", __func__, overlap, nr_sectors, diff);
+		if (origlba >= 15597042700) {
+			printk(KERN_ERR "\n %s overlap: %llu, nr_sectors: %llu diff: %d lba: %llu, pba: %llu", __func__, overlap, nr_sectors, diff, lba, pba);
+		}
 		if (overlap >= nr_sectors) { 
 		/* e is bigger than bio, so overlap >= nr_sectors, no further
 		 * splitting is required. Previous splits if any, are chained
 		 * to the last one as 'clone' is their parent.
 		 */
-			ret = handle_full_overlap(ctx, bio, clone, nr_sectors, pba, read_ctx);
-			//printk(KERN_ERR "\n 1) ret: %d ", ret);
+			ret = handle_full_overlap(ctx, bio, clone, nr_sectors, pba, read_ctx, (origlba >= 15597042700) ? 1: 0);
+			printk(KERN_ERR "\n 1) ret: %d \n", ret);
 			if (ret)
 				return ret;
 			break;
@@ -2532,7 +2570,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			/* overlap is smaller than nr_sectors remaining. */
 			//printk(KERN_ERR "\n clone: %p clone::nr_sectors: %d e->len: %d overlap: %d", clone, bio_sectors(clone), e->len, overlap);
 			ret = handle_partial_overlap(ctx, bio, clone, overlap, read_ctx, pba);
-			//printk(KERN_ERR "\n 2) ret: %d clone::lba: %llu", ret, clone->bi_iter.bi_sector);
+			printk(KERN_ERR "\n 2) ret: %d clone::lba: %llu", ret, clone->bi_iter.bi_sector);
 			if (ret)
 				return ret;
 			/* Since e was smaller, we want to search for the next e */
@@ -2688,6 +2726,43 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	//copy_blocks(zonenr, destn_zonenr); 
 }
 
+int is_zone_free(struct ctx *ctx, unsigned int zonenr)
+{
+	char *bitmap;
+	unsigned int bytenr, bitnr, ret = 0;
+	int result = 0;
+
+	if (unlikely(NULL == ctx)) {
+		panic("This is a ctx bug");
+	}
+		
+	bitmap = ctx->freezone_bitmap;
+	bytenr = zonenr / BITS_IN_BYTE;
+	bitnr = zonenr % BITS_IN_BYTE;
+	//printk(KERN_ERR "\n %s zonenr: %lu, bytenr: %d bitnr: %d bitmap[%d]: %d ", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr]);
+
+	if(unlikely(bytenr >= ctx->bitmap_bytes)) {
+		panic("bytenr: %d > bitmap_bytes: %d", bytenr, ctx->bitmap_bytes);
+	}
+
+	if(unlikely((bytenr == (ctx->bitmap_bytes-1)) && (bitnr > ctx->bitmap_bit))) {
+		panic("bytenr: %d, bitnr: %d > bitmap_bytes: %d, bitnr: %d", bytenr, bitnr, ctx->bitmap_bytes, ctx->bitmap_bit);
+	}
+
+	if (unlikely(NULL == bitmap)) {
+		panic("This is a ctx freezone bitmap bug!");
+	}
+
+
+	mutex_lock(&ctx->wf_lock);
+	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
+		/* This bit was 1 and hence already free*/
+		result = 1;
+	}
+	mutex_unlock(&ctx->wf_lock);
+	return result;
+}
+
 /* 
  * 1 indicates that the zone is free 
  *
@@ -2731,7 +2806,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr)
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
-	printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
+	//printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
 	mutex_unlock(&ctx->wf_lock);
 	/* we need to reset the  zone that we are about to use */
@@ -2812,8 +2887,7 @@ static void add_ckpt_new_wf(struct ctx *, sector_t);
 static void add_ckpt_new_gc_wf(struct ctx * ctx, sector_t wf);
 
 /* moves the write frontier, returns the LBA of the packet trailer
- *
- * Always called with the ctx->lock held
+ * Always called with the ctx->wf_lock held.
 */
 static int get_new_zone(struct ctx *ctx)
 {
@@ -2856,6 +2930,11 @@ void print_zones_vblocks(struct ctx *ctx);
 
 /*
  * moves the write frontier, returns the LBA of the packet trailer
+ * We know that only one GC thread is working at a time. Thus we take a 
+ * lock only while getting a free zone as that can clash with writes moving
+ * the frontier and asking for a new zone. We dont want to end up with the same zones
+ * for both! get_next_freezone_nr() also marks a zone as not free. We want to do that
+ * under a lock. 
 */
 static int get_new_gc_zone(struct ctx *ctx)
 {
@@ -2863,8 +2942,10 @@ static int get_new_gc_zone(struct ctx *ctx)
 	int trial;
 
 	trial = 0;
+	mutex_lock(&ctx->wf_lock);
 again:
 	zone_nr = get_next_freezone_nr(ctx);
+	mutex_unlock(&ctx->wf_lock);
 	if (zone_nr < 0) {
 		trial++;
 		wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
@@ -3442,8 +3523,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 			ctx->max_mtime = ptr->mtime;
 		update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
 		if (!ptr->vblocks) {
-			int ret = 0;
-			////printk(KERN_ERR "\n %s Freeing zone: %llu \n", __func__, zonenr);
+			//printk(KERN_ERR "\n %s Freeing zone: %llu \n", __func__, zonenr);
 			mark_zone_free(ctx , zonenr);
 			
 		}
@@ -4276,7 +4356,7 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, char * func)
 		}
 	}
 /*-------------------------------------------------------------*/
-	//printk(KERN_ERR "\n %s BYE lba: %llu pba: %llu len: %d!", __func__, lba, pba, len);
+	printk(KERN_ERR "\n %s BYE lba: %llu pba: %llu len: %d!", __func__, lba, pba, len);
 	return 0;
 }
 
@@ -4887,7 +4967,7 @@ void fill_bio(struct bio *bio, sector_t pba, sector_t len, struct block_device *
 {
 	bio_set_dev(bio, bdev);
 	bio->bi_iter.bi_sector = pba; /* we use the saved write frontier */
-	//bio->bi_iter.bi_size = len << 9;
+	bio->bi_iter.bi_size = len << 9;
 	bio->bi_private = subbio_ctx;
 	bio->bi_end_io = lsdm_clone_endio;
 }
@@ -4993,7 +5073,10 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 		}
 		dosplit = 0;
 		s8 = round_up(nr_sectors, NR_SECTORS_IN_BLK);
-		BUG_ON(s8 != nr_sectors);
+		if (s8 != nr_sectors) {
+			printk(KERN_ERR "\n nr_sectors: %d s8: %d ", nr_sectors, s8);
+			BUG_ON(1);
+		}
 		if (s8 > maxlen) {
 			s8 = maxlen;
 			dosplit = 1;
@@ -5191,7 +5274,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	 * time bio is split or padded */
 	clone->bi_private = bioctx;
 	bio->bi_status = BLK_STS_OK;
-	//trace_printk("\n %s Adding bio: lba: %llu, len: %d to biolist", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
+	//printk(KERN_ERR "\n %s Write bio: lba: %llu, len: %d ", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
 	submit_bio_write(ctx, clone);
 	/*
 	bio_list_add(&ctx->bio_list, clone);
@@ -5888,7 +5971,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 	sb = ctx->sb;
 
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
-	printk("\n Number of seg entries: %u", nr_seg_entries);
+	//printk("\n Number of seg entries: %u", nr_seg_entries);
 	//printk("\n ctx->hot_frontier_pba: %llu, ckpt->frontier zone: %u", ctx->ckpt->hot_frontier_pba, get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
 
 	while (i < nr_seg_entries) {
@@ -6669,9 +6752,9 @@ static void lsdm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
         struct ctx *ctx = ti->private;
 	struct lsdm_sb *sb = ctx->sb;
-        unsigned int nrsectors = 1 << (sb->log_zone_size - sb->log_sector_size);
+        unsigned int nrsectors = 1 << (sb->log_zone_size - sb->log_block_size);
 
-        limits->logical_block_size = SECTOR_SIZE;
+        limits->logical_block_size = BLOCK_SIZE;
         limits->physical_block_size = BLOCK_SIZE;
 
         blk_limits_io_min(limits, BLOCK_SIZE);
