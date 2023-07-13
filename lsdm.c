@@ -1497,14 +1497,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		 */
 		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, gc_extent->e.len, last_pba_read, __func__);
 		if (!rev_e) {
-			/* snip all the gc_extents from this onwards */
-			list_for_each_entry_safe_from(gc_extent, temp_ptr, &ctx->gc_extents->list, list) {
-				gc_extent->bio = NULL;
-				free_gc_extent(ctx, gc_extent);
-			}
-			return 0;
-		}
-		if (!rev_e) {
+			up_write(&ctx->lsdm_rb_lock);
 			/* snip all the gc_extents from this onwards */
 			list_for_each_entry_safe_from(gc_extent, temp_ptr, &ctx->gc_extents->list, list) {
 				gc_extent->bio = NULL;
@@ -1516,6 +1509,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		/* entire extent is lost by interim overwrites */
 		if (e->pba >= (gc_extent->e.pba + gc_extent->e.len)) {
 			//printk(KERN_ERR "\n %s:%d entire extent is lost! \n", __func__, __LINE__);
+			up_write(&ctx->lsdm_rb_lock);
 			gc_extent->bio = NULL;
 			free_gc_extent(ctx, gc_extent);
 			continue;
@@ -1593,6 +1587,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 			next_ptr = newgc_extent;
 			//printk(KERN_ERR "\n %s gc_extent::len: %d newgc_extent::len: %d ", __func__, gc_extent->e.len, newgc_extent->e.len);
 		}
+
 		/* Now you verify all this after holding a lock */
 		ret = write_metadata_extent(ctx, gc_extent);
 		up_write(&ctx->lsdm_rb_lock);
@@ -1914,6 +1909,7 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 		return -1;
 	}
 	//flush_workqueue(ctx->tm_wq);
+	flush_workqueue(ctx->writes_wq);
 	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "BG_GC");
 again:
 	if (!list_empty(&ctx->gc_extents->list)) {
@@ -2570,7 +2566,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			/* overlap is smaller than nr_sectors remaining. */
 			//printk(KERN_ERR "\n clone: %p clone::nr_sectors: %d e->len: %d overlap: %d", clone, bio_sectors(clone), e->len, overlap);
 			ret = handle_partial_overlap(ctx, bio, clone, overlap, read_ctx, pba);
-			printk(KERN_ERR "\n 2) ret: %d clone::lba: %llu", ret, clone->bi_iter.bi_sector);
+			//printk(KERN_ERR "\n 2) ret: %d clone::lba: %llu", ret, clone->bi_iter.bi_sector);
 			if (ret)
 				return ret;
 			/* Since e was smaller, we want to search for the next e */
@@ -5280,7 +5276,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	bio_list_add(&ctx->bio_list, clone);
 	wake_up_all(&ctx->write_th->write_waitq);
 	*/
-	flush_workqueue(ctx->writes_wq);
+	//flush_workqueue(ctx->writes_wq);
 	return DM_MAPIO_SUBMITTED;
 memfail:
 	bio->bi_status = BLK_STS_RESOURCE;
