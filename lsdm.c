@@ -588,9 +588,9 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
 				/* We find an overlapping pba when the gc_extent was split due to space
 				 * requirements in the gc frontier
 				 */
-				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, e->lba, e->pba, e->len);
-				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
-				BUG_ON("Bug while adding revmap entry ! (less than case)");
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%llu), %llu) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%llu), %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
+				BUG_ON("1. Bug while adding revmap entry ! (less than case)");
 			}
 
 			link = &(parent->rb_left);
@@ -601,17 +601,16 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
 				/* We find an overlapping pba when the gc_extent was split due to space
 				 * requirements in the gc frontier
 				 */
-				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, e->lba, e->pba, e->len);
-				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
-
-				BUG_ON("Bug while adding revmap entry !");
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%llu), %llu) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%llu), %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
+				BUG_ON("2. Bug while adding revmap entry !");
 			}
 			link = &(parent->rb_right);
 			continue;
 		} 
-		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, e->lba, e->pba, e->len);
-		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
-		BUG_ON("Bug while adding revmap entry !");
+		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%llu), %llu) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
+		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%llu), %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
+		BUG_ON("3. Bug while adding revmap entry !");
 	}
 	//printk( KERN_ERR "\n %s Inserting pba: %llu, pointing to (lba, len): (%llu, %llu)", __func__, r_new->pba, extent->lba, extent->len);
 	/* Put the new node there */
@@ -1332,7 +1331,7 @@ static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	return 0;
 }
 
-static void mark_zone_free(struct ctx *ctx , int zonenr);
+static void mark_zone_free(struct ctx *ctx , int zonenr, int resetZone);
 
 
 
@@ -1937,12 +1936,13 @@ again:
 
 	if (list_empty(&ctx->gc_extents->list)) {
 		/* Nothing to do, sit_ent_vblocks_decr() is playing catch up with gc cost tree */
-		wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
+		//wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
 		flush_workqueue(ctx->tm_wq);
 		remove_zone_from_gc_tree(ctx, zonenr);	
 		goto complete;
 	}
 
+	printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	ret = read_gc_extents(ctx);
 	if (ret)
 		goto failed;
@@ -1959,6 +1959,7 @@ again:
 			gc_mode = FG_GC;
 		}
 	}
+	printk(KERN_ERR "\n %s zonenr: %d about to be written, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	ret = write_valid_gc_extents(ctx, zonenr);
 	if (ret < 0) { 
 		printk(KERN_ERR "\n write_valid_gc_extents() failed, ret: %d ", ret);
@@ -1975,7 +1976,7 @@ again:
 	gc_count++;
 
 complete:
-	//printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
+	printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	/* Release GC lock */
 
 	if (gc_th->gc_wake) {
@@ -2557,7 +2558,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 * to the last one as 'clone' is their parent.
 		 */
 			ret = handle_full_overlap(ctx, bio, clone, nr_sectors, pba, read_ctx, (origlba >= 15597042700) ? 1: 0);
-			printk(KERN_ERR "\n 1) ret: %d \n", ret);
+			//printk(KERN_ERR "\n 1) ret: %d \n", ret);
 			if (ret)
 				return ret;
 			break;
@@ -2764,54 +2765,62 @@ int is_zone_free(struct ctx *ctx, unsigned int zonenr)
  *
  * Zone numbers start from 0
  */
-static void mark_zone_free(struct ctx *ctx , int zonenr)
+static void mark_zone_free(struct ctx *ctx , int zonenr, int resetZone)
 {	
 	char *bitmap;
 	int bytenr, bitnr, ret = 0;
 
 	if (unlikely(NULL == ctx)) {
-		panic("This is a ctx bug");
+		printk(KERN_ERR "\n ctx is null! ");
+		return;
 	}
-		
-	mutex_lock(&ctx->wf_lock);
+	/* zone is not marked free yet, so will not be selected for writing */
+
 	bitmap = ctx->freezone_bitmap;
 	bytenr = zonenr / BITS_IN_BYTE;
 	bitnr = zonenr % BITS_IN_BYTE;
-	//printk(KERN_ERR "\n %s zonenr: %lu, bytenr: %d bitnr: %d bitmap[%d]: %d ", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr]);
 
-	if(unlikely(bytenr >= ctx->bitmap_bytes)) {
-		panic("bytenr: %d > bitmap_bytes: %d", bytenr, ctx->bitmap_bytes);
-	}
-
-	if(unlikely((bytenr == (ctx->bitmap_bytes-1)) && (bitnr > ctx->bitmap_bit))) {
-		panic("bytenr: %d, bitnr: %d > bitmap_bytes: %d, bitnr: %d", bytenr, bitnr, ctx->bitmap_bytes, ctx->bitmap_bit);
-	}
 
 	if (unlikely(NULL == bitmap)) {
-		panic("This is a ctx freezone bitmap bug!");
+		printk(KERN_ERR "\n This is a ctx freezone bitmap bug!");
+		return;
 	}
 
+	if(unlikely(bytenr >= ctx->bitmap_bytes)) {
+		printk(KERN_ERR "\n 1) %s zonenr: %lu, bytenr: %d bitnr: %d bitmap[%d]: %d  bitmap_bytes: %d", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr], ctx->bitmap_bytes);
+		return;
+	}
+
+	if(unlikely((bytenr == ctx->bitmap_bytes) && (bitnr > ctx->bitmap_bit))) {
+		printk(KERN_ERR "\n 2) %s zonenr: %lu, bytenr: %d bitnr: %d bitmap[%d]: %d  bitmap_bytes: %d", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr], ctx->bitmap_bytes);
+		return;
+	}
 
 	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
 		/* This bit was 1 and hence already free*/
-		panic("\n Trying to free an already free zone! ");
+		printk(KERN_ERR "\n Trying to free an already free zone! ");
+		printk(KERN_ERR "\n %s zonenr: %lu, bytenr: %d bitnr: %d bitmap[%d]: %d  bitmap_bytes: %d", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr], ctx->bitmap_bytes);
+		return;
 	}
+
+	if (resetZone && (zonenr > ctx->sb->nr_cmr_zones)) {
+		ret = blkdev_zone_mgmt(ctx->dev->bdev, REQ_OP_ZONE_RESET, get_first_pba_for_zone(ctx, zonenr), ctx->sb->nr_lbas_in_zone, GFP_NOIO);
+		if (ret ) {
+			printk(KERN_ERR "\n Failed to reset zonenr: %d, retvalue: %d", zonenr, ret);
+		}
+	}
+
+	mutex_lock(&ctx->wf_lock);
 
 	/* The bit was 0 as its in use and hence we xor it with
 	 * one more 1 to unset it
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
-	//printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
+	printk(KERN_ERR "\n %s Freed zonenr: %lu, ctx->nr_freezones: %d ", __func__, zonenr,  ctx->nr_freezones = ctx->nr_freezones);
 
 	mutex_unlock(&ctx->wf_lock);
 	/* we need to reset the  zone that we are about to use */
-	if (zonenr > ctx->sb->nr_cmr_zones) {
-		ret = blkdev_zone_mgmt(ctx->dev->bdev, REQ_OP_ZONE_RESET, get_first_pba_for_zone(ctx, zonenr), ctx->sb->nr_lbas_in_zone, GFP_NOIO);
-		if (ret ) {
-			printk(KERN_ERR "\n Failed to reset zonenr: %d, retvalue: %d", zonenr, ret);
-		}
-	}
 }
 
 static void mark_zone_gc_candidate(struct ctx *ctx , int zonenr)
@@ -2938,8 +2947,8 @@ static int get_new_gc_zone(struct ctx *ctx)
 	int trial;
 
 	trial = 0;
-	mutex_lock(&ctx->wf_lock);
 again:
+	mutex_lock(&ctx->wf_lock);
 	zone_nr = get_next_freezone_nr(ctx);
 	mutex_unlock(&ctx->wf_lock);
 	if (zone_nr < 0) {
@@ -3520,7 +3529,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
 		if (!ptr->vblocks) {
 			//printk(KERN_ERR "\n %s Freeing zone: %llu \n", __func__, zonenr);
-			mark_zone_free(ctx , zonenr);
+			mark_zone_free(ctx , zonenr, 1);
 			
 		}
 	}
@@ -5973,11 +5982,8 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 	while (i < nr_seg_entries) {
 		if ((*zonenr == get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) ||
 		    (*zonenr == get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
-			//printk(KERN_ERR "\n zonenr: %d vblocks: %llu is our cur_frontier! not marking it free!", *zonenr, entry->vblocks);
-			//mutex_lock(&ctx->wf_lock);
-			mark_zone_occupied(ctx , *zonenr);
-			//mutex_unlock(&ctx->wf_lock);
-
+			/* 1 indicates zone is free, 0 is the default bit because of kzalloc */
+			printk(KERN_ERR "\n zonenr: %d vblocks: %llu is our cur_frontier! not marking it free!", *zonenr, entry->vblocks);
 			entry = entry + 1;
 			*zonenr= *zonenr + 1;
 			i++;
@@ -5985,10 +5991,10 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 		}
 		if (entry->vblocks == 0) {
     			//trace_printk("\n *segnr: %u", *zonenr);
-			mark_zone_free(ctx , *zonenr);
+			mark_zone_free(ctx , *zonenr, 0);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
-			printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
+			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
 			mark_zone_gc_candidate(ctx, *zonenr);
 			if (ctx->min_mtime > entry->mtime)
 				ctx->min_mtime = entry->mtime;
@@ -6056,7 +6062,7 @@ int read_seg_info_table(struct ctx *ctx)
 	printk(KERN_ERR "\n ctx->ckpt->warm_gc_frontier_pba: %llu", ctx->ckpt->warm_gc_frontier_pba);
 	printk(KERN_ERR "\n get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba): %u", get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
 	printk(KERN_ERR "\n %s Read seginfo from pba: %llu sectornr: %d zone0_pba: %llu \n", __func__, sb->sit_pba, sectornr, ctx->sb->zone0_pba);
-	while (zonenr < sb->zone_count_main) {
+	while (nr_data_zones > 0) {
 		//trace_printk("\n zonenr: %u", zonenr);
 		if ((sectornr + sb->sit_pba) > ctx->sb->zone0_pba) {
 			printk(KERN_ERR "\n Seg entry blknr cannot be bigger than the data blknr");
@@ -6070,19 +6076,22 @@ int read_seg_info_table(struct ctx *ctx)
 			return -1;
 		}
 		entry0 = (struct lsdm_seg_entry *) page_address(sit_page);
-		if (nr_data_zones > nr_seg_entries_blk)
+		if (nr_data_zones > nr_seg_entries_blk) {
 			nr_seg_entries_read = nr_seg_entries_blk;
-		else
+			nr_data_zones = nr_data_zones - nr_seg_entries_read;
+		}
+		else {
 			nr_seg_entries_read = nr_data_zones;
+			nr_data_zones = 0;
+		}
 		read_seg_entries_from_block(ctx, entry0, nr_seg_entries_read, &zonenr);
-		nr_data_zones = nr_data_zones - nr_seg_entries_read;
 		__free_pages(sit_page, 0);
 		nrpages--;
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		//sectornr = sectornr + (ctx->q->limits.physical_block_size/ctx->q->limits.logical_block_size);
 		sectornr = sectornr + NR_SECTORS_IN_BLK;
 	}
-	//printk(KERN_ERR "\n %s ctx->nr_freezones (2) : %u zonenr: %llu", __func__, ctx->nr_freezones, zonenr);
+	printk(KERN_ERR "\n %s ctx->nr_freezones (2) : %u zonenr: %llu", __func__, ctx->nr_freezones, zonenr);
 	return 0;
 }
 
@@ -6183,15 +6192,15 @@ int read_metadata(struct ctx * ctx)
 	//printk(KERN_ERR "\n nr of revmap blks: %u", ctx->sb->blk_count_revmap);
 
 	ctx->hot_wf_pba = ctx->ckpt->hot_frontier_pba;
-	//printk(KERN_ERR "\n %s %d ctx->hot_wf_pba: %llu\n", __func__, __LINE__, ctx->hot_wf_pba);
+	printk(KERN_ERR "\n %s %d ctx->hot_wf_pba: %llu\n", __func__, __LINE__, ctx->hot_wf_pba);
 	ctx->hot_wf_end = zone_end(ctx, ctx->hot_wf_pba);
-	//printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->hot_wf_end);
-	//printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
+	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->hot_wf_end);
+	printk(KERN_ERR "\n max_pba = %d", ctx->max_pba);
 	ctx->free_sectors_in_wf = ctx->hot_wf_end - ctx->hot_wf_pba + 1;
-	//printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
+	printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
 	
 	ctx->warm_gc_wf_pba = ctx->ckpt->warm_gc_frontier_pba;
-	//printk(KERN_ERR "\n %s %d ctx->hot_wf_pba: %llu\n", __func__, __LINE__, ctx->hot_wf_pba);
+	printk(KERN_ERR "\n %s %d ctx->hot_wf_pba: %llu\n", __func__, __LINE__, ctx->hot_wf_pba);
 	ctx->warm_gc_wf_end = zone_end(ctx, ctx->warm_gc_wf_pba);
 	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->hot_wf_end);
 	printk(KERN_ERR "\n max_pba = %llu", ctx->max_pba);
@@ -6228,7 +6237,7 @@ int read_metadata(struct ctx * ctx)
 	}
 	printk(KERN_ERR "\n %s Nr of zones in main are: %llu, bitmap_bytes: %d, bitmap_bit: %d ", __func__, sb2->zone_count_main, ctx->bitmap_bytes, ctx->bitmap_bit);
 	if (sb2->zone_count_main % BITS_IN_BYTE > 0)
-	ctx->bitmap_bytes += 1;
+		ctx->bitmap_bytes += 1;
 	ctx->nr_freezones = 0;
 	read_seg_info_table(ctx);
 	printk(KERN_INFO "\n %s ctx->nr_freezones: %u, ckpt->nr_free_zones:%u", __func__, ctx->nr_freezones, ckpt->nr_free_zones);

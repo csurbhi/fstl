@@ -117,14 +117,26 @@ __le32 get_zone_count(int fd)
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/ZONE_SZ));
 	//return (capacity/ZONE_SZ);
+	return 1900;
 	/* we test with a disk capacity of 1 TB */
 	//return 4032;
 	//return 500;
 	//return 256;
 	//return 100;
-	//return 1024;
+	/* 
+	 * resilvering test1 - returned this
+	 * return 3000;
+	 *
+	 * 2000 zones is 500GB. 450GB is 90% of 500GB.
+	 * We are using this to perform the test.
+	 *
+	 * Next we will perform the test with 1900 zones
+	 * ie 475 GB
+	 *
+	 */
+	//return 2500;
 	//return 29808;
-	return 64;
+	//return 209;
 }
 
 /* Note,  that this also account for the first few metadata zones.
@@ -458,7 +470,7 @@ unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
 
 	//zonenr = zonenr - 20000;
 	//zonenr = zonenr - 10;
-	zonenr = 5;
+	zonenr = get_current_frontier(sb) + 100;
 	return (zonenr) * (1 << (sb->log_zone_size - sb->log_sector_size));
 }
 
