@@ -49,10 +49,7 @@
 #include "metadata.h"
 #define DM_MSG_PREFIX "lsdm"
 #define BIO_MAX_PAGES 256
-
-#define ZONE_SZ (256 * 1024 * 1024)
 #define BLK_SZ 4096
-#define NR_BLKS_PER_ZONE (ZONE_SZ /BLK_SZ)
 
 #define NR_EXT_ENTRIES_PER_SEC          25
 #define NR_EXT_ENTRIES_PER_BLK          200
@@ -130,7 +127,6 @@ void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent);
 #define MIN_POOL_PAGES 16
 #define MIN_POOL_IOS 16
 #define MIN_COPY_REQS 16
-#define GC_POOL_PAGES 65536 /* 4096 slots are created. Each slot takes 2^order continuous pages */
 
 static sector_t zone_start(struct ctx *ctx, sector_t pba)
 {
@@ -1095,7 +1091,7 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 {
 	struct gc_extents *gc_extent;
 	/* maxlen is the maximum number of sectors permitted by BIO */
-	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
+	int maxlen = (BIO_MAX_PAGES >> 1) << SECTOR_SHIFT;
 	int temp = 0;
 	unsigned int pagecount, s8, count = 0;
 
@@ -1597,7 +1593,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		 * TODO: fix this - read the same block that is about to be written by GC problem.
 		 * Mark such a read.
 		 */
-		submit_bio(gc_extent->bio);
+		submit_bio_wait(gc_extent->bio);
 		ctx->nr_gc_writes += s8;
 		//flush_workqueue(ctx->tm_wq);
 		if (ret) {
@@ -2691,6 +2687,7 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	struct lsdm_seg_entry *ptr;
 	int index;
 	int zonenr, destn_zonenr;
+	struct lsdm_sb * sb = ctx->sb;
 
 	//mutex_lock(&ctx->sit_kv_store_lock);
 	/*-----------------------------------------------*/
@@ -2706,7 +2703,7 @@ void mark_zone_erroneous(struct ctx *ctx, sector_t pba)
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
-	ptr->vblocks = BLOCKS_IN_ZONE;
+	ptr->vblocks = 1 << (sb->log_zone_size - sb->log_block_size);
 	ptr->mtime = 0;
 
 	mutex_lock(&ctx->wf_lock);
@@ -2803,7 +2800,8 @@ static void mark_zone_free(struct ctx *ctx , int zonenr, int resetZone)
 		return;
 	}
 
-	if (resetZone && (zonenr > ctx->sb->nr_cmr_zones)) {
+	if (resetZone) { // && (zonenr > ctx->sb->nr_cmr_zones)) {
+		printk(KERN_ERR "\n %s reset zone: %d  \n ", __func__, zonenr);
 		ret = blkdev_zone_mgmt(ctx->dev->bdev, REQ_OP_ZONE_RESET, get_first_pba_for_zone(ctx, zonenr), ctx->sb->nr_lbas_in_zone, GFP_NOIO);
 		if (ret ) {
 			printk(KERN_ERR "\n Failed to reset zonenr: %d, retvalue: %d", zonenr, ret);
@@ -2926,7 +2924,7 @@ try_again:
 		panic("wf > wf_end!!, nr_free_sectors: %lld", ctx->free_sectors_in_wf );
 	}
 	ctx->free_sectors_in_wf = ctx->hot_wf_end - ctx->hot_wf_pba + 1;
-	//printk(KERN_ERR "\n %s zone_nr: %d  ctx->nr_freezones: %llu", __func__, zone_nr, ctx->nr_freezones);
+	printk(KERN_ERR "\n %s zone_nr: %d  ctx->nr_freezones: %llu", __func__, zone_nr, ctx->nr_freezones);
 	add_ckpt_new_wf(ctx, ctx->hot_wf_pba);
 	return 0;
 }
@@ -2976,7 +2974,7 @@ again:
 	BUG_ON(ctx->warm_gc_wf_end > ctx->sb->max_pba);
 	ctx->free_sectors_in_gc_wf = ctx->warm_gc_wf_end - ctx->warm_gc_wf_pba + 1;
 	add_ckpt_new_gc_wf(ctx, ctx->warm_gc_wf_pba);
-	//printk("\n %s zone0_pba: %llu zone_nr: %d warm_gc_wf_pba: %llu, gc_wf_end: %llu", __func__,  ctx->sb->zone0_pba, zone_nr, ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
+	printk("\n %s zone0_pba: %llu zone_nr: %d warm_gc_wf_pba: %llu, gc_wf_end: %llu", __func__,  ctx->sb->zone0_pba, zone_nr, ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
 	return 0;
 }
 
@@ -3554,6 +3552,7 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 	int index;
 	static int print = 1;
 	long vblocks = 0;
+	struct lsdm_sb * sb = ctx->sb;
 
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
@@ -3580,7 +3579,7 @@ void sit_ent_vblocks_incr(struct ctx *ctx, sector_t pba)
 			ctx->max_mtime = ptr->mtime;
 	}
 	//mutex_unlock(&ctx->sit_kv_store_lock);
-	if(vblocks > BLOCKS_IN_ZONE) {
+	if(vblocks > (1 << (sb->log_zone_size - sb->log_block_size))) {
 		if (print) {
 			printk(KERN_ERR "\n !!!!!!!!!!!!!!!!!!!!! zone: %llu has more than %d blocks! ", zonenr, ptr->vblocks);
 			print = 0;
@@ -5056,7 +5055,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	sector_t s8, lba = clone->bi_iter.bi_sector, wf = 0;
 	struct lsdm_ckpt *ckpt;
 	struct tm_page *tm_page;
-	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
+	int maxlen = (BIO_MAX_PAGES >> 1) << SECTOR_SHIFT;
 	int dosplit = 0, ret = 0;
 	struct gendisk *disk;
 	struct lsdm_bioctx * bioctx = clone->bi_private;
@@ -5248,7 +5247,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	struct lsdm_bioctx * bioctx;
 	sector_t lba = bio->bi_iter.bi_sector;
 	struct lsdm_ckpt *ckpt;
-	int maxlen = (BIO_MAX_PAGES >> 2) << SECTOR_SHIFT;
+	int maxlen = (BIO_MAX_PAGES >> 1) << SECTOR_SHIFT;
 	int ret;
 
 	ret = lsdm_write_checks(ctx, bio);
@@ -5977,9 +5976,9 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
 	//printk("\n Number of seg entries: %u", nr_seg_entries);
-	//printk("\n ctx->hot_frontier_pba: %llu, ckpt->frontier zone: %u", ctx->ckpt->hot_frontier_pba, get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
 
 	while (i < nr_seg_entries) {
+		/* 0th zonenr is the zone that holds all the metadata */
 		if ((*zonenr == get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) ||
 		    (*zonenr == get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
 			/* 1 indicates zone is free, 0 is the default bit because of kzalloc */
@@ -5991,7 +5990,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 		}
 		if (entry->vblocks == 0) {
     			//trace_printk("\n *segnr: %u", *zonenr);
-			mark_zone_free(ctx , *zonenr, 0);
+			mark_zone_free(ctx , *zonenr, 1);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
 			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
@@ -6062,6 +6061,7 @@ int read_seg_info_table(struct ctx *ctx)
 	printk(KERN_ERR "\n ctx->ckpt->warm_gc_frontier_pba: %llu", ctx->ckpt->warm_gc_frontier_pba);
 	printk(KERN_ERR "\n get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba): %u", get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
 	printk(KERN_ERR "\n %s Read seginfo from pba: %llu sectornr: %d zone0_pba: %llu \n", __func__, sb->sit_pba, sectornr, ctx->sb->zone0_pba);
+	printk("\n ctx->hot_frontier_pba: %llu, ckpt->frontier zone: %u", ctx->ckpt->hot_frontier_pba, get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
 	while (nr_data_zones > 0) {
 		//trace_printk("\n zonenr: %u", zonenr);
 		if ((sectornr + sb->sit_pba) > ctx->sb->zone0_pba) {
@@ -6425,7 +6425,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	/* 13 comes from 9 + 3, where 2^9 is the number of bytes in a sector
 	 * and 2^3 is the number of sectors in a block.
 	 */
-	target->max_io_len = ZONE_SZ;
+	target->max_io_len = BIO_MAX_PAGES >> 1;
 	target->flush_supported = true;
 	target->discards_supported = true;
 	/* target->per_io_data_size - set this to get per_io_data_size allocated before every standard structure that holds a bio. */
@@ -6515,14 +6515,11 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	ret = -ENOMEM;
 	target->error = "dm-lsdm: No memory";
 
-	ctx->gc_page_pool = mempool_create_page_pool(GC_POOL_PAGES, 0);
-	if (!ctx->gc_page_pool)
-		goto put_dev;
 
 	//printk(KERN_INFO "about to call bioset_init()");
 	ctx->gc_bs = kzalloc(sizeof(*(ctx->gc_bs)), GFP_KERNEL);
 	if (!ctx->gc_bs)
-		goto destroy_gc_page_pool;
+		goto put_dev;
 
 	if(bioset_init(ctx->gc_bs, BS_NR_POOL_PAGES, 0, BIOSET_NEED_BVECS) == -ENOMEM) {
 		//trace_printk("\n bioset_init failed!");
@@ -6549,6 +6546,11 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	if (ret < 0) 
 		goto destroy_cache;
 
+	unsigned int gc_pool_pages = 1 << (ctx->sb->log_zone_size - ctx->sb->log_block_size);
+	ctx->gc_page_pool = mempool_create_page_pool(gc_pool_pages, 0);
+	if (!ctx->gc_page_pool)
+		goto free_metadata_pages;
+
 	max_pba = (ctx->dev->bdev->bd_inode->i_size) / 512;
 	sprintf(ctx->nodename, "lsdm/%s", argv[1]);
 	ret = -EINVAL;
@@ -6556,7 +6558,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	printk(KERN_ERR "\n formatted max_pba: %llu", ctx->max_pba);
 	if (ctx->max_pba > max_pba) {
 		target->error = "dm-lsdm: Invalid max pba found on sb";
-		goto free_metadata_pages;
+		goto destroy_gc_page_pool;
 	}
 
 	/* lower watermark is at 5 %, watermark represents nrfreezones */
@@ -6601,6 +6603,9 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 /* failed case */
 stop_gc_thread:
 	lsdm_gc_thread_stop(ctx);
+destroy_gc_page_pool:
+	if (ctx->gc_page_pool)
+		mempool_destroy(ctx->gc_page_pool);
 free_metadata_pages:
 	printk(KERN_ERR "\n freeing metadata pages!");
 	if (ctx->revmap_bm) {
@@ -6623,10 +6628,6 @@ uninit_bioset:
 	bioset_exit(ctx->gc_bs);
 free_bioset:
 	kfree(ctx->gc_bs);
-
-destroy_gc_page_pool:
-	if (ctx->gc_page_pool)
-		mempool_destroy(ctx->gc_page_pool);
 put_dev:
 	dm_put_device(target, ctx->dev);
 free_ctx:
@@ -6757,7 +6758,7 @@ static void lsdm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 {
         struct ctx *ctx = ti->private;
 	struct lsdm_sb *sb = ctx->sb;
-        unsigned int nrsectors = 1 << (sb->log_zone_size - sb->log_block_size);
+        unsigned int nrblks = 1 << (sb->log_zone_size - sb->log_block_size);
 
         limits->logical_block_size = BLOCK_SIZE;
         limits->physical_block_size = BLOCK_SIZE;
@@ -6767,13 +6768,13 @@ static void lsdm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
         limits->discard_alignment = BLOCK_SIZE;
         limits->discard_granularity = BLOCK_SIZE;
-        limits->max_discard_sectors = nrsectors;
-        limits->max_hw_discard_sectors = nrsectors;
-        limits->max_write_zeroes_sectors = nrsectors;
+        limits->max_discard_sectors = nrblks;
+        limits->max_hw_discard_sectors = nrblks;
+        limits->max_write_zeroes_sectors = nrblks;
 
         /* FS hint to try to align to the device zone size */
-        limits->chunk_sectors = nrsectors;
-        limits->max_sectors = nrsectors;
+        limits->chunk_sectors = nrblks;
+        limits->max_sectors = nrblks;
 
 	/* expose the device as a regular non zoned device */
         limits->zoned = BLK_ZONED_NONE;
