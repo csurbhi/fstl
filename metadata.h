@@ -221,7 +221,8 @@ struct ctx {
 	struct bio_list   bio_list;
 
 
-	struct mutex	  wf_lock;
+	struct rw_semaphore wf_lock;
+	struct mutex	  bm_lock;
 	sector_t          hot_wf_pba; /* LBA, protected by lock */
 	sector_t          warm_gc_wf_pba; /* LBA, protected by lock */
 	sector_t          hot_wf_end;

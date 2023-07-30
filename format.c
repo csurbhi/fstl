@@ -116,8 +116,8 @@ __le32 get_zone_count(int fd)
 		return zone_count;
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/zonesz));
-	return 80;
-	return (capacity/zonesz);
+	return 160;
+	//return (capacity/zonesz);
 	//return 100;
 	//return 1900;
 	/* we test with a disk capacity of 1 TB */
