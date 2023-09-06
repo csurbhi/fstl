@@ -1,0 +1,91 @@
+Sep  6 11:38:46 sharada kernel: [  506.164856]  --------------------------------- 
+Sep  6 11:38:46 sharada kernel: [  506.173129] 
+Sep  6 11:38:46 sharada kernel: [  506.173129]  ata_scsi_qc_complete cmd->interval: 8 
+Sep  6 11:38:46 sharada kernel: [  506.173157] 
+Sep  6 11:38:46 sharada kernel: [  506.173157]  ata_qc_done cmd->interval: 8270163 
+Sep  6 11:38:46 sharada kernel: [  506.173159] 
+Sep  6 11:38:46 sharada kernel: [  506.173159]  scsi_done_internal dma_interval: 8270163 
+Sep  6 11:38:46 sharada kernel: [  506.173165] 
+Sep  6 11:38:46 sharada kernel: [  506.173165]  scsi_io_completion dma_interval: 8270163 
+Sep  6 11:38:46 sharada kernel: [  506.173192] 
+Sep  6 11:38:46 sharada kernel: [  506.173192]  ....
+Sep  6 11:38:46 sharada kernel: [  506.173666] 
+Sep  6 11:38:46 sharada kernel: [  506.173666]  ata_scsi_qc_complete cmd->interval: 0 
+Sep  6 11:38:46 sharada kernel: [  506.173670] 
+Sep  6 11:38:46 sharada kernel: [  506.173670]  ata_qc_done cmd->interval: 441995 
+Sep  6 11:38:46 sharada kernel: [  506.173672] 
+Sep  6 11:38:46 sharada kernel: [  506.173672]  scsi_done_internal dma_interval: 441995 
+Sep  6 11:38:46 sharada kernel: [  506.173676] 
+Sep  6 11:38:46 sharada kernel: [  506.173676]  scsi_io_completion dma_interval: 441995 
+Sep  6 11:38:46 sharada kernel: [  506.173691] 
+Sep  6 11:38:46 sharada kernel: [  506.173691]  ....
+Sep  6 11:38:46 sharada kernel: [  506.173863] 
+Sep  6 11:38:46 sharada kernel: [  506.173863]  ata_scsi_qc_complete cmd->interval: 0 
+Sep  6 11:38:46 sharada kernel: [  506.173867] 
+Sep  6 11:38:46 sharada kernel: [  506.173867]  ata_qc_done cmd->interval: 152127 
+Sep  6 11:38:46 sharada kernel: [  506.173869] 
+Sep  6 11:38:46 sharada kernel: [  506.173869]  scsi_done_internal dma_interval: 152127 
+Sep  6 11:38:46 sharada kernel: [  506.173871] 
+Sep  6 11:38:46 sharada kernel: [  506.173871]  scsi_io_completion dma_interval: 152127 
+Sep  6 11:38:46 sharada kernel: [  506.173884] 
+Sep  6 11:38:46 sharada kernel: [  506.173884]  ....
+Sep  6 11:38:46 sharada kernel: [  506.174024] 
+Sep  6 11:38:46 sharada kernel: [  506.174024]  ata_scsi_qc_complete cmd->interval: 0 
+Sep  6 11:38:46 sharada kernel: [  506.174028] 
+Sep  6 11:38:46 sharada kernel: [  506.174028]  ata_qc_done cmd->interval: 134871 
+Sep  6 11:38:46 sharada kernel: [  506.174029] 
+Sep  6 11:38:46 sharada kernel: [  506.174029]  scsi_done_internal dma_interval: 134871 
+Sep  6 11:38:46 sharada kernel: [  506.174033] 
+Sep  6 11:38:46 sharada kernel: [  506.174033]  scsi_io_completion dma_interval: 134871 
+Sep  6 11:38:46 sharada kernel: [  506.174048] 
+Sep  6 11:38:46 sharada kernel: [  506.174048]  ....
+Sep  6 11:38:46 sharada kernel: [  506.174182] 
+Sep  6 11:38:46 sharada kernel: [  506.174182]  ata_scsi_qc_complete cmd->interval: 0 
+Sep  6 11:38:46 sharada kernel: [  506.174187] 
+Sep  6 11:38:46 sharada kernel: [  506.174187]  ata_qc_done cmd->interval: 130394 
+Sep  6 11:38:46 sharada kernel: [  506.174189] 
+Sep  6 11:38:46 sharada kernel: [  506.174189]  scsi_done_internal dma_interval: 130394 
+Sep  6 11:38:46 sharada kernel: [  506.174193] 
+Sep  6 11:38:46 sharada kernel: [  506.174193]  scsi_io_completion dma_interval: 130394 
+Sep  6 11:38:46 sharada kernel: [  506.174207] 
+Sep  6 11:38:46 sharada kernel: [  506.174207]  ....
+Sep  6 11:38:46 sharada kernel: [  506.174326] 
+Sep  6 11:38:46 sharada kernel: [  506.174326]  ata_scsi_qc_complete cmd->interval: 0 
+Sep  6 11:38:46 sharada kernel: [  506.174329] 
+Sep  6 11:38:46 sharada kernel: [  506.174329]  ata_qc_done cmd->interval: 112468 
+Sep  6 11:38:46 sharada kernel: [  506.174330] 
+Sep  6 11:38:46 sharada kernel: [  506.174330]  scsi_done_internal dma_interval: 112468 
+Sep  6 11:38:46 sharada kernel: [  506.174332] 
+Sep  6 11:38:46 sharada kernel: [  506.174332]  scsi_io_completion dma_interval: 112468 
+Sep  6 11:38:46 sharada kernel: [  506.174345] 
+Sep  6 11:38:46 sharada kernel: [  506.174345]  ....
+Sep  6 11:38:46 sharada kernel: [  506.174513] 
+Sep  6 11:38:46 sharada kernel: [  506.174513]  ata_scsi_qc_complete cmd->interval: 0 
+Sep  6 11:38:46 sharada kernel: [  506.174517] 
+Sep  6 11:38:46 sharada kernel: [  506.174517]  ata_qc_done cmd->interval: 163820 
+Sep  6 11:38:46 sharada kernel: [  506.174519] 
+Sep  6 11:38:46 sharada kernel: [  506.174519]  scsi_done_internal dma_interval: 163820 
+Sep  6 11:38:46 sharada kernel: [  506.174523] 
+Sep  6 11:38:46 sharada kernel: [  506.174523]  scsi_io_completion dma_interval: 163820 
+Sep  6 11:38:46 sharada kernel: [  506.174537] 
+Sep  6 11:38:46 sharada kernel: [  506.174537]  ....
+Sep  6 11:38:46 sharada kernel: [  506.174659] 
+Sep  6 11:38:46 sharada kernel: [  506.174659]  ata_scsi_qc_complete cmd->interval: 0 
+Sep  6 11:38:46 sharada kernel: [  506.174663] 
+Sep  6 11:38:46 sharada kernel: [  506.174663]  ata_qc_done cmd->interval: 114769 
+Sep  6 11:38:46 sharada kernel: [  506.174665] 
+Sep  6 11:38:46 sharada kernel: [  506.174665]  scsi_done_internal dma_interval: 114769 
+Sep  6 11:38:46 sharada kernel: [  506.174668] 
+Sep  6 11:38:46 sharada kernel: [  506.174668]  scsi_io_completion dma_interval: 114769 
+Sep  6 11:38:46 sharada kernel: [  506.174680] 
+Sep  6 11:38:46 sharada kernel: [  506.174680]  ....
+Sep  6 11:38:46 sharada kernel: [  506.174798] 
+Sep  6 11:38:46 sharada kernel: [  506.174798]  ata_scsi_qc_complete cmd->interval: 0 
+Sep  6 11:38:46 sharada kernel: [  506.174801] 
+Sep  6 11:38:46 sharada kernel: [  506.174801]  ata_qc_done cmd->interval: 106316 
+Sep  6 11:38:46 sharada kernel: [  506.174803] 
+Sep  6 11:38:46 sharada kernel: [  506.174803]  scsi_done_internal dma_interval: 106316 
+Sep  6 11:38:46 sharada kernel: [  506.174805] 
+Sep  6 11:38:46 sharada kernel: [  506.174805]  scsi_io_completion dma_interval: 106316 
+Sep  6 11:38:46 sharada kernel: [  506.174820] 
+Sep  6 11:38:46 sharada kernel: [  506.174820]  --------------------------------- 

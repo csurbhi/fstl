@@ -2457,6 +2457,29 @@ int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, se
 	return 0;
 }
 
+static int lsdm_read_fixed_blk(struct ctx *ctx)
+{
+	struct bio *bio;
+	struct page *page;
+
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_READ, GFP_KERNEL);
+	if (!bio) {
+		printk(KERN_ERR "\n %s could not allocate memory to bio", __func__);
+		return -ENOMEM;
+	}
+	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
+        if (!page ) {
+		bio_put(bio);
+                return NULL;
+	}
+
+	bio->bi_iter.bi_sector = 20000;
+	__bio_add_page(bio, page, BLK_SZ, 0);
+	submit_bio_wait(bio);
+	bio_put(bio);
+	return 0;
+}
+
 /*
  * This is an asynchronous read, i.e we submit the request
  * here but do not wait for the request to complete.
@@ -6465,6 +6488,29 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	printk(KERN_INFO "\n The disk size as read from the bd_inode: %llu", disk_size);
 	printk(KERN_INFO "\n max sectors: %llu", disk_size/512);
 	printk(KERN_INFO "\n max blks: %llu", disk_size/4096);
+
+	printk(KERN_ERR "\n --------------------------------- \n");
+
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n ....");
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n ....");
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n ....");
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n ....");
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n ....");
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n ....");
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n ....");
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n ....");
+	lsdm_read_fixed_blk(ctx);
+	printk(KERN_ERR "\n --------------------------------- \n");
+
+
 	ctx->writes_wq = create_workqueue("writes_queue");
 	ctx->tm_wq = create_workqueue("tm_queue");
 	

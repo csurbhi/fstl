@@ -1,0 +1,427 @@
+From 33f4d16319e1ff978cfdffb676a16c932efd2c6e Mon Sep 17 00:00:00 2001
+From: Surbhi Palande <csurbhi@gmail.com>
+Date: Wed, 6 Sep 2023 11:41:21 -0700
+Subject: [PATCH] Measure DMA interval
+
+Signed-off-by: Surbhi Palande <csurbhi@gmail.com>
+---
+ block/blk-mq.c                |  3 ++
+ drivers/ata/libata-scsi.c     |  9 ++++++
+ drivers/md/dm-zoned-reclaim.c | 17 +++++++---
+ drivers/md/dm-zoned-target.c  | 58 +++++++++++++++--------------------
+ drivers/md/dm-zoned.h         | 39 ++++++++++++++++++++++-
+ drivers/scsi/scsi_lib.c       | 10 ++++++
+ include/linux/blk-mq.h        |  2 ++
+ include/linux/blk_types.h     |  1 +
+ include/linux/libata.h        |  2 ++
+ include/scsi/scsi_cmnd.h      |  1 +
+ 10 files changed, 104 insertions(+), 38 deletions(-)
+
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index b04ff6f56926..863996d212d0 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -809,6 +809,9 @@ static void blk_complete_request(struct request *req)
+ 	if (!bio)
+ 		return;
+ 
++	if (req->dma_interval)
++		printk(KERN_ERR "\n %s req->dma_interval: %llu \n", __func__, req->dma_interval);
++	bio->dma_interval = req->dma_interval;
+ #ifdef CONFIG_BLK_DEV_INTEGRITY
+ 	if (blk_integrity_rq(req) && req_op(req) == REQ_OP_READ)
+ 		req->q->integrity.profile->complete_fn(req, total_bytes);
+diff --git a/drivers/ata/libata-scsi.c b/drivers/ata/libata-scsi.c
+index 370d18aca71e..60d33c00d875 100644
+--- a/drivers/ata/libata-scsi.c
++++ b/drivers/ata/libata-scsi.c
+@@ -1662,6 +1662,9 @@ static void ata_qc_done(struct ata_queued_cmd *qc)
+ 	struct scsi_cmnd *cmd = qc->scsicmd;
+ 	void (*done)(struct scsi_cmnd *) = qc->scsidone;
+ 
++	qc->end_t = ktime_get_ns();
++	cmd->interval = (qc->end_t - qc->start_t);
++	printk(KERN_ERR "\n %s cmd->interval: %llu \n", __func__, cmd->interval);
+ 	ata_qc_free(qc);
+ 	done(cmd);
+ }
+@@ -1674,6 +1677,10 @@ static void ata_scsi_qc_complete(struct ata_queued_cmd *qc)
+ 	int need_sense = (qc->err_mask != 0) &&
+ 		!(qc->flags & ATA_QCFLAG_SENSE_VALID);
+ 
++	qc->end_t = ktime_get_ns();
++	cmd->interval = (qc->end_t - qc->start_t);
++	printk(KERN_ERR "\n %s cmd->interval: %llu \n", __func__, cmd->interval);
++
+ 	/* For ATA pass thru (SAT) commands, generate a sense block if
+ 	 * user mandated it or if there's an error.  Note that if we
+ 	 * generate because the user forced us to [CK_COND =1], a check
+@@ -1758,6 +1765,8 @@ static int ata_scsi_translate(struct ata_device *dev, struct scsi_cmnd *cmd,
+ 			goto defer;
+ 	}
+ 
++	qc->start_t = ktime_get_ns();
++
+ 	/* select device, send command to hardware */
+ 	ata_qc_issue(qc);
+ 
+diff --git a/drivers/md/dm-zoned-reclaim.c b/drivers/md/dm-zoned-reclaim.c
+index d58db9a27e6c..35f00299eb25 100644
+--- a/drivers/md/dm-zoned-reclaim.c
++++ b/drivers/md/dm-zoned-reclaim.c
+@@ -19,6 +19,7 @@ struct dmz_reclaim {
+ 
+ 	struct dm_kcopyd_client	*kc;
+ 	struct dm_kcopyd_throttle kc_throttle;
++	struct dmz_target 	*dmz;
+ 	int			kc_err;
+ 
+ 	int			dev_idx;
+@@ -119,6 +120,7 @@ static int dmz_reclaim_copy(struct dmz_reclaim *zrc,
+ {
+ 	struct dmz_metadata *zmd = zrc->metadata;
+ 	struct dm_io_region src, dst;
++	struct dmz_target *dmz = zrc->dmz;
+ 	sector_t block = 0, end_block;
+ 	sector_t nr_blocks;
+ 	sector_t src_zone_block;
+@@ -184,6 +186,8 @@ static int dmz_reclaim_copy(struct dmz_reclaim *zrc,
+ 		block += nr_blocks;
+ 		if (dmz_is_seq(dst_zone))
+ 			dst_zone->wp_block = block;
++
++		dmz->nr_gcwrites += nr_blocks;
+ 	}
+ 
+ 	return 0;
+@@ -200,10 +204,11 @@ static int dmz_reclaim_buf(struct dmz_reclaim *zrc, struct dm_zone *dzone)
+ 	struct dmz_metadata *zmd = zrc->metadata;
+ 	int ret;
+ 
+-	DMDEBUG("(%s/%u): Chunk %u, move buf zone %u (weight %u) to data zone %u (weight %u)",
++	/*printk(KERN_ERR "\n Reclaiming buffer zone! (%s/%u): Chunk %u, move buf zone %u (weight %u) to data zone %u (weight %u)",
+ 		dmz_metadata_label(zmd), zrc->dev_idx,
+ 		dzone->chunk, bzone->id, dmz_weight(bzone),
+ 		dzone->id, dmz_weight(dzone));
++	*/
+ 
+ 	/* Flush data zone into the buffer zone */
+ 	ret = dmz_reclaim_copy(zrc, bzone, dzone);
+@@ -239,10 +244,12 @@ static int dmz_reclaim_seq_data(struct dmz_reclaim *zrc, struct dm_zone *dzone)
+ 	struct dmz_metadata *zmd = zrc->metadata;
+ 	int ret = 0;
+ 
+-	DMDEBUG("(%s/%u): Chunk %u, move data zone %u (weight %u) to buf zone %u (weight %u)",
++	/*
++	printk(KERN_ERR "\n (%s/%u): Reclaiming sequential zone! Chunk %u, move data zone %u (weight %u) to buf zone %u (weight %u)",
+ 		dmz_metadata_label(zmd), zrc->dev_idx,
+ 		chunk, dzone->id, dmz_weight(dzone),
+ 		bzone->id, dmz_weight(bzone));
++	*/
+ 
+ 	/* Flush data zone into the buffer zone */
+ 	ret = dmz_reclaim_copy(zrc, dzone, bzone);
+@@ -298,7 +305,7 @@ static int dmz_reclaim_rnd_data(struct dmz_reclaim *zrc, struct dm_zone *dzone)
+ 	if (!szone)
+ 		return -ENOSPC;
+ 
+-	DMDEBUG("(%s/%u): Chunk %u, move %s zone %u (weight %u) to %s zone %u",
++	printk(KERN_ERR "\n(%s/%u): Reclaiming random zone! Chunk %u, move %s zone %u (weight %u) to %s zone %u",
+ 		dmz_metadata_label(zmd), zrc->dev_idx, chunk,
+ 		dmz_is_cache(dzone) ? "cache" : "rnd",
+ 		dzone->id, dmz_weight(dzone),
+@@ -550,9 +557,10 @@ static void dmz_reclaim_work(struct work_struct *work)
+ /*
+  * Initialize reclaim.
+  */
+-int dmz_ctr_reclaim(struct dmz_metadata *zmd,
++int dmz_ctr_reclaim(struct dmz_target *dmz,
+ 		    struct dmz_reclaim **reclaim, int idx)
+ {
++	struct dmz_metadata *zmd = dmz->metadata;
+ 	struct dmz_reclaim *zrc;
+ 	int ret;
+ 
+@@ -563,6 +571,7 @@ int dmz_ctr_reclaim(struct dmz_metadata *zmd,
+ 	zrc->metadata = zmd;
+ 	zrc->atime = jiffies;
+ 	zrc->dev_idx = idx;
++	zrc->dmz = dmz;
+ 
+ 	/* Reclaim kcopyd client */
+ 	zrc->kc = dm_kcopyd_client_create(&zrc->kc_throttle);
+diff --git a/drivers/md/dm-zoned-target.c b/drivers/md/dm-zoned-target.c
+index ad8e670a2f9b..ff24538d29b6 100644
+--- a/drivers/md/dm-zoned-target.c
++++ b/drivers/md/dm-zoned-target.c
+@@ -34,36 +34,6 @@ struct dm_chunk_work {
+ 	struct bio_list		bio_list;
+ };
+ 
+-/*
+- * Target descriptor.
+- */
+-struct dmz_target {
+-	struct dm_dev		**ddev;
+-	unsigned int		nr_ddevs;
+-
+-	unsigned int		flags;
+-
+-	/* Zoned block device information */
+-	struct dmz_dev		*dev;
+-
+-	/* For metadata handling */
+-	struct dmz_metadata     *metadata;
+-
+-	/* For chunk work */
+-	struct radix_tree_root	chunk_rxtree;
+-	struct workqueue_struct *chunk_wq;
+-	struct mutex		chunk_lock;
+-
+-	/* For cloned BIOs to zones */
+-	struct bio_set		bio_set;
+-
+-	/* For flush */
+-	spinlock_t		flush_lock;
+-	struct bio_list		flush_list;
+-	struct delayed_work	flush_work;
+-	struct workqueue_struct *flush_wq;
+-};
+-
+ /*
+  * Flush intervals (seconds).
+  */
+@@ -340,6 +310,7 @@ static int dmz_handle_write(struct dmz_target *dmz, struct dm_zone *zone,
+ 		 * and the BIO is aligned to the zone write pointer:
+ 		 * direct write the zone.
+ 		 */
++		dmz->nr_direct_writes += nr_blocks;
+ 		return dmz_handle_direct_write(dmz, zone, bio,
+ 					       chunk_block, nr_blocks);
+ 	}
+@@ -348,6 +319,7 @@ static int dmz_handle_write(struct dmz_target *dmz, struct dm_zone *zone,
+ 	 * This is an unaligned write in a sequential zone:
+ 	 * use buffered write.
+ 	 */
++	dmz->nr_buffered_writes += nr_blocks;
+ 	return dmz_handle_buffered_write(dmz, zone, bio, chunk_block, nr_blocks);
+ }
+ 
+@@ -505,13 +477,13 @@ static void dmz_flush_work(struct work_struct *work)
+ 	struct dmz_target *dmz = container_of(work, struct dmz_target, flush_work.work);
+ 	struct bio *bio;
+ 	int ret;
++	struct dmz_bioctx *bioctx = NULL;
+ 
+ 	/* Flush dirty metadata blocks */
+ 	ret = dmz_flush_metadata(dmz->metadata);
+ 	if (ret)
+-		DMDEBUG("(%s): Metadata flush failed, rc=%d",
++		printk(KERN_ERR "\n(%s): Metadata flush failed, rc=%d",
+ 			dmz_metadata_label(dmz->metadata), ret);
+-
+ 	/* Process queued flush requests */
+ 	while (1) {
+ 		spin_lock(&dmz->flush_lock);
+@@ -521,6 +493,12 @@ static void dmz_flush_work(struct work_struct *work)
+ 		if (!bio)
+ 			break;
+ 
++
++		bioctx = dm_per_bio_data(bio, sizeof(struct dmz_bioctx));
++		if (refcount_read(&bioctx->ref) != 1) {
++			printk(KERN_ERR "\n %s bioctx->ref: %u ", __func__, refcount_read(&bioctx->ref));
++
++		}
+ 		dmz_bio_endio(bio, errno_to_blk_status(ret));
+ 	}
+ 
+@@ -657,6 +635,7 @@ static int dmz_map(struct dm_target *ti, struct bio *bio)
+ 
+ 	/* Set the BIO pending in the flush list */
+ 	if (!nr_sectors && bio_op(bio) == REQ_OP_WRITE) {
++		printk(KERN_ERR "\n flush request received ! ");
+ 		spin_lock(&dmz->flush_lock);
+ 		bio_list_add(&dmz->flush_list, bio);
+ 		spin_unlock(&dmz->flush_lock);
+@@ -664,6 +643,8 @@ static int dmz_map(struct dm_target *ti, struct bio *bio)
+ 		return DM_MAPIO_SUBMITTED;
+ 	}
+ 
++	dmz->nr_appwrites += dmz_bio_blocks(bio);
++
+ 	/* Split zone BIOs to fit entirely into a zone */
+ 	chunk_sector = sector & (dmz_zone_nr_sectors(zmd) - 1);
+ 	if (chunk_sector + nr_sectors > dmz_zone_nr_sectors(zmd))
+@@ -858,6 +839,12 @@ static int dmz_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+ 	}
+ 	dmz->nr_ddevs = argc;
+ 
++	/* book-keeping */
++	dmz->nr_gcwrites = 0;
++	dmz->nr_appwrites = 0;
++	dmz->nr_buffered_writes = 0;
++	dmz->nr_direct_writes = 0;
++
+ 	ti->private = dmz;
+ 
+ 	/* Get the target zoned block device */
+@@ -925,7 +912,7 @@ static int dmz_ctr(struct dm_target *ti, unsigned int argc, char **argv)
+ 
+ 	/* Initialize reclaim */
+ 	for (i = 0; i < dmz->nr_ddevs; i++) {
+-		ret = dmz_ctr_reclaim(dmz->metadata, &dmz->dev[i].reclaim, i);
++		ret = dmz_ctr_reclaim(dmz, &dmz->dev[i].reclaim, i);
+ 		if (ret) {
+ 			ti->error = "Zone reclaim initialization failed";
+ 			goto err_fwq;
+@@ -982,6 +969,11 @@ static void dmz_dtr(struct dm_target *ti)
+ 
+ 	mutex_destroy(&dmz->chunk_lock);
+ 
++	printk(KERN_ERR "\n app_writes: %llu" , dmz->nr_appwrites);
++	printk(KERN_ERR "\n gc_writes: %llu" , dmz->nr_gcwrites);
++	printk(KERN_ERR "\n direct_writes: %llu" , dmz->nr_direct_writes );
++	printk(KERN_ERR "\n buffered_writes: %llu" , dmz->nr_buffered_writes);
++	printk(KERN_ERR "\n Goodbye world!");
+ 	kfree(dmz->dev);
+ 	kfree(dmz);
+ }
+diff --git a/drivers/md/dm-zoned.h b/drivers/md/dm-zoned.h
+index 265494d3f711..a20eb6d96934 100644
+--- a/drivers/md/dm-zoned.h
++++ b/drivers/md/dm-zoned.h
+@@ -269,7 +269,44 @@ int dmz_merge_valid_blocks(struct dmz_metadata *zmd, struct dm_zone *from_zone,
+ /*
+  * Functions defined in dm-zoned-reclaim.c
+  */
+-int dmz_ctr_reclaim(struct dmz_metadata *zmd, struct dmz_reclaim **zrc, int idx);
++/*
++ * Target descriptor.
++ */
++struct dmz_target {
++	struct dm_dev		**ddev;
++	unsigned int		nr_ddevs;
++
++	unsigned int		flags;
++
++	/* Zoned block device information */
++	struct dmz_dev		*dev;
++
++	/* For metadata handling */
++	struct dmz_metadata     *metadata;
++
++	/* For chunk work */
++	struct radix_tree_root	chunk_rxtree;
++	struct workqueue_struct *chunk_wq;
++	struct mutex		chunk_lock;
++
++	/* For cloned BIOs to zones */
++	struct bio_set		bio_set;
++
++	/* For flush */
++	spinlock_t		flush_lock;
++	struct bio_list		flush_list;
++	struct delayed_work	flush_work;
++	struct workqueue_struct *flush_wq;
++	unsigned long		nr_appwrites;
++	unsigned long 		nr_gcwrites;
++	unsigned long		nr_direct_writes;
++	unsigned long		nr_buffered_writes;
++};
++
++
++
++
++int dmz_ctr_reclaim(struct dmz_target *dmz, struct dmz_reclaim **zrc, int idx);
+ void dmz_dtr_reclaim(struct dmz_reclaim *zrc);
+ void dmz_suspend_reclaim(struct dmz_reclaim *zrc);
+ void dmz_resume_reclaim(struct dmz_reclaim *zrc);
+diff --git a/drivers/scsi/scsi_lib.c b/drivers/scsi/scsi_lib.c
+index ad9afae49544..9f9ffae2c3d0 100644
+--- a/drivers/scsi/scsi_lib.c
++++ b/drivers/scsi/scsi_lib.c
+@@ -115,6 +115,7 @@ static void scsi_mq_requeue_cmd(struct scsi_cmnd *cmd, unsigned long msecs)
+ {
+ 	struct request *rq = scsi_cmd_to_rq(cmd);
+ 
++
+ 	if (rq->rq_flags & RQF_DONTPREP) {
+ 		rq->rq_flags &= ~RQF_DONTPREP;
+ 		scsi_mq_uninit_cmd(cmd);
+@@ -961,6 +962,10 @@ void scsi_io_completion(struct scsi_cmnd *cmd, unsigned int good_bytes)
+ 
+ 	if (unlikely(result))	/* a nz result may or may not be an error */
+ 		result = scsi_io_completion_nz_result(cmd, result, &blk_stat);
++	
++	if (cmd->interval)
++		printk(KERN_ERR "\n %s dma_interval: %llu \n", __func__, cmd->interval);
++	req->dma_interval = cmd->interval;
+ 
+ 	/*
+ 	 * Next deal with any sectors which we were able to correctly
+@@ -1614,6 +1619,11 @@ static void scsi_done_internal(struct scsi_cmnd *cmd, bool complete_directly)
+ {
+ 	struct request *req = scsi_cmd_to_rq(cmd);
+ 
++	if (req) {
++		req->dma_interval = cmd->interval;
++		printk(KERN_ERR "\n %s dma_interval: %llu \n", __func__, cmd->interval);
++	}
++
+ 	switch (cmd->submitter) {
+ 	case SUBMITTED_BY_BLOCK_LAYER:
+ 		break;
+diff --git a/include/linux/blk-mq.h b/include/linux/blk-mq.h
+index 495ca198775f..ae4381b2b498 100644
+--- a/include/linux/blk-mq.h
++++ b/include/linux/blk-mq.h
+@@ -111,6 +111,8 @@ struct request {
+ 	u64 start_time_ns;
+ 	/* Time that I/O was submitted to the device. */
+ 	u64 io_start_time_ns;
++	/* Time that this request spent in the lld - dma setup and dma done */
++	u64 dma_interval;
+ 
+ #ifdef CONFIG_BLK_WBT
+ 	unsigned short wbt_flags;
+diff --git a/include/linux/blk_types.h b/include/linux/blk_types.h
+index 0bad62cca3d0..e0c1f3fecffe 100644
+--- a/include/linux/blk_types.h
++++ b/include/linux/blk_types.h
+@@ -278,6 +278,7 @@ struct bio {
+ 	blk_qc_t		bi_cookie;
+ 	bio_end_io_t		*bi_end_io;
+ 	void			*bi_private;
++	u64			dma_interval;
+ #ifdef CONFIG_BLK_CGROUP
+ 	/*
+ 	 * Represents the association of the css and request_queue for the bio.
+diff --git a/include/linux/libata.h b/include/linux/libata.h
+index 820f7a3a2749..d6ae38bf5f24 100644
+--- a/include/linux/libata.h
++++ b/include/linux/libata.h
+@@ -623,6 +623,8 @@ struct ata_queued_cmd {
+ 
+ 	void			*private_data;
+ 	void			*lldd_task;
++	u64 			start_t;
++        u64			end_t;
+ };
+ 
+ struct ata_port_stats {
+diff --git a/include/scsi/scsi_cmnd.h b/include/scsi/scsi_cmnd.h
+index 526def14e7fb..d8ace5b4310e 100644
+--- a/include/scsi/scsi_cmnd.h
++++ b/include/scsi/scsi_cmnd.h
+@@ -88,6 +88,7 @@ struct scsi_cmnd {
+ 	 * been outstanding
+ 	 */
+ 	unsigned long jiffies_at_alloc;
++	u64	interval;
+ 
+ 	int retries;
+ 	int allowed;
+-- 
+2.34.1
+
