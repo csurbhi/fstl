@@ -1,0 +1,2 @@
+fio-genzipf -t zipf -i 2.5 -b 4096
+fio-genzipf -t pareto -i 0.5 -b 4096
