@@ -3162,7 +3162,7 @@ void flush_sit(struct ctx *ctx)
 	struct blk_plug plug;
 
 	if (!rb_root->rb_node) {
-		printk(KERN_ERR "\n %s Sit node is null, returning", __func__);
+		//printk(KERN_ERR "\n %s Sit node is null, returning", __func__);
 		return;
 	}
 
@@ -3177,7 +3177,6 @@ void flush_sit(struct ctx *ctx)
 	flush_sit_nodes(ctx, rb_root->rb_node);
 	//blk_finish_plug(&plug);
 	mutex_unlock(&ctx->sit_flush_lock);
-	//printk(KERN_ERR "\n %s Done flushing all the sit pages! ", __func__);
 	/* When all the nodes are flushed we are here */
 }
 
@@ -3392,6 +3391,7 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba, char * c
 	new = search_sit_kv_store(ctx, pba, &parent);
 	if (new) {
 		//printk("\n %s FOUND!! zone: %llu sit_blknr: %lld sit_pba: %u sit_page: %p caller: (%s)", __func__, zonenr, sit_blknr, ctx->sb->sit_pba, page_address(new->page), caller);
+		new->flag = NEEDS_FLUSH;
 		return new;
 	}
 
@@ -3519,7 +3519,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 			ctx->max_mtime = ptr->mtime;
 		update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
 		if (!ptr->vblocks) {
-			//printk(KERN_ERR "\n %s Freeing zone: %llu \n", __func__, zonenr);
+			printk(KERN_ERR "\n %s Freeing zone: %llu \n", __func__, zonenr);
 			mark_zone_free(ctx , zonenr, 1);
 			
 		}
@@ -4039,9 +4039,9 @@ void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 	flush_tm_nodes(node->rb_left, ctx);
 	flush_tm_nodes(node->rb_right, ctx);
 	
-	//if(tm_page->flag == NEEDS_FLUSH) {
-	flush_tm_node_page(ctx, tm_page);
-	//}
+	if(tm_page->flag == NEEDS_FLUSH) {
+		flush_tm_node_page(ctx, tm_page);
+	}
 	return;
 }
 
@@ -4081,45 +4081,6 @@ void flush_translation_blocks(struct ctx *ctx)
 	//printk(KERN_INFO "\n %s done!!", __func__);
 }
 
-void flush_count_tm_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
-{
-	struct tm_page * tm_page;
-
-	if (flush && node) {
-		tm_page = rb_entry(node, struct tm_page, rb);
-		flush_tm_node_page(ctx, tm_page);
-		if (*count == nrscan)
-			return;
-	}
-
-	*count = *count + 1;
-	if (node->rb_left)
-		flush_count_tm_nodes(ctx, node->rb_left, count, flush, nrscan);
-	if (node->rb_right)
-		flush_count_tm_nodes(ctx, node->rb_right, count, flush, nrscan);
-}
-
-
-void flush_count_tm_blocks(struct ctx *ctx, bool flush, int nrscan)
-{
-	struct rb_root *root = &ctx->tm_rb_root;
-	struct rb_node *node = NULL;
-	struct blk_plug plug;
-	int count;
-
-	if (flush && !nrscan)
-		return;
-	node = root->rb_node;
-	if (!node)
-		return;
-	/* We flush these sequential pages
-	 * together so that they can be 
-	 * written together
-	 */
-	flush_count_tm_nodes(ctx, node, &count, flush, nrscan);
-	return;
-}
-
 /* We don't wait for the bios to complete 
  * flushing. We only initiate the flushing
  */
@@ -4145,11 +4106,11 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	if(sit_page->flag == NEEDS_NO_FLUSH)
 		return;
 
-	sit_page->flag = NEEDS_NO_FLUSH;
-
 	page = sit_page->page;
 	if (!page)
 		return;
+
+	sit_page->flag = NEEDS_NO_FLUSH;
 
 	/* pba denotes a relative sit blknr that is 4096 sized
 	 * bio works on a LBA that is sector sized.
@@ -4185,46 +4146,6 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	/* bio_alloc(), hence bio_put() */
 	bio_put(bio);
 }	
-
-void flush_count_sit_nodes(struct ctx *ctx, struct rb_node *node, int *count, bool flush, int nrscan)
-{	
-	if (flush) {
-		flush_sit_node_page(ctx, node);
-
-		if (*count == nrscan)
-			return;
-	}
-
-	*count = *count + 1;
-	if (node->rb_left)
-		flush_count_sit_nodes(ctx, node->rb_left,  count, flush, nrscan);
-	if (node->rb_right)
-		flush_count_sit_nodes(ctx, node->rb_right, count, flush, nrscan);
-}
-
-
-void flush_count_sit_blocks(struct ctx *ctx, bool flush, int nrscan)
-{
-	struct rb_root *root = &ctx->sit_rb_root;
-	struct rb_node *node = NULL;
-	struct blk_plug plug;
-	int count;
-
-	if (flush && !nrscan)
-		return;
-	node = root->rb_node;
-	if (!node)
-		return;
-	/* We flush these sequential pages
-	 * together so that they can be 
-	 * written together
-	 */
-	if (flush)
-		blk_start_plug(&plug);
-	flush_count_sit_nodes(ctx, node, &count, flush, nrscan);
-	if (flush)
-		blk_finish_plug(&plug);
-}
 
 int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba);
 
@@ -5145,78 +5066,6 @@ void lsdm_handle_write(struct ctx *ctx)
 	}
 }
 
-
-static int lsdm_write_thread_fn(void * data)
-{
-
-	struct ctx *ctx = (struct ctx *) data;
-	struct lsdm_write_thread *write_th = ctx->write_th;
-	wait_queue_head_t *wq = &write_th->write_waitq;
-	struct task_struct *tsk = write_th->lsdm_write_task;
-
-	printk(KERN_ERR "\n %s executing! pid: %d ", __func__, tsk->pid);
-	set_freezable();
-	do {
-		wait_event_interruptible(*wq,
-			kthread_should_stop() || freezing(current) ||
-			waitqueue_active(&write_th->write_waitq));
-
-                if (try_to_freeze()) {
-                        continue;
-                }
-                if (kthread_should_stop()) {
-			printk(KERN_ERR "\n Write thread is stopping! ");
-                        break;
-		}
-		lsdm_handle_write(ctx);
-		flush_workqueue(ctx->writes_wq);
-		flush_workqueue(ctx->tm_wq);
-	} while(!kthread_should_stop());
-	return 0;
-}
-
-/* 
- * On error returns 0
- *
- */
-int lsdm_write_thread_start(struct ctx *ctx)
-{
-	struct lsdm_write_thread *write_th;
-	dev_t dev = ctx->dev->bdev->bd_dev;
-	int err=0;
-
-	//printk(KERN_ERR "\n About to start write thread");
-
-	write_th = lsdm_malloc(sizeof(struct lsdm_write_thread), GFP_KERNEL);
-	if (!write_th) {
-		return -ENOMEM;
-	}
-
-	init_waitqueue_head(&write_th->write_waitq);
-	write_th->lsdm_write_task = kthread_run(lsdm_write_thread_fn, ctx,
-			"lsdm-write-thread%u:%u", MAJOR(dev), MINOR(dev));
-
-	if (IS_ERR(write_th->lsdm_write_task)) {
-		err = PTR_ERR(write_th->lsdm_write_task);
-		kvfree(write_th);
-		ctx->gc_th = NULL;
-		return err;
-	}
-
-	ctx->write_th = write_th;
-
-	printk(KERN_ERR "\n Write thread has started! ");
-	return 0;	
-}
-
-int lsdm_write_thread_stop(struct ctx *ctx)
-{
-	wake_up_all(&ctx->write_th->write_waitq);
-	kthread_stop(ctx->write_th->lsdm_write_task);
-	kvfree(ctx->write_th);
-	printk(KERN_ERR "\n Write thread stopped! ");
-	return 0;
-}
 
 /*
  * NOTE: LBA is the address of a sector. We expect the LBAs to be
@@ -6575,11 +6424,6 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 		goto stop_gc_thread;
 	}
 	/*
-	ret = lsdm_write_thread_start(ctx);
-	if (ret) {
-		goto stop_gc_thread;
-	} */
-	/*
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
 	*/
@@ -6636,7 +6480,6 @@ static void lsdm_dtr(struct dm_target *dm_target)
 	 */
 	lsdm_flush_thread_stop(ctx);
 	lsdm_gc_thread_stop(ctx);
-	//lsdm_write_thread_stop(ctx);
 	sync_blockdev(ctx->dev->bdev);
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
 	flush_workqueue(ctx->tm_wq);
