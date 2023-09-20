@@ -116,7 +116,7 @@ __le32 get_zone_count(int fd)
 		return zone_count;
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/zonesz));
-	return 160;
+	return 832;
 	//return (capacity/zonesz);
 	//return 100;
 	//return 1900;
@@ -914,11 +914,14 @@ int main(int argc, char * argv[])
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 0;
 	char str[512];
+
 	if (ioctl(fd, BLKGETZONESZ, &zone_lbas) < 0) {
 		sprintf(str, "Get zone size failed %d (%s)\n", errno, strerror(errno));
 		perror(str);
 		exit(errno);
 	}
+
+
 	printf("\n # lbas in ZONE: %llu", zone_lbas);
 	close(fd);
 	unsigned long data_zones = sb1->zone_count_main;
