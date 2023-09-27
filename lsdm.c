@@ -3406,7 +3406,8 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba, char * c
 	sit_blknr = zonenr / SIT_ENTRIES_BLK;
 	count++;
 	//printk("\n %s sit_blknr: %lld sit_pba: %u, invocation count:%d caller: (%s)", __func__, sit_blknr, ctx->sb->sit_pba, count, caller);
-	page = read_block(ctx, ctx->sb->sit_pba, (sit_blknr * NR_SECTORS_IN_BLK));
+	//page = read_block(ctx, ctx->sb->sit_pba, (sit_blknr * NR_SECTORS_IN_BLK));
+	page = alloc_page(__GFP_ZERO|GFP_KERNEL);
 	if (!page) {
 		kmem_cache_free(ctx->sit_page_cache, new);
 		return NULL;
@@ -3519,7 +3520,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 			ctx->max_mtime = ptr->mtime;
 		update_gc_tree(ctx, zonenr, ptr->vblocks, ptr->mtime, __func__);
 		if (!ptr->vblocks) {
-			printk(KERN_ERR "\n %s Freeing zone: %llu \n", __func__, zonenr);
+			//printk(KERN_ERR "\n %s Freeing zone: %llu \n", __func__, zonenr);
 			mark_zone_free(ctx , zonenr, 1);
 			
 		}
@@ -4209,7 +4210,8 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, sector_t lba)
 
 	//printk("\n %s lba: %llu blknr: %d tm_pba: %llu \n", __func__, lba, blknr, ctx->sb->tm_pba);
 
-	new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
+	//new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
+	new_tmpage->page = alloc_page(__GFP_ZERO|GFP_KERNEL);
 	if (!new_tmpage->page) {
 		printk(KERN_ERR "\n %s read_block  failed! could not allocate page! \n", __func__);
 		kmem_cache_free(ctx->tm_page_cache, new_tmpage);
@@ -5796,6 +5798,75 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 	return 0;
 }
 
+/* 
+ * Returns -1 when a page does not need to be added
+ * Return 0 otherwise
+ */
+int add_sit_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, sector_t sector_nr)
+{
+	struct rb_root *root = &ctx->sit_rb_root;
+        struct sit_page *parent_ent, *new, *node_ent;
+        struct rb_node *parent = NULL;
+	struct rb_node *node = NULL;
+	unsigned int sit_blknr = sector_nr / NR_SECTORS_IN_BLK;
+
+	//trace_printk("\n %s pba: %llu zonenr: %lld blknr: %lld", __func__, pba, zonenr, blknr);
+	
+	new = kmem_cache_alloc(ctx->sit_page_cache, GFP_KERNEL);
+	if (!new) {
+		print_memory_usage(ctx, __func__);
+		printk(KERN_ERR "\n Could not allocate memory to sit page \n");
+		return -ENOMEM;
+	}
+	
+	RB_CLEAR_NODE(&new->rb);
+	new->flag = NEEDS_NO_FLUSH;
+	new->blknr = sit_blknr;
+	new->page = page;
+
+	parent = NULL;
+	node = root->rb_node;
+	while(node) {
+		parent = node;
+		node_ent = rb_entry(parent, struct sit_page, rb);
+		if (new->blknr == node_ent->blknr) {
+			return -1;
+		}
+		if (new->blknr < node_ent->blknr) {
+			node = node->rb_left;
+		} else {
+			node = node->rb_right;
+		}
+	}
+
+	if (parent) {
+		/* Add this page to a RB tree based KV store.
+		 * Key is: blknr for this corresponding block
+		 */
+		parent_ent = rb_entry(parent, struct sit_page, rb);
+		if (new->blknr < parent_ent->blknr) {
+			/* Attach new node to the left of parent */
+			rb_link_node(&new->rb, parent, &parent->rb_left);
+			//printk(KERN_ERR "\n Adding a new node at parent->rb_left: %p, new page address: %p", page_address(parent_ent->page), page_address(new->page));
+
+		}
+		else { 
+			/* Attach new node to the right of parent */
+			rb_link_node(&new->rb, parent, &parent->rb_right);
+			//printk(KERN_ERR "\n Adding a new node at parent->rb_right: %p, new page address: %p", page_address(parent_ent->page), page_address(new->page));
+		}
+	} else {
+		rb_link_node(&new->rb, NULL, &root->rb_node);
+		parent_ent = rb_entry(root->rb_node, struct sit_page, rb);
+		//printk(KERN_ERR "\n Adding a root node: %p, new page address: %p", page_address(parent_ent->page), page_address(new->page));
+	}
+	/* Balance the tree after the blknr is addded to it */
+	rb_insert_color(&new->rb, root);
+	atomic_inc(&ctx->nr_sit_pages);
+	return 0;
+}
+
+
 
 /* TODO: create a freezone cache
  * create a gc zone cache
@@ -5806,6 +5877,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 	int i = 0;
 	struct lsdm_sb *sb;
 	unsigned int nr_blks_in_zone;
+	int ret = 0;
        
 	if (!ctx)
 		return -1;
@@ -5838,12 +5910,13 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 				ctx->max_mtime = entry->mtime;
 			if (!update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__))
 				panic("Memory error, write a memory shrinker!");
+			ret = 1;
 		}
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
 		i++;
 	}
-	return 0;
+	return ret;
 }
 
 /*
@@ -5914,9 +5987,13 @@ int read_seg_info_table(struct ctx *ctx)
 			nr_seg_entries_read = nr_data_zones;
 			nr_data_zones = 0;
 		}
-		read_seg_entries_from_block(ctx, entry0, nr_seg_entries_read, &zonenr);
-		__free_pages(sit_page, 0);
-		nrpages--;
+		ret = read_seg_entries_from_block(ctx, entry0, nr_seg_entries_read, &zonenr);
+		if (!ret) {
+			__free_pages(sit_page, 0);
+			nrpages--;
+		} else {
+			add_sit_page_kv_store_by_blknr(ctx, sit_page, sectornr);
+		}
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		//sectornr = sectornr + (ctx->q->limits.physical_block_size/ctx->q->limits.logical_block_size);
 		sectornr = sectornr + NR_SECTORS_IN_BLK;
@@ -6419,10 +6496,12 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	if (ret) {
 		goto free_metadata_pages;
 	}
+	/*
 	ret = lsdm_flush_thread_start(ctx);
 	if (ret) {
 		goto stop_gc_thread;
 	}
+	*/
 	/*
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
@@ -6478,7 +6557,7 @@ static void lsdm_dtr(struct dm_target *dm_target)
 	 * tm entries, sit entries and we want all of them to be freed
 	 * and flushed as well.
 	 */
-	lsdm_flush_thread_stop(ctx);
+	//lsdm_flush_thread_stop(ctx);
 	lsdm_gc_thread_stop(ctx);
 	sync_blockdev(ctx->dev->bdev);
 	wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
