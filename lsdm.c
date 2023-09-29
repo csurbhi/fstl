@@ -13,7 +13,6 @@
  * The length in the in-memory extent of translation table is in terms
  * of sectors.
  */
-
 #include <linux/module.h>
 #include <linux/device-mapper.h>
 #include <linux/slab.h>
@@ -5351,6 +5350,7 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 {
 	int i = 0;
 	int nr_extents = TM_ENTRIES_BLK;
+	int ret = 0;
 
 	while (i <= nr_extents) {
 		i++;
@@ -5369,10 +5369,67 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 		up_write(&ctx->lsdm_rb_lock);
 		lba = lba + 8; /* Every 512 bytes sector has an LBA in a SMR drive */
 		entry = entry + 1;
+		ret = 1;
 	}
-	return 0;
+	return ret;
 }
 
+int add_tm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr)
+{
+	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_node *parent = NULL, **link = &root->rb_node;
+	struct rb_node *node = NULL;
+	struct tm_page *node_ent;
+	struct tm_page *new_tmpage, *parent_ent;
+
+	BUG_ON(blknr > ctx->sb->blk_count_tm);
+
+	parent = NULL;
+	node = root->rb_node;
+	while(node) {
+		parent = node;
+		node_ent = rb_entry(node, struct tm_page, rb);
+		if (blknr == node_ent->blknr) {
+			return -1;
+		}
+		if (blknr < node_ent->blknr) {
+			node = node->rb_left;
+		} else {
+			node = node->rb_right;
+		}
+	}
+
+	if (parent) {
+		parent_ent = rb_entry(parent, struct tm_page, rb);
+		BUG_ON (blknr == parent_ent->blknr);
+		if (blknr < parent_ent->blknr) {
+			/* Attach new node to the left of parent */
+			link = &parent->rb_left;
+		}
+		else { 
+			/* Attach new node to the right of parent */
+			link = &parent->rb_right;
+		}
+	} 
+
+	new_tmpage = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
+	if (!new_tmpage) {
+		printk(KERN_ERR "\n %s cannot allocate new_tmpage ", __func__);
+		return -ENOMEM;
+	}
+	RB_CLEAR_NODE(&new_tmpage->rb);
+	//printk("\n %s lba: %llu blknr: %d tm_pba: %llu \n", __func__, lba, blknr, ctx->sb->tm_pba);
+	new_tmpage->page = page;
+	new_tmpage->blknr = blknr;
+	/* Add this page to a RB tree based KV store.
+	 * Key is: blknr for this corresponding block
+	 */
+	rb_link_node(&new_tmpage->rb, parent, link);
+	/* Balance the tree after node is addded to it */
+	rb_insert_color(&new_tmpage->rb, root);
+	atomic_inc(&ctx->nr_tm_pages);
+	return 0;
+}
 
 #define NR_SECTORS_IN_BLK 8
 
@@ -5390,7 +5447,7 @@ int read_translation_map(struct ctx *ctx)
 	/* blk_count_tm is 4096 bytes aligned number */
 	unsigned long nrblks = ctx->sb->blk_count_tm;
 	struct page *page;
-	int i = 0;
+	int i = 0, ret = 0;
 	struct tm_entry * tm_entry = NULL;
 	u64 lba = 0;
 
@@ -5407,14 +5464,18 @@ int read_translation_map(struct ctx *ctx)
 		 * we should find 0 and break out */
 		//trace_printk("\n pba: %llu", pba);
 		tm_entry = (struct tm_entry *) page_address(page);
-		read_extents_from_block(ctx, tm_entry, lba);
+		ret = read_extents_from_block(ctx, tm_entry, lba);
+		if (!ret) {
+			__free_pages(page, 0);
+			nrpages--;
+		} else {
+			add_tm_page_kv_store_by_blknr(ctx, page, sectornr/NR_SECTORS_IN_BLK);
+		}
 		/* Every 512 byte sector has a LBA in SMR drives, the translation map is recorded for every block
 		 * instead. So every translation entry covers 8 sectors or 8 lbas.
 		 */
 		lba = lba + (TM_ENTRIES_BLK * 8);
 		i = i + 1;
-		__free_pages(page, 0);
-		nrpages--;
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		// sectornr = sectornr + (ctx->q->limits.physical_block_size/ctx->q->limits.logical_block_size);
 		sectornr = sectornr + NR_SECTORS_IN_BLK;
@@ -6123,7 +6184,6 @@ int read_metadata(struct ctx * ctx)
 		return -1;
 	}
 	printk(KERN_ERR "\n before: PBA for first revmap blk: %llu", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
-	/*
 	read_revmap(ctx);
 	printk(KERN_INFO "\n Reverse map Read!");
 	ret = read_translation_map(ctx);
@@ -6135,7 +6195,6 @@ int read_metadata(struct ctx * ctx)
 		return ret;
 	}
 	printk(KERN_INFO "\n %s extent_map read!", __func__);
-	*/
 	ctx->nr_freezones = 0;
 	ctx->bitmap_bytes = sb2->zone_count_main /BITS_IN_BYTE;
 	if (sb2->zone_count_main % BITS_IN_BYTE) {
