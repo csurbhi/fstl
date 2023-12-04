@@ -1,0 +1,117 @@
+From 88c1fa5dba9019d6a0c1906e5d65238a3cf6fc86 Mon Sep 17 00:00:00 2001
+From: Surbhi Palande <csurbhi@gmail.com>
+Date: Sat, 16 Sep 2023 21:07:27 -0700
+Subject: [PATCH] Start the flush thread.
+
+This flushes the TM and SIT very 10 seconds.
+
+Signed-off-by: Surbhi Palande <csurbhi@gmail.com>
+---
+ lsdm.c | 44 +++++++++++++-------------------------------
+ 1 file changed, 13 insertions(+), 31 deletions(-)
+
+diff --git a/lsdm.c b/lsdm.c
+index e077675..37158ce 100644
+--- a/lsdm.c
++++ b/lsdm.c
+@@ -960,7 +960,7 @@ static inline void * lsdm_malloc(size_t size, gfp_t flags)
+ void flush_translation_blocks(struct ctx *ctx);
+ void flush_sit(struct ctx *ctx);
+ 
+-#define DEF_FLUSH_TIME 500000 /* (milliseconds) */
++#define DEF_FLUSH_TIME 10000 /* (milliseconds) */
+ 
+ void do_checkpoint(struct ctx *ctx);
+ void remove_translation_pages(struct ctx *ctx);
+@@ -980,36 +980,17 @@ static int flush_thread_fn(void * data)
+ 	do {
+ 		wait_event_interruptible_timeout(*wq,
+ 			kthread_should_stop() || freezing(current) ||
+-			flush_th->wake || (nrpages > 10),
++			flush_th->wake,
+ 			msecs_to_jiffies(wait_ms));
+ 		if (try_to_freeze()) {
+                         continue;
+                 }
+ 		flush_workqueue(ctx->writes_wq);
+-		flush_workqueue(ctx->tm_wq);
+-	
+-		if (atomic_read(&ctx->tm_flush_count) >= MAX_TM_FLUSH_PAGES) {
+-			flush_translation_blocks(ctx);
+-			atomic_set(&ctx->tm_flush_count, 0);
+-			flag = 1;
+-		}
+-		
+-		if (atomic_read(&ctx->sit_flush_count) >= MAX_SIT_PAGES) {
+-			atomic_set(&ctx->sit_flush_count, 0);
+-			flush_sit(ctx);
+-			flag = 1;
+-		}
+-		if (atomic_read(&ctx->nr_tm_pages) >= MAX_TM_PAGES) {
+-			remove_translation_pages(ctx);
+-			atomic_set(&ctx->nr_tm_pages, 0);
+-		}
+-		if (flag) {
+-			wait_ms = DEF_FLUSH_TIME;
+-			do_checkpoint(ctx);
+-			flag = 0;
+-		} else {
+-			wait_ms = DEF_FLUSH_TIME * 10;
+-		}
++		flush_translation_blocks(ctx);
++		atomic_set(&ctx->tm_flush_count, 0);
++		flush_sit(ctx);
++		atomic_set(&ctx->sit_flush_count, 0);
++		do_checkpoint(ctx);
+ 	} while(!kthread_should_stop());
+ 	return 0;
+ }
+@@ -1031,7 +1012,6 @@ int lsdm_flush_thread_start(struct ctx * ctx)
+ 	init_waitqueue_head(&flush_th->flush_waitq);
+ 	flush_th->sleep_time = DEF_FLUSH_TIME;
+ 	flush_th->wake = 0;
+-	init_waitqueue_head(&flush_th->flush_waitq);
+ 	flush_th->lsdm_flush_task = kthread_run(flush_thread_fn, ctx,
+ 			"lsdm-flush%u:%u", MAJOR(dev), MINOR(dev));
+ 
+@@ -3185,9 +3165,6 @@ void flush_sit(struct ctx *ctx)
+ 		printk(KERN_ERR "\n %s Sit node is null, returning", __func__);
+ 		return;
+ 	}
+-	if (!atomic_read(&ctx->sit_ref)) {
+-		atomic_set(&ctx->sit_ref, 1);
+-	}
+ 
+ 	if (!mutex_trylock(&ctx->sit_flush_lock))
+ 		return;
+@@ -4036,7 +4013,7 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
+ 		 * write them some place else!
+ 		 */
+ 		//trace_printk("\n %s bi_status: %d \n", __func__, bio->bi_status);
+-		panic("Could not write the translation entry block");
++		//panic("Could not write the translation entry block");
+ 	}
+ 	/* bio_alloc(), hence bio_put() */
+ 	bio_put(bio);
+@@ -6593,6 +6570,10 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
+ 	if (ret) {
+ 		goto free_metadata_pages;
+ 	}
++	ret = lsdm_flush_thread_start(ctx);
++	if (ret) {
++		goto stop_gc_thread;
++	}
+ 	/*
+ 	ret = lsdm_write_thread_start(ctx);
+ 	if (ret) {
+@@ -6653,6 +6634,7 @@ static void lsdm_dtr(struct dm_target *dm_target)
+ 	 * tm entries, sit entries and we want all of them to be freed
+ 	 * and flushed as well.
+ 	 */
++	lsdm_flush_thread_stop(ctx);
+ 	lsdm_gc_thread_stop(ctx);
+ 	//lsdm_write_thread_stop(ctx);
+ 	sync_blockdev(ctx->dev->bdev);
+-- 
+2.34.1
+

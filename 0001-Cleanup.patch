@@ -1,0 +1,121 @@
+From 78723100d8ebbc999e41c0895c153dc8bc3377ff Mon Sep 17 00:00:00 2001
+From: Surbhi Palande <csurbhi@gmail.com>
+Date: Tue, 28 Mar 2023 17:18:45 -0700
+Subject: [PATCH] Cleanup
+
+Signed-off-by: Surbhi Palande <csurbhi@gmail.com>
+---
+ lsdm.c | 29 +++++++++++++++--------------
+ 1 file changed, 15 insertions(+), 14 deletions(-)
+
+diff --git a/lsdm.c b/lsdm.c
+index 1b5f674..ede13cf 100644
+--- a/lsdm.c
++++ b/lsdm.c
+@@ -159,7 +159,7 @@ static sector_t get_first_pba_for_zone(struct ctx *ctx, unsigned int zonenr)
+ 
+ static sector_t get_last_pba_for_zone(struct ctx *ctx, unsigned int zonenr)
+ {
+-	return (ctx->sb->zone0_pba + (zonenr * ctx->nr_lbas_in_zone) + ctx->nr_lbas_in_zone) - 1;
++	return (get_first_pba_for_zone(ctx, zonenr) + ctx->nr_lbas_in_zone - 1);
+ }
+ 
+ 
+@@ -557,7 +557,6 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
+ 		BUG();
+ 	}
+ 
+-	//printk(KERN_ERR "\n lba: %lld, len: %lld ", lba, len);
+ 	r_new = kmem_cache_alloc(ctx->rev_extent_cache, GFP_KERNEL);
+ 	if (!r_new) {
+ 		printk(KERN_ERR "\n Could not allocate memory!");
+@@ -598,7 +597,7 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
+ 		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba, len): (%llu, %llu, %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, extent->len);
+ 		BUG_ON("Bug while adding revmap entry !");
+ 	}
+-	//printk( KERN_ERR "\n %s Inserting pba: %llu, pointing to (lba, len): (%llu, %llu)", __func__, r_new->pba, extent->lba, extent->len);
++	printk( KERN_ERR "\n %s Inserting pba: %llu, pointing to (lba, len): (%llu, %llu)", __func__, r_new->pba, extent->lba, extent->len);
+ 	/* Put the new node there */
+ 	rb_link_node(&r_new->rb, parent, link);
+ 	rb_insert_color(&r_new->rb, root);
+@@ -1475,10 +1474,6 @@ static int write_valid_gc_extents(struct ctx *ctx, u64 last_pba_read)
+ 
+ 	
+ 	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
+-		/* Reverse map stores PBA as e->lba and LBA as e->pba
+-		 * This was done for code reuse between map and revmap
+-		 * Thus e->lba is actually the PBA
+-		 */
+ 		gc_extent->bio = NULL;
+ 		//printk(KERN_ERR "\n %s gc_extent::(lba: %llu, pba: %llu, len: %d) last_pba_read: %llu", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, last_pba_read);
+ 		down_write(&ctx->lsdm_rb_lock);
+@@ -1664,6 +1659,7 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
+ 
+ 	pba = get_first_pba_for_zone(ctx, zonenr);
+ 	last_pba = get_last_pba_for_zone(ctx, zonenr);
++	BUG_ON(last_pba -pba != 524287);
+ 	vblks = get_sit_ent_vblocks(ctx, zonenr);
+ 	INIT_LIST_HEAD(&ctx->gc_extents->list);
+ 
+@@ -1675,23 +1671,22 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
+ 	 * not need to perform GC on this segment.
+ 	 */
+ 
+-	printk(KERN_ERR "\n %s zonenr: %d first_pba: %llu last_pba: %llu #valid blks: %d", __func__, zonenr, pba, last_pba, vblks);
++	printk(KERN_ERR "\n %s zonenr: %d first_pba: %llu last_pba: %llu #valid blks: %d totalblks: %d", __func__, zonenr, pba, last_pba, vblks, (last_pba - pba));
+ 	temp.pba = 0;
+ 	temp.lba = 0;
+ 	temp.len = 0;
+-	rev_e = lsdm_rb_revmap_find(ctx, pba, 0, last_pba);
++	rev_e = lsdm_rb_revmap_find(ctx, pba, 1, last_pba);
+ 	BUG_ON(NULL == rev_e);
+ 	while(pba <= last_pba) {
+-		//printk(KERN_ERR "\n %s Looking for pba: %llu" , __func__, pba);
+ 		e = rev_e->ptr_to_tm;
+-		//printk(KERN_ERR "\n %s Found e, LBA: %llu, PBA: %llu, len: %u", __func__, e->lba, e->pba, e->len);
++		BUG_ON((e->pba + e->len) < pba);
++		printk(KERN_ERR "\n %s Found e, LBA: %llu, PBA: %llu, len: %u", __func__, e->lba, e->pba, e->len);
+ 		
+ 		/* Don't change e directly, as e belongs to the
+ 		 * reverse map rb tree and we have the node address
+ 		 */
+ 		if (e->pba > last_pba) {
+ 			BUG();
+-			break;
+ 		}
+ 		if (e->pba < pba) {
+ 			/* 
+@@ -1699,7 +1694,6 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
+ 			 * e-------
+ 			 * 	pba
+ 			 */
+-			BUG_ON((e->pba + e->len) < pba);
+ 			diff = pba - e->pba;
+ 			temp.pba = pba;
+ 			temp.lba = e->lba + diff;
+@@ -1724,7 +1718,7 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
+ 		total_len = total_len + temp.len;
+ 		total_extents = total_extents + count;
+ 		pba = temp.pba + temp.len;
+-		//printk(KERN_ERR "\n %s (lba: %llu, pba: %llu e->len: %ld) last_pba: %lld total_len: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba, total_len);a
++		printk(KERN_ERR "\n %s (lba: %llu, pba: %llu e->len: %ld) last_pba: %lld total_len: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba, total_len);
+ 		node = rb_next(&rev_e->rb);
+ 		if (NULL == node) {
+ 			//printk(KERN_ERR "\n Found NULL! ");
+@@ -6336,6 +6330,13 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
+ 		ctx->higher_watermark = ctx->lower_watermark >> 4;
+ 	}
+ 	*/
++	//print_memory_usage(ctx, "Before GC");
++	/* Lookup this pba in the reverse table to find the
++	 * corresponding LBA. 
++	 * TODO: If the valid blocks are sequential, we need to keep
++	 * this segment as an open segment that can append data. We do
++	 * not need to perform GC on this segment.
++	 */
+ 
+ 	printk(KERN_ERR "\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
+ 	ctx->gc_extents = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
+-- 
+2.34.1
+
