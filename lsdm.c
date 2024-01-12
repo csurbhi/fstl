@@ -523,6 +523,7 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, size_t len, u6
 		if (rev_e->pba < pba) {
 			e = rev_e->ptr_to_tm;
 			BUG_ON(!e);
+			BUG_ON(e->pba != rev_e->pba);
 			if (rev_e->pba + e->len > pba) {
 				/* We find an overlapping pba when the gc_extent was split due to space
 				 * requirements in the gc frontier
@@ -1775,6 +1776,8 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 	rev_e = lsdm_rb_revmap_find(ctx, pba, 0, last_pba, __func__);
 	BUG_ON(NULL == rev_e);
 	e = rev_e->ptr_to_tm;
+	BUG_ON(rev_e->pba != e->pba);
+	BUG_ON((e->pba + e->len) < e->pba);
 	while(pba <= last_pba) {
 		e = rev_e->ptr_to_tm;
 		//printk(KERN_ERR "\n %s Looking for pba: %llu! Found e, LBA: %llu, PBA: %llu, len: %u e->(pba+len): %llu, remaining: %d", __func__, pba, e->lba, e->pba, e->len, e->pba + e->len, last_pba -(e->pba + e->len));
@@ -1792,18 +1795,22 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 			 * e-------
 			 * 	pba
 			 */
-			BUG_ON((e->pba + e->len) < pba);
+			if((e->pba + e->len) < pba) {
+				printk(KERN_ERR "\n %s BUG: (GC) considering pba: %llu, found: (lba: %llu, pba: %llu len: %ld) last_pba: %lld", __func__, pba, e->lba, e->pba, e->len, last_pba);
+				BUG();
+			}
 			diff = pba - e->pba;
 			temp.pba = pba;
 			temp.lba = e->lba + diff;
 			temp.len = e->len - diff;
 			BUG_ON(!temp.len);
-			//printk(KERN_ERR "\n %s Adjusted pba (lba: %llu, pba: %llu len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
 		} else {
 			/*
 			 * 	e------
 			 * pba
 			 */
+			if (e->pba > last_pba)
+				break;
 			temp.pba = e->pba;
 			temp.lba = e->lba;
 			temp.len = e->len;
@@ -2069,13 +2076,15 @@ static int gc_thread_fn(void * data)
 		ret = lsdm_gc(ctx, mode, 0);
 		if (mode == FG_GC) {
 			ctx->gc_th->gc_wake = 0;
-		}
-		if (ret < 0) {
-			wait_ms = gc_th->max_sleep_time;
-		} else {
-		}
-			wait_ms = gc_th->min_sleep_time;
+			if (ret < 0) {
+				wait_ms = gc_th->max_sleep_time;
+			} else {
+				wait_ms = gc_th->min_sleep_time;
+			}
 
+		} else {
+			wait_ms = gc_th->max_sleep_time;
+		}
 	} while(!kthread_should_stop());
 	return 0;
 }
@@ -6654,7 +6663,7 @@ static void lsdm_dtr(struct dm_target *dm_target)
 		nrpages--;
 	}
 	__free_pages(ctx->revmap_bm, 0);
-	printk(KERN_ERR "\n %s nrpages: %lu", __func__, nrpages);
+	//printk(KERN_ERR "\n %s nrpages: %lu", __func__, nrpages);
 
 	//trace_printk("\n metadata pages freed! \n");
 	/* timer based gc invocation for later
