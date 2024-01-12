@@ -52,7 +52,7 @@ int open_disk(char *dname)
 int write_to_disk(int fd, char *buf, unsigned long sectornr)
 {
 	int ret = 0;
-	u64 offset = sectornr * 512;
+	u64 offset = sectornr * SECTOR_SIZE;
 
 	if (fd < 0) {	
 		printf("\n Invalid, closed fd sent!");
@@ -116,7 +116,10 @@ __le32 get_zone_count(int fd)
 		return zone_count;
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/zonesz));
-	return 832;
+	//return 10000;
+	return 906;
+	//return 832;
+	//return 29807;
 	//return (capacity/zonesz);
 	//return 100;
 	//return 1900;
@@ -327,7 +330,7 @@ void read_sb(int fd, unsigned long sectornr)
 {
 	struct lsdm_sb *sb;
 	int ret = 0;
-	unsigned long long offset = sectornr * 512;
+	unsigned long long offset = sectornr * SECTOR_SIZE;
 
 	sb = (struct lsdm_sb *)malloc(BLK_SZ);
 	if (!sb)
@@ -376,7 +379,7 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 {
 	char buffer[BLK_SZ];
 	int i, ret;
-	u64 offset = pba * 512;
+	u64 offset = pba * SECTOR_SIZE;
 
 	printf("\n Writing %d zeroed blks, from pba: %llu", nr_blks, pba);
 	
@@ -407,7 +410,7 @@ void read_block(int fd, sector_t pba, unsigned nr_blks)
 	printf("\n Reading %d zeroed blks, from pba: %llu", nr_blks, pba);
 	
 	/* lseek64 offset is in  bytes not sectors, pba is in sectors */
-	ret = lseek64(fd, (pba * 512), SEEK_SET);
+	ret = lseek64(fd, (pba * SECTOR_SIZE), SEEK_SET);
 	if (ret < 0) {
 		perror(">>>> (before read) Error in lseek64: \n");
 		exit(errno);
@@ -463,7 +466,7 @@ unsigned long long get_current_frontier(struct lsdm_sb *sb)
 	 */
 	printf("\n tm_end_pba: %ld", tm_end_pba);
 	printf("\n tm_end_blk_nr: %ld", tm_end_blk_nr);
-	printf("\n tm_end_zone_nr: %d", tm_end_zone_nr);
+	printf("\n Current Write frontier: tm_end_zone_nr: %d", tm_end_zone_nr + 1);
 	return (tm_end_zone_nr + 1) << (sb->log_zone_size - sb->log_sector_size);
 }
 
@@ -483,7 +486,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	struct lsdm_sb *sb;
 	int ret = 0;
 	unsigned int zonesz, logzonesz, zone_count;
-	char str[512];
+	char str[SECTOR_SIZE];
 
 	sb = (struct lsdm_sb *)malloc(BLK_SZ);
 	if (!sb)
@@ -612,7 +615,7 @@ void prepare_prev_seg_entry(struct lsdm_seg_entry *entry)
 struct lsdm_ckpt * read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 {
 	struct lsdm_ckpt *ckpt;
-	u64 offset = ckpt_pba * 512;
+	u64 offset = ckpt_pba * SECTOR_SIZE;
 	int ret;
 
 	ckpt = (struct lsdm_ckpt *)malloc(BLK_SZ);
@@ -649,6 +652,7 @@ struct lsdm_ckpt * read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba
 void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 {
 	struct lsdm_ckpt *ckpt, *ckpt1;
+	char buffer[BLK_SZ];
 	int ret;
 
 	ckpt = (struct lsdm_ckpt *)malloc(BLK_SZ);
@@ -669,7 +673,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	printf("\n-----------------------------------------------------------\n");
 	printf("\n checkpoint written at: %llu cur_frontier_pba: %lld", ckpt_pba, ckpt->hot_frontier_pba);
 
-	u64 offset = sb->ckpt1_pba * 512;
+	u64 offset = sb->ckpt1_pba * SECTOR_SIZE;
 
 	ret = lseek64(fd, offset, SEEK_SET);
 	if (ret < 0) {
@@ -677,13 +681,15 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 		perror("!! (before write) Error in lseek64: \n");
 		exit(errno);
 	}
-	ret = write(fd, ckpt, BLK_SZ);
+	memset(buffer, 0, BLK_SZ);
+	memcpy(buffer, ckpt, sizeof(struct lsdm_ckpt));
+	ret = write(fd, buffer, BLK_SZ);
 	if (ret < 0) {
 		perror("Error while writing ckpt1: ");
 		exit(errno);
 	}
 
-	offset = sb->ckpt2_pba * 512;
+	offset = sb->ckpt2_pba * SECTOR_SIZE;
 	ret = lseek64(fd, offset, SEEK_SET);
 	if (ret < 0) {
 		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
@@ -913,7 +919,7 @@ int main(int argc, char * argv[])
 	free(sb1);
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 0;
-	char str[512];
+	char str[SECTOR_SIZE];
 
 	if (ioctl(fd, BLKGETZONESZ, &zone_lbas) < 0) {
 		sprintf(str, "Get zone size failed %d (%s)\n", errno, strerror(errno));
