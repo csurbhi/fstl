@@ -1891,7 +1891,7 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 	}
 	//flush_workqueue(ctx->tm_wq);
 	//flush_workqueue(ctx->writes_wq);
-	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "BG_GC");
+	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "CONC_GC");
 again:
 	if (unlikely(!list_empty(&ctx->gc_extents->list))) {
 		list_for_each(pos, &ctx->gc_extents->list) {
@@ -4940,9 +4940,6 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 			/* either someone stopped the GC thread or GC could not find zones to clean */
 			goto fail;
 		}
-	}
-	if (kthread_should_stop()) {
-		goto fail;
 	}
 	//printk(KERN_ERR "\n (%s) bio: lba: %llu nr_sectors: %llu \n", __func__, lba, nr_sectors);
 	return 0;
