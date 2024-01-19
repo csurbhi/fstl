@@ -1868,8 +1868,6 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 	int cleaned = 0;
 	u64 start_t, end_t, interval = 0, gc_count = 0;
 
-	gc_mode = FG_GC;
-		
 	//printk(KERN_ERR "\a %s * GC thread polling after every few seconds! gc_mode: %d \n", __func__, gc_mode);
 	
 	/* Take a semaphore lock so that no two gc instances are
@@ -1884,6 +1882,7 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 
 	zonenr = select_zone_to_clean(ctx, gc_mode, __func__);
 	if (zonenr < 0) {
+		gc_th->gc_wake = 0;
 		mutex_unlock(&ctx->gc_lock);
 		printk(KERN_ERR "\n No zone found for cleaning!! \n");
 		wake_up_all(&ctx->gc_th->fggc_wq);
@@ -1903,21 +1902,18 @@ again:
 		printk(KERN_ERR "\n %s ************ extent list is not empty, #extents: %d ! ", __func__, count);
 	}
 
+	if (kthread_should_stop()) {
+		gc_th->gc_wake = 0;
+		mutex_unlock(&ctx->gc_lock);
+		printk(KERN_ERR "\n kthread needs to stop ");
+		wake_up_all(&ctx->gc_th->fggc_wq);
+		io_schedule();
+		return -1;
+	}
+
 	create_gc_extents(ctx, zonenr);
 
 	//print_memory_usage(ctx, "After extents");
-	/* Wait here till the system becomes IO Idle, if system is iodle don't wait */
-	/*
-	if (gc_mode == BG_GC) {
-		wait_event_interruptible_timeout(*wq, is_lsdm_ioidle(ctx) ||
-			kthread_should_stop() || freezing(current) ||
-			gc_th->gc_wake,
-			msecs_to_jiffies(gc_th->urgent_sleep_time));
-                if (gc_th->gc_wake) {
-			gc_mode = FG_GC;
-		}
-	} */
-
 	if (list_empty(&ctx->gc_extents->list)) {
 		/* Nothing to do, sit_ent_vblocks_decr() is playing catch up with gc cost tree */
 		//wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
@@ -1926,24 +1922,42 @@ again:
 		goto complete;
 	}
 
-	//printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
-	ret = read_gc_extents(ctx);
-	if (ret)
-		goto failed;
-	//print_memory_usage(ctx, "After read");
-
-	/* Wait here till the system becomes IO Idle, if system is
-	* iodle don't wait */ 
-	/*
-	if (gc_mode == BG_GC) {
-		wait_event_interruptible_timeout(*wq, is_lsdm_ioidle(ctx) ||
+	if (ctx->nr_freezones < ctx->middle_watermark) {
+		/* while gc thread was running, urgent mode triggered */
+		gc_mode = FG_GC;
+		gc_th->gc_wake = 1;
+	}
+	/* if we are in concurrent mode, we can afford to let the application i/o go ahead */
+	if (gc_mode == CONC_GC) {
+		wait_event_interruptible_timeout(*wq,
 			kthread_should_stop() || freezing(current) ||
 			gc_th->gc_wake,
 			msecs_to_jiffies(gc_th->urgent_sleep_time));
                 if (gc_th->gc_wake) {
 			gc_mode = FG_GC;
 		}
-	} */
+	}
+	//printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
+	ret = read_gc_extents(ctx);
+	if (ret)
+		goto failed;
+
+	//print_memory_usage(ctx, "After read");
+	if (ctx->nr_freezones < ctx->middle_watermark) {
+		/* while gc thread was running, urgent mode triggered */
+		gc_mode = FG_GC;
+		gc_th->gc_wake = 1;
+	}
+	/* if we are in concurrent mode, we can afford to let the application i/o go ahead */
+	if (gc_mode == CONC_GC) {
+		wait_event_interruptible_timeout(*wq,
+			kthread_should_stop() || freezing(current) ||
+			gc_th->gc_wake,
+			msecs_to_jiffies(gc_th->urgent_sleep_time));
+                if (gc_th->gc_wake) {
+			gc_mode = FG_GC;
+		}
+	}
 	//printk(KERN_ERR "\n %s zonenr: %d about to be written, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	ret = write_valid_gc_extents(ctx, zonenr);
 	if (ret < 0) { 
@@ -1964,24 +1978,51 @@ complete:
 	//printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	/* Release GC lock */
 
-	if (gc_th->gc_wake) {
+	/* while gc thread was running, urgent mode triggered */
+	if (ctx->nr_freezones <= ctx->middle_watermark) {
 		gc_mode = FG_GC;
 	}
 
 	/* TODO: Mode: FG_GC */
+	cleaned++;
+recheck:
 	if (gc_mode == FG_GC) {
-		cleaned++;
 		drain_workqueue(ctx->tm_wq);
 		//printk(KERN_ERR "\n %s nr of free zones: %llu, #cleaned: %d low watermark: %d high watermark: %d zonenr", __func__, ctx->nr_freezones, cleaned, ctx->lower_watermark, ctx->higher_watermark, zonenr);
-		/* check if you have hit higher_watermark or else keep cleaning */
+		if (ctx->nr_freezones > ctx->lower_watermark) {
+			wake_up_all(&ctx->gc_th->fggc_wq);
+			/* give application io a turn */
+			io_schedule();
+		}
+		if (ctx->nr_freezones <= ctx->middle_watermark) {
+			zonenr = select_zone_to_clean(ctx, FG_GC, __func__);
+			if (zonenr >= 0)
+				goto again;
+			goto failed; /* no zone to be cleaned, nothing to be done */
+		}
+		// else: (ctx->nr_freezones > ctx->middle_watermark) {
+			/* paused GC mode */
+		gc_mode = CONC_GC;
+                gc_th->gc_wake = 0;
+		io_schedule();
+	} 
+	if (gc_mode == CONC_GC) {
+		/* if we are in concurrent mode, we can afford to let the application i/o go ahead */
+		wait_event_interruptible_timeout(*wq,
+			kthread_should_stop() || freezing(current) ||
+			gc_th->gc_wake,
+			msecs_to_jiffies(gc_th->urgent_sleep_time));
+		if (ctx->nr_freezones <= ctx->middle_watermark) {
+			gc_mode = FG_GC;
+		}
+		// else
 		if (ctx->nr_freezones <= ctx->higher_watermark) {
 			zonenr = select_zone_to_clean(ctx, FG_GC, __func__);
 			if (zonenr >= 0)
 				goto again;
+			// else nothing to do;
 		}
-                gc_th->gc_wake = 0;
-		wake_up_all(&ctx->gc_th->fggc_wq);
-		io_schedule();
+		// else, you dont need to do CONC_GC or FG_GC any more;
 	}
 failed:
 	mutex_unlock(&ctx->gc_lock);
@@ -2054,7 +2095,14 @@ static int gc_thread_fn(void * data)
 
 		 /* give it a try one time */
                 if (gc_th->gc_wake) {
-			mode = FG_GC;
+			if (ctx->nr_freezones < ctx->middle_watermark) {
+				/* concurrent GC, no pauses */
+				mode = FG_GC;
+			} else {
+				/* concurrent, intermittent GC */
+				gc_th->gc_wake = 0;
+				mode = CONC_GC;
+			}
 		}
 
                 if (try_to_freeze()) {
@@ -3512,6 +3560,9 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
+	if (!ptr->vblocks) {
+		printk("\n pba: %llu segnr: %llu vblocks: %llu mtime:%llu \n", pba, zonenr, ptr->vblocks, ptr->mtime);
+	}
 	BUG_ON(!ptr->vblocks);
 	ptr->vblocks = ptr->vblocks - 1;
 	/* Send the older vblocks, mtime along with the new vblocks,mtime to this
@@ -4869,25 +4920,30 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 		bio->bi_status = BLK_STS_NOSPC;
 		goto fail;
 	}
-	if (ctx->nr_freezones <= ctx->lower_watermark) {
-		printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
-		DEFINE_WAIT(wait);
-		prepare_to_wait(&ctx->gc_th->fggc_wq, &wait,
-				TASK_UNINTERRUPTIBLE);
+	if (ctx->nr_freezones <= ctx->higher_watermark) {
+		/* start fg gc but dont wait here unless less than lower_watermark*/
 		/* setting gc_wake=1 and the next wakeup will trigger lsdm_gc(ctx, FG_GC, 0) by waking up a sleeping gc thread */
-		ctx->gc_th->gc_wake = 1;
-		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
-		io_schedule();
-		finish_wait(&ctx->gc_th->fggc_wq, &wait);
-		//printk(KERN_ERR "\n %s %d woken up lba: %llu, nrsectors: %d ", __func__,  __LINE__, lba, nr_sectors);
-	}
-	/* start fg gc but dont wait here */
-	/*
-	else if (ctx->nr_freezones < ctx->higher_watermark) {
 		//printk(KERN_ERR "\n 2. ctx->nr_freezones: %d, ctx->higher_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->higher_watermark);
 		ctx->gc_th->gc_wake = 1;
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
-	} */
+		if (ctx->nr_freezones <= ctx->lower_watermark) {
+			printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
+			DEFINE_WAIT(wait);
+			prepare_to_wait(&ctx->gc_th->fggc_wq, &wait,
+					TASK_UNINTERRUPTIBLE);
+			/* setting gc_wake=1 and the next wakeup will trigger lsdm_gc(ctx, FG_GC, 0) by waking up a sleeping gc thread */
+			io_schedule();
+			finish_wait(&ctx->gc_th->fggc_wq, &wait);
+			//printk(KERN_ERR "\n %s %d woken up lba: %llu, nrsectors: %d ", __func__,  __LINE__, lba, nr_sectors);
+		}
+		if (ctx->nr_freezones <= ctx->lower_watermark) {
+			/* either someone stopped the GC thread or GC could not find zones to clean */
+			goto fail;
+		}
+	}
+	if (kthread_should_stop()) {
+		goto fail;
+	}
 	//printk(KERN_ERR "\n (%s) bio: lba: %llu nr_sectors: %llu \n", __func__, lba, nr_sectors);
 	return 0;
 fail: 
@@ -5361,7 +5417,7 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 	int nr_extents = TM_ENTRIES_BLK;
 	int ret = 0;
 
-	while (i <= nr_extents) {
+	while (i < nr_extents) {
 		i++;
 		/* If there are no more recorded entries on disk, then
 		 * dont add an entries further
@@ -5370,13 +5426,14 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 			continue;
 			
 		}
-		//printk(KERN_ERR "\n %s entry->lba: %llu entry->pba: %llu", __func__, lba, entry->pba);
+		//printk(KERN_ERR "\n %s i: %d entry->lba: %llu entry->pba: %llu", __func__, i, lba, entry->pba);
+		BUG_ON(entry->pba > ctx->sb->max_pba);
 		/* TODO: right now everything should be zeroed out */
 		//panic("Why are there any already mapped extents?");
 		down_write(&ctx->lsdm_rb_lock);
 		lsdm_rb_update_range(ctx, lba, entry->pba, NR_SECTORS_IN_BLK);
 		up_write(&ctx->lsdm_rb_lock);
-		lba = lba + 8; /* Every 512 bytes sector has an LBA in a SMR drive */
+		lba = lba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
 		entry = entry + 1;
 		ret = 1;
 	}
@@ -5465,6 +5522,7 @@ int read_translation_map(struct ctx *ctx)
 	ctx->n_extents = 0;
 	sectornr = 0;
 	while(i < nrblks) {
+		//printk(KERN_ERR "\n reading block: %llu, sector: %llu", ctx->sb->tm_pba, sectornr);
 		page = read_block(ctx, ctx->sb->tm_pba, sectornr);
 		if (!page)
 			return -1;
@@ -5864,7 +5922,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 	rb_insert_color(&new->rb, root);
 
 	zonenr = select_zone_to_clean(ctx, BG_GC, __func__);
-	printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
+	//printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
 	return 0;
 }
 
@@ -5973,15 +6031,17 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			mark_zone_free(ctx , *zonenr, 1);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
-			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
-			if (ctx->min_mtime > entry->mtime)
-				ctx->min_mtime = entry->mtime;
-			if (ctx->max_mtime < entry->mtime)
-				ctx->max_mtime = entry->mtime;
+			printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
 			if (!update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__))
 				panic("Memory error, write a memory shrinker!");
-			ret = 1;
+		} else {
+			printk(KERN_ERR "\n %s segnr: %llu, vblocks: %llu, mtime: %llu ", __func__, *zonenr, entry->vblocks, entry->mtime);
 		}
+		if (ctx->min_mtime > entry->mtime)
+			ctx->min_mtime = entry->mtime;
+		if (ctx->max_mtime < entry->mtime)
+			ctx->max_mtime = entry->mtime;
+		ret = 1;
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
 		i++;
@@ -6051,12 +6111,11 @@ int read_seg_info_table(struct ctx *ctx)
 		entry0 = (struct lsdm_seg_entry *) page_address(sit_page);
 		if (nr_data_zones > nr_seg_entries_blk) {
 			nr_seg_entries_read = nr_seg_entries_blk;
-			nr_data_zones = nr_data_zones - nr_seg_entries_read;
 		}
 		else {
 			nr_seg_entries_read = nr_data_zones;
-			nr_data_zones = 0;
 		}
+		nr_data_zones = nr_data_zones - nr_seg_entries_read;
 		ret = read_seg_entries_from_block(ctx, entry0, nr_seg_entries_read, &zonenr);
 		if (!ret) {
 			__free_pages(sit_page, 0);
@@ -6225,7 +6284,7 @@ int read_metadata(struct ctx * ctx)
 		 */
 		printk(KERN_ERR "\n SIT and checkpoint does not match!");
 		ckpt->nr_free_zones = ctx->nr_freezones;
-		goto out;
+		//goto out;
 		do_recovery(ctx);
 		__free_pages(ctx->sb_page, 0);
 		nrpages--;
@@ -6540,7 +6599,8 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	//ctx->lower_watermark = ctx->sb->zone_count / 20; 
 	//ctx->higher_watermark = ctx->lower_watermark + 20;
 	ctx->lower_watermark = 3;
-	ctx->higher_watermark = 5;
+	ctx->middle_watermark = 6;
+	ctx->higher_watermark = 10;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->higher_watermark);
 	//ctx->higher_watermark = ctx->lower_watermark >> 2; 
 	/*

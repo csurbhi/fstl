@@ -32,6 +32,7 @@
 #define GC_CB 2
 #define BG_GC 1
 #define FG_GC 2
+#define CONC_GC 3
 #define NEEDS_FLUSH 1
 #define NEEDS_NO_FLUSH 0
 
@@ -267,6 +268,7 @@ struct ctx {
 	char *freezone_bitmap;
 	int 	nr_freezones;
 	int 	higher_watermark;
+	int 	middle_watermark;
 	int	lower_watermark;
 	char *gc_zone_bitmap;
 	int nr_gc_zones;
