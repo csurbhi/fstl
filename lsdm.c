@@ -1774,7 +1774,11 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 	temp.len = 0;
 	//printk(KERN_ERR "\n %s zonenr: %d first_pba: %llu last_pba: %llu #valid blks: %d", __func__, zonenr, pba, last_pba, vblks);
 	rev_e = lsdm_rb_revmap_find(ctx, pba, 0, last_pba, __func__);
-	BUG_ON(NULL == rev_e);
+	//BUG_ON(NULL == rev_e);
+	if (!rev_e) {
+		/* this zone could be emptied by concurrent i/o */
+		return 0;
+	}
 	e = rev_e->ptr_to_tm;
 	BUG_ON(rev_e->pba != e->pba);
 	BUG_ON((e->pba + e->len) < e->pba);
@@ -1891,8 +1895,8 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 	}
 	//flush_workqueue(ctx->tm_wq);
 	//flush_workqueue(ctx->writes_wq);
-	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "CONC_GC");
 again:
+	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "CONC_GC");
 	if (unlikely(!list_empty(&ctx->gc_extents->list))) {
 		list_for_each(pos, &ctx->gc_extents->list) {
 			gc_extent = list_entry(pos, struct gc_extents, list);
@@ -4927,7 +4931,7 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 		ctx->gc_th->gc_wake = 1;
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
 		if (ctx->nr_freezones <= ctx->lower_watermark) {
-			printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
+			//printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
 			DEFINE_WAIT(wait);
 			prepare_to_wait(&ctx->gc_th->fggc_wq, &wait,
 					TASK_UNINTERRUPTIBLE);
