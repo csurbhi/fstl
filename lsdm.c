@@ -1460,6 +1460,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	int count = 0, pagecount = 0, diffcount = 0;
 	int i, j, total = 0, vblks, total_vblks = 0;
 	u64 last_pba_read;
+	u64 gc_writes = 0;
 
 	
 	total_vblks = get_sit_ent_vblocks(ctx, zonenr);
@@ -1582,6 +1583,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		 */
 		submit_bio_wait(gc_extent->bio);
 		ctx->nr_gc_writes += s8;
+		gc_writes += s8;
 		//flush_workqueue(ctx->tm_wq);
 		free_gc_extent(ctx, gc_extent);
 		count++;
@@ -1606,6 +1608,17 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	////flush_workqueue(ctx->tm_wq);
 	/* last revmap blk may not be full, we write the partial revmap blk */
 	/* clear the revmap bitmap */
+	return gc_writes;
+}
+
+static int free_gc_extents(struct ctx *ctx)
+{
+	struct gc_extents *gc_extent, *temp_ptr, *newgc_extent, *next_ptr;
+	
+	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
+		gc_extent->bio = NULL;
+		free_gc_extent(ctx, gc_extent);
+	}
 	return 0;
 }
 
@@ -1869,8 +1882,8 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 	sector_t pba, last_pba;
 	struct list_head *pos;
 	struct gc_extents *gc_extent;
-	int cleaned = 0;
 	u64 start_t, end_t, interval = 0, gc_count = 0;
+	u64 gc_writes = 0;
 
 	//printk(KERN_ERR "\a %s * GC thread polling after every few seconds! gc_mode: %d \n", __func__, gc_mode);
 	
@@ -1881,38 +1894,27 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 		printk(KERN_ERR "\n 1. GC is already running! \n");
 		return -1;
 	}
-	//printk(KERN_ERR "\n %s Inside !!! \n ", __func__);
+again:
 	start_t = ktime_get_ns();	
-
 	zonenr = select_zone_to_clean(ctx, gc_mode, __func__);
 	if (zonenr < 0) {
-		gc_th->gc_wake = 0;
-		mutex_unlock(&ctx->gc_lock);
 		printk(KERN_ERR "\n No zone found for cleaning!! \n");
-		wake_up_all(&ctx->gc_th->fggc_wq);
-		io_schedule();
-		return -1;
+		if (gc_count) {
+			gc_count = -1;
+		}
+		goto failed;
 	}
 	//flush_workqueue(ctx->tm_wq);
 	//flush_workqueue(ctx->writes_wq);
-again:
-	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, (gc_mode == FG_GC) ? "FG_GC" : "CONC_GC");
+	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, gc_mode);
 	if (unlikely(!list_empty(&ctx->gc_extents->list))) {
-		list_for_each(pos, &ctx->gc_extents->list) {
-			gc_extent = list_entry(pos, struct gc_extents, list);
-			free_gc_extent(ctx, gc_extent);
-			count++;
-		}
-		printk(KERN_ERR "\n %s ************ extent list is not empty, #extents: %d ! ", __func__, count);
+		free_gc_extents(ctx);
+		printk(KERN_ERR "\n %s ************ extent list is not empty! Line: %d ", __func__, __LINE__);
 	}
 
 	if (kthread_should_stop()) {
-		gc_th->gc_wake = 0;
-		mutex_unlock(&ctx->gc_lock);
 		printk(KERN_ERR "\n kthread needs to stop ");
-		wake_up_all(&ctx->gc_th->fggc_wq);
-		io_schedule();
-		return -1;
+		goto failed;
 	}
 
 	create_gc_extents(ctx, zonenr);
@@ -1921,54 +1923,67 @@ again:
 	if (list_empty(&ctx->gc_extents->list)) {
 		/* Nothing to do, sit_ent_vblocks_decr() is playing catch up with gc cost tree */
 		//wait_event(ctx->rev_blk_flushq, 0 == atomic_read(&ctx->nr_revmap_flushes));
-		flush_workqueue(ctx->tm_wq);
 		remove_zone_from_gc_tree(ctx, zonenr);	
-		goto complete;
+		goto again;
 	}
 
-	if (ctx->nr_freezones < ctx->middle_watermark) {
-		/* while gc thread was running, urgent mode triggered */
-		gc_mode = FG_GC;
-		gc_th->gc_wake = 1;
-	}
-	/* if we are in concurrent mode, we can afford to let the application i/o go ahead */
-	if (gc_mode == CONC_GC) {
-		wait_event_interruptible_timeout(*wq,
-			kthread_should_stop() || freezing(current) ||
-			gc_th->gc_wake,
-			msecs_to_jiffies(gc_th->urgent_sleep_time));
-                if (gc_th->gc_wake) {
-			gc_mode = FG_GC;
-		}
-	}
 	//printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	ret = read_gc_extents(ctx);
 	if (ret)
 		goto failed;
 
 	//print_memory_usage(ctx, "After read");
-	if (ctx->nr_freezones < ctx->middle_watermark) {
-		/* while gc thread was running, urgent mode triggered */
-		gc_mode = FG_GC;
-		gc_th->gc_wake = 1;
+	if (gc_mode != FG_GC) {
+		if (ctx->nr_freezones < ctx->middle_watermark) {
+			/* while gc thread was running, urgent mode triggered */
+			gc_mode = FG_GC;
+			gc_th->gc_wake = 1;
+		}
 	}
 	/* if we are in concurrent mode, we can afford to let the application i/o go ahead */
 	if (gc_mode == CONC_GC) {
+		gc_th->gc_wake = 0;
 		wait_event_interruptible_timeout(*wq,
 			kthread_should_stop() || freezing(current) ||
 			gc_th->gc_wake,
 			msecs_to_jiffies(gc_th->urgent_sleep_time));
                 if (gc_th->gc_wake) {
-			gc_mode = FG_GC;
+			if (ctx->nr_freezones <= ctx->middle_watermark) {
+				gc_mode = FG_GC;
+			}
 		}
+		gc_th->gc_wake = 1;
 	}
+	else if (gc_mode == BG_GC) {
+	       	if (!is_lsdm_ioidle(ctx)) {
+                	if (!gc_th->gc_wake) {
+				/* BG_GC mode and not idle */
+				wait_event_interruptible_timeout(*wq,
+					kthread_should_stop() || freezing(current) ||
+					gc_th->gc_wake,
+					msecs_to_jiffies(gc_th->urgent_sleep_time));
+			}
+			if (ctx->nr_freezones <= ctx->higher_watermark) {
+				gc_mode = CONC_GC;
+				if (ctx->nr_freezones <= ctx->middle_watermark) {
+					gc_mode = FG_GC;
+				}
+				gc_th->gc_wake = 1;
+			}
+		} /* else, we are in BG GC and are io idle, so do not wait, continue */
+	}
+	if (kthread_should_stop()) {
+		printk(KERN_ERR "\n kthread needs to stop ");
+		goto failed;
+	}
+
 	//printk(KERN_ERR "\n %s zonenr: %d about to be written, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	ret = write_valid_gc_extents(ctx, zonenr);
 	if (ret < 0) { 
 		printk(KERN_ERR "\n write_valid_gc_extents() failed, ret: %d ", ret);
 		goto failed;
 	}
-	
+	gc_writes += ret;
 	//print_memory_usage(ctx, "After write");
 
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
@@ -1977,37 +1992,32 @@ again:
 	end_t = ktime_get_ns();	
 	interval += (end_t - start_t)/1000000;
 	gc_count++;
-
+	ctx->gc_total += interval;
+	ctx->gc_count += gc_count;
+	ctx->gc_average = ctx->gc_total/ ctx->gc_count;
+	printk(KERN_ERR "\n %s gc_count: %d total time: %llu (milliseconds) gc_writes: %llu", __func__, gc_count, interval, gc_writes);
+	gc_writes = 0;
 complete:
 	//printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
-	/* Release GC lock */
-
 	/* while gc thread was running, urgent mode triggered */
-	if (ctx->nr_freezones <= ctx->middle_watermark) {
-		gc_mode = FG_GC;
+	if (ctx->nr_freezones <= ctx->higher_watermark) {
+		gc_mode = CONC_GC;
+		if (ctx->nr_freezones <= ctx->middle_watermark) {
+			gc_mode = FG_GC;
+		}
 	}
 
 	/* TODO: Mode: FG_GC */
-	cleaned++;
 recheck:
+	drain_workqueue(ctx->tm_wq);
 	if (gc_mode == FG_GC) {
-		drain_workqueue(ctx->tm_wq);
-		//printk(KERN_ERR "\n %s nr of free zones: %llu, #cleaned: %d low watermark: %d high watermark: %d zonenr", __func__, ctx->nr_freezones, cleaned, ctx->lower_watermark, ctx->higher_watermark, zonenr);
-		if (ctx->nr_freezones > ctx->lower_watermark) {
-			wake_up_all(&ctx->gc_th->fggc_wq);
-			/* give application io a turn */
-			io_schedule();
-		}
+		wake_up_all(&ctx->gc_th->fggc_wq);
+		io_schedule();
 		if (ctx->nr_freezones <= ctx->middle_watermark) {
-			zonenr = select_zone_to_clean(ctx, FG_GC, __func__);
-			if (zonenr >= 0)
-				goto again;
-			goto failed; /* no zone to be cleaned, nothing to be done */
+			goto again;
 		}
-		// else: (ctx->nr_freezones > ctx->middle_watermark) {
-			/* paused GC mode */
+		/* else: Paused GC mode */
 		gc_mode = CONC_GC;
-                gc_th->gc_wake = 0;
 		io_schedule();
 	} 
 	if (gc_mode == CONC_GC) {
@@ -2019,24 +2029,24 @@ recheck:
 		if (ctx->nr_freezones <= ctx->middle_watermark) {
 			gc_mode = FG_GC;
 		}
-		// else
 		if (ctx->nr_freezones <= ctx->higher_watermark) {
-			zonenr = select_zone_to_clean(ctx, FG_GC, __func__);
-			if (zonenr >= 0)
-				goto again;
-			// else nothing to do;
+			goto again;
 		}
 		// else, you dont need to do CONC_GC or FG_GC any more;
 	}
+	else if (gc_mode == BG_GC) {
+		if (is_lsdm_ioidle(ctx))
+			goto again;
+		/* else we need to stop */
+	}
 failed:
+	free_gc_extents(ctx);
 	mutex_unlock(&ctx->gc_lock);
-	ctx->gc_total += interval;
-	ctx->gc_average = interval / gc_count;
-	ctx->gc_count += gc_count;
-	//printk(KERN_ERR "\n %s end_t: %llu start_t: %llu, gc_count: %d total time: %llu (milliseconds)", __func__, end_t, start_t, gc_count, interval);
-	//printk(KERN_ERR "\n %s going out! \n nr gc writes: %d ", __func__, ctx->nr_gc_writes);
-	//wake_up_all(&ctx->gc_th->fggc_wq);
-	return 0;
+	gc_th->gc_wake = 0;
+	if (gc_th->gc_wake)
+		wake_up_all(&ctx->gc_th->fggc_wq);
+	io_schedule();
+	return gc_count;
 }
 
 /* printing in order */
@@ -2086,7 +2096,7 @@ static int gc_thread_fn(void * data)
 	mutex_init(&ctx->gc_lock);
 	printk(KERN_ERR "\n %s executing! pid: %d", __func__, tsk->pid);
 	set_freezable();
-	ctx->gc_th->gc_wake = 1;
+	ctx->gc_th->gc_wake = 0;
 	ctx->gc_count  = 0;
 	ctx->gc_average = 0;
 	ctx->gc_total = 0;
@@ -2104,7 +2114,6 @@ static int gc_thread_fn(void * data)
 				mode = FG_GC;
 			} else {
 				/* concurrent, intermittent GC */
-				gc_th->gc_wake = 0;
 				mode = CONC_GC;
 			}
 		}
@@ -2117,25 +2126,30 @@ static int gc_thread_fn(void * data)
                         break;
 		}
 		//print_extents(ctx);
-		/*
 		if(!is_lsdm_ioidle(ctx) && mode != FG_GC) {
-			// increase sleep time
-			printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
+			/* increase sleep time */
+			//printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
 			wait_ms = wait_ms * 2;
+			if (wait_ms > gc_th->max_sleep_time) {
+				wait_ms = gc_th->max_sleep_time;
+			}
 			continue;
-		}*/
+		}
 		/* Doing this for now! ret part */
 		ret = lsdm_gc(ctx, mode, 0);
-		if (mode == FG_GC) {
-			ctx->gc_th->gc_wake = 0;
-			if (ret < 0) {
-				wait_ms = gc_th->max_sleep_time;
-			} else {
-				wait_ms = gc_th->min_sleep_time;
-			}
-
+		if (mode == BG_GC) {
+			wait_ms = gc_th->min_sleep_time;
 		} else {
-			wait_ms = gc_th->max_sleep_time;
+			ctx->gc_th->gc_wake = 0;
+
+		} 
+		if (ret < 0) {
+			wait_ms = wait_ms * 2;
+			if (wait_ms > gc_th->max_sleep_time) {
+				wait_ms = gc_th->max_sleep_time;
+			}
+			continue;
+
 		}
 	} while(!kthread_should_stop());
 	return 0;
@@ -3729,15 +3743,18 @@ int add_translation_entry(struct ctx * ctx, sector_t lba, sector_t pba, size_t l
 	for(i=0; i<nrblks; i++) {
 		if (pba > ctx->sb->max_pba) {
 			printk(KERN_ERR "\n %s lba: %llu pba: %llu max_pba: %llu len: %llu i: %d", lba, pba, ctx->sb->max_pba, len);
+			mutex_unlock(&ctx->tm_kv_store_lock);
 			BUG();
+			return -ENOMEM;
 		}
 		/*-----------------------------------------------*/
 		if (ptr->pba == pba) {
 			printk(KERN_ERR "\n 1. lba: %llu, ptr->pba: %llu pba: %llu", lba, ptr->pba, pba);
 			/* repeated entry - retrieved either from on-disk tm  */
 			/* for now we are not flushing, so this should not be here */
+			mutex_unlock(&ctx->tm_kv_store_lock);
 			BUG_ON(1);
-			continue;
+			return -ENOMEM;
 		}
 		/* lba can be 0, but pba cannot be, so this entry is empty! */
 		if (ptr->pba != 0) {
@@ -3760,6 +3777,7 @@ int add_translation_entry(struct ctx * ctx, sector_t lba, sector_t pba, size_t l
 		tm_page = add_tm_page_kv_store(ctx, lba);
 		if (!tm_page) {
 			printk(KERN_ERR "%s NO memory! ", __func__);
+			mutex_unlock(&ctx->tm_kv_store_lock);
 			BUG_ON(1);
 			return -ENOMEM;
 		}
@@ -4003,7 +4021,7 @@ void remove_sit_page(struct ctx *ctx, struct rb_node *node)
 	__free_pages(page, 0);
 	kmem_cache_free(ctx->sit_page_cache, sit_page);
 	nrpages--;
-	printk(KERN_ERR "\n %s: sit page freed! ", __func__);
+	//printk(KERN_ERR "\n %s: sit page freed! ", __func__);
 	return;
 }
 
@@ -4295,9 +4313,6 @@ struct tm_page *add_tm_page_kv_store(struct ctx *ctx, sector_t lba)
     	atomic_inc(&ctx->tm_flush_count);
 	return new_tmpage;
 }
-
-
-void remove_tm_entry_kv_store(struct ctx *ctx, u64 lba);
 
 
 /* Make the length in terms of sectors or blocks?
@@ -4767,7 +4782,7 @@ end:
 	//printk(KERN_ERR "\n %s done lba: %llu len: %llu ", __func__, bio->bi_iter.bi_sector, bio_sectors(bio));
 
 	kmem_cache_free(ctx->bioctx_cache, lsdm_bioctx);
-	//mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
+	mykref_put(&ctx->ongoing_iocount, lsdm_ioidle);
 }
 
 
@@ -5858,8 +5873,8 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		remove_zone_from_gc_tree(ctx, zonenr);
 		return 0;
 	}
-	cost = get_cost(ctx, nrblks, mtime, GC_CB);
-	//cost = get_cost(ctx, nrblks, mtime, GC_GREEDY);
+	//cost = get_cost(ctx, nrblks, mtime, GC_CB);
+	cost = get_cost(ctx, nrblks, mtime, GC_GREEDY);
 	znode = add_zonenr_gc_zone_tree(ctx, zonenr, nrblks);
 	if (!znode) {
 		printk(KERN_ERR "\n %s gc data structure allocation failed!! \n");
@@ -6032,11 +6047,11 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			mark_zone_free(ctx , *zonenr, 1);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
-			printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
+			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
 			if (!update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__))
 				panic("Memory error, write a memory shrinker!");
 		} else {
-			printk(KERN_ERR "\n %s segnr: %llu, vblocks: %llu, mtime: %llu ", __func__, *zonenr, entry->vblocks, entry->mtime);
+			//printk(KERN_ERR "\n %s segnr: %llu, vblocks: %llu, mtime: %llu ", __func__, *zonenr, entry->vblocks, entry->mtime);
 		}
 		if (ctx->min_mtime > entry->mtime)
 			ctx->min_mtime = entry->mtime;
@@ -6285,6 +6300,7 @@ int read_metadata(struct ctx * ctx)
 		 */
 		printk(KERN_ERR "\n SIT and checkpoint does not match!");
 		ckpt->nr_free_zones = ctx->nr_freezones;
+		/*
 		//goto out;
 		do_recovery(ctx);
 		__free_pages(ctx->sb_page, 0);
@@ -6295,6 +6311,7 @@ int read_metadata(struct ctx * ctx)
 		nrpages--;
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		return -1;
+		*/
 	}
 out:
 	printk(KERN_ERR "\n Metadata read! \n");
@@ -6680,8 +6697,8 @@ static void lsdm_dtr(struct dm_target *dm_target)
 
 	flush_workqueue(ctx->writes_wq);
 	flush_workqueue(ctx->tm_wq);
-	printk(KERN_ERR "\n nr_app_writes: %d", ctx->nr_app_writes);
-	printk(KERN_ERR "\n nr_gc_writes: %d", ctx->nr_gc_writes);
+	printk(KERN_ERR "\n nr_app_writes: %llu", ctx->nr_app_writes);
+	printk(KERN_ERR "\n nr_gc_writes: %llu", ctx->nr_gc_writes);
 	/* we stop the gc thread first as it will create additional
 	 * tm entries, sit entries and we want all of them to be freed
 	 * and flushed as well.
@@ -6739,8 +6756,8 @@ static void lsdm_dtr(struct dm_target *dm_target)
 	mempool_destroy(ctx->gc_page_pool);
 	//trace_printk("\n memory pool destroyed\n");
 	//trace_printk("\n device mapper target released\n");
-	printk(KERN_ERR "\n nr_app_writes: %d", ctx->nr_app_writes);
-	printk(KERN_ERR "\n nr_gc_writes: %d", ctx->nr_gc_writes);
+	printk(KERN_ERR "\n nr_app_writes: %llu", ctx->nr_app_writes);
+	printk(KERN_ERR "\n nr_gc_writes: %llu", ctx->nr_gc_writes);
 	printk(KERN_ERR "\n nr_failed_writes: %u", atomic_read(&ctx->nr_failed_writes));
 	printk(KERN_ERR "\n gc cleaning time average: %llu", ctx->gc_average);
 	printk(KERN_ERR "\n gc total nr of segments cleaned: %d", ctx->gc_count);
