@@ -1901,7 +1901,7 @@ again:
 	zonenr = select_zone_to_clean(ctx, gc_mode, __func__);
 	if (zonenr < 0) {
 		printk(KERN_ERR "\n No zone found for cleaning!! \n");
-		if (gc_count) {
+		if (!gc_count) {
 			gc_count = -1;
 		}
 		goto failed;
@@ -2044,10 +2044,10 @@ recheck:
 failed:
 	free_gc_extents(ctx);
 	mutex_unlock(&ctx->gc_lock);
-	gc_th->gc_wake = 0;
-	if (gc_th->gc_wake)
+	if (gc_th->gc_wake) {
+		gc_th->gc_wake = 0;
 		wake_up_all(&ctx->gc_th->fggc_wq);
-	io_schedule();
+	}
 	return gc_count;
 }
 
@@ -2093,6 +2093,7 @@ static int gc_thread_fn(void * data)
 	unsigned int wait_ms;
 	int mode = BG_GC, ret = 0;
 	struct task_struct *tsk = gc_th->lsdm_gc_task;
+	u64 start_t, end_t, interval = 0;
 
 	wait_ms = gc_th->min_sleep_time;
 	mutex_init(&ctx->gc_lock);
@@ -2137,10 +2138,15 @@ static int gc_thread_fn(void * data)
 				continue;
 			}
 			printk(KERN_ERR "\n Starting BG GC ");
+			start_t = ktime_get_ns();
 		}
 		/* Doing this for now! ret part */
 		ret = lsdm_gc(ctx, mode, 0);
 		if (mode == BG_GC) {
+			end_t = ktime_get_ns();
+			interval += (end_t - start_t)/1000000;
+			if (ret > 0)
+				printk(KERN_ERR "\n %s BG_GC: gc_count: %d total time: %llu (milliseconds)", __func__, ret, interval);
 			wait_ms = gc_th->min_sleep_time;
 		} else {
 			ctx->gc_th->gc_wake = 0;
