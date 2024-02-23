@@ -2118,22 +2118,22 @@ static int gc_thread_fn(void * data)
 			}
 		}
 
-                if (try_to_freeze()) {
-                        continue;
-                }
                 if (kthread_should_stop()) {
 			printk(KERN_ERR "\n GC thread is stopping! ");
                         break;
 		}
 		//print_extents(ctx);
-		if(!is_lsdm_ioidle(ctx) && mode != FG_GC) {
-			/* increase sleep time */
-			//printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
-			wait_ms = wait_ms * 2;
-			if (wait_ms > gc_th->max_sleep_time) {
-				wait_ms = gc_th->max_sleep_time;
+		if(mode == BG_GC) {
+			if (!is_lsdm_ioidle(ctx)) {
+				/* increase sleep time */
+				//printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
+				/*
+				wait_ms = wait_ms * 2;
+				if (wait_ms > gc_th->max_sleep_time) {
+					wait_ms = gc_th->max_sleep_time;
+				}*/
+				continue;
 			}
-			continue;
 		}
 		/* Doing this for now! ret part */
 		ret = lsdm_gc(ctx, mode, 0);
@@ -2155,8 +2155,8 @@ static int gc_thread_fn(void * data)
 	return 0;
 }
 #define DEF_GC_THREAD_URGENT_SLEEP_TIME 500     /* 500 ms */
-#define DEF_GC_THREAD_MIN_SLEEP_TIME    900000   /* milliseconds */
-#define DEF_GC_THREAD_MAX_SLEEP_TIME    1200000
+#define DEF_GC_THREAD_MIN_SLEEP_TIME    90000   /* milliseconds */
+#define DEF_GC_THREAD_MAX_SLEEP_TIME    120000
 #define DEF_GC_THREAD_NOGC_SLEEP_TIME   1500000  /* wait 2 min */
 #define LIMIT_INVALID_BLOCK     40 /* percentage over total user space */
 #define LIMIT_FREE_BLOCK        40 /* percentage over invalid + free space */
