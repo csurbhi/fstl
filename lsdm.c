@@ -47,6 +47,7 @@
 #include <linux/blkdev.h>
 #include <linux/blk_types.h>
 #include <linux/blkdev.h>
+#include <linux/refcount.h>
 
 #include "metadata.h"
 #define DM_MSG_PREFIX "lsdm"
@@ -59,6 +60,7 @@
 
 long nrpages;
 
+void lsdm_ioidle(struct mykref *kref);
 
 static inline void mykref_init(struct mykref *kref)
 {
@@ -73,13 +75,13 @@ static inline void mykref_get(struct mykref *kref)
 /* At the end we call refcount_dec */
 static inline int mykref_put(struct mykref *kref, void (*callback)(struct mykref *kref))
 {
-	return 0;
-
-	if (!refcount_dec_not_one(&kref->refcount)) {
+	refcount_dec_not_one(&kref->refcount);
+	if (refcount_read(&kref->refcount) == 1) {
 		/* refcount is one */
                 callback(kref);
                 return 1;
         }
+	//printk(KERN_ERR "\n iocount: %d", refcount_read(&kref->refcount));
         return 0;
 }
 
@@ -1906,7 +1908,7 @@ again:
 	}
 	//flush_workqueue(ctx->tm_wq);
 	//flush_workqueue(ctx->writes_wq);
-	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %s", zonenr, gc_mode);
+	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %d", zonenr, gc_mode);
 	if (unlikely(!list_empty(&ctx->gc_extents->list))) {
 		free_gc_extents(ctx);
 		printk(KERN_ERR "\n %s ************ extent list is not empty! Line: %d ", __func__, __LINE__);
@@ -2126,7 +2128,7 @@ static int gc_thread_fn(void * data)
 		if(mode == BG_GC) {
 			if (!is_lsdm_ioidle(ctx)) {
 				/* increase sleep time */
-				//printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
+				printk(KERN_ERR "\n %s not ioidle! \n ", __func__);
 				/*
 				wait_ms = wait_ms * 2;
 				if (wait_ms > gc_th->max_sleep_time) {
@@ -2134,6 +2136,7 @@ static int gc_thread_fn(void * data)
 				}*/
 				continue;
 			}
+			printk(KERN_ERR "\n Starting BG GC ");
 		}
 		/* Doing this for now! ret part */
 		ret = lsdm_gc(ctx, mode, 0);
@@ -2155,7 +2158,7 @@ static int gc_thread_fn(void * data)
 	return 0;
 }
 #define DEF_GC_THREAD_URGENT_SLEEP_TIME 500     /* 500 ms */
-#define DEF_GC_THREAD_MIN_SLEEP_TIME    90000   /* milliseconds */
+#define DEF_GC_THREAD_MIN_SLEEP_TIME    60000   /* milliseconds */
 #define DEF_GC_THREAD_MAX_SLEEP_TIME    120000
 #define DEF_GC_THREAD_NOGC_SLEEP_TIME   1500000  /* wait 2 min */
 #define LIMIT_INVALID_BLOCK     40 /* percentage over total user space */
@@ -2226,26 +2229,10 @@ void invoke_gc(unsigned long ptr)
 void lsdm_ioidle(struct mykref *kref)
 {
 	struct ctx *ctx;
-
 	ctx = container_of(kref, struct ctx, ongoing_iocount);
+
+	//printk(KERN_ERR "\n LSD is io idle! ctx: %p\n", __func__, ctx);
 	atomic_set(&ctx->ioidle, 1);
-	wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
-	//printk(KERN_ERR "\n Stl is io idle!", __func__);
-	/* Add the initialized timer to the global list */
-	/* TODO: We start the timer only when there is some work to do.
-	 * We dont want GC to be invoked for no reason!
-	 * When there is little to do, disable the timer.
-	 * When an I/O is invoked, disable the timer if its enabled.
-	 * so if work to do and  ioidle, then enable the timer.
-	 * when no work to do disable the timer.
-	 * when read/write invoked, if timer_enabled: disable_timer.
-	 */
-	/*
-	ctx->timer.function = invoke_gc;
-	ctx->timer.data = (unsigned long) ctx;
-	ctx->timer.expired = TIME_IDLE_JIFFIES;
-	add_timer(ctx->timer);
-	*/
 }
 
 
@@ -2568,15 +2555,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		/* case of no overlap */
 		if ((e == NULL) || (e->lba >= (lba + nr_sectors)) || ((e->lba + e->len) <= lba))  {
 			zero_fill_clone(ctx, read_ctx, clone);
-			if (origlba >= 15597042700) {
-				printk(KERN_ERR "\n %s case of zero overlap! origlba: %llu", __func__, origlba);
-			}
 			break;
-		}
-
-		if (origlba >= 15597042700) {
-			printk(KERN_ERR "\n %s Searching: origlba: %llu lba: %llu len: %lu. Found e->lba: %llu, e->pba: %llu, e->len: %lu \n", 
-				__func__, origlba, lba, nr_sectors, e->lba, e->pba, e->len);
 		}
 
 		/* Case of Overlap, e always overlaps with bio */
@@ -6540,6 +6519,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	atomic_set(&ctx->sit_ref, 0);
 	atomic_set(&ctx->tm_flush_count, 0);
 	atomic_set(&ctx->sit_flush_count, 0);
+	atomic_set(&ctx->ioidle, 1);
 	ctx->target = 0;
 	atomic_set(&ctx->nr_pending_writes, 0);
 	atomic_set(&ctx->nr_revmap_flushes, 0);
