@@ -472,6 +472,7 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, size_t len, u6
 	struct extent * e;
 	int count = 0, ret=0, print = 0;
 
+
 	if (!root)  {
 		printk(KERN_ERR "\n Root is NULL! \n");
 		BUG();
@@ -1908,7 +1909,7 @@ again:
 	}
 	//flush_workqueue(ctx->tm_wq);
 	//flush_workqueue(ctx->writes_wq);
-	printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %d", zonenr, gc_mode);
+	//printk(KERN_ERR "\n Running GC!! zone_to_clean: %u  mode: %d", zonenr, gc_mode);
 	if (unlikely(!list_empty(&ctx->gc_extents->list))) {
 		free_gc_extents(ctx);
 		printk(KERN_ERR "\n %s ************ extent list is not empty! Line: %d ", __func__, __LINE__);
@@ -2095,7 +2096,8 @@ static int gc_thread_fn(void * data)
 	struct task_struct *tsk = gc_th->lsdm_gc_task;
 	u64 start_t, end_t, interval = 0;
 
-	wait_ms = gc_th->min_sleep_time;
+	//wait_ms = gc_th->min_sleep_time;
+	wait_ms = gc_th->no_gc_sleep_time;
 	mutex_init(&ctx->gc_lock);
 	printk(KERN_ERR "\n %s executing! pid: %d", __func__, tsk->pid);
 	set_freezable();
@@ -2112,7 +2114,7 @@ static int gc_thread_fn(void * data)
 
 		 /* give it a try one time */
                 if (gc_th->gc_wake) {
-			if (ctx->nr_freezones < ctx->middle_watermark) {
+			if (ctx->nr_freezones < ctx->lower_watermark) {
 				/* concurrent GC, no pauses */
 				mode = FG_GC;
 			} else {
@@ -2166,7 +2168,7 @@ static int gc_thread_fn(void * data)
 #define DEF_GC_THREAD_URGENT_SLEEP_TIME 500     /* 500 ms */
 #define DEF_GC_THREAD_MIN_SLEEP_TIME    60000   /* milliseconds */
 #define DEF_GC_THREAD_MAX_SLEEP_TIME    120000
-#define DEF_GC_THREAD_NOGC_SLEEP_TIME   1500000  /* wait 2 min */
+#define DEF_GC_THREAD_NOGC_SLEEP_TIME   150000000  /* wait 200 min */
 #define LIMIT_INVALID_BLOCK     40 /* percentage over total user space */
 #define LIMIT_FREE_BLOCK        40 /* percentage over invalid + free space */
 
@@ -4714,11 +4716,11 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 	BUG_ON(pba > ctx->sb->max_pba);
 	ptr->extents[entry_nr].len = nrsectors;
 	if((pba + nrsectors) > ctx->sb->max_pba) {
-		printk(KERN_ERR "\n %s %d lba: %lld pba: %lld nrsectors: %d max_pba: %lld entry_nr: %d ptr: %p\n" , __func__, __LINE__, lba, pba, ctx->sb->max_pba, nrsectors, entry_nr, ptr);
+		printk(KERN_ERR "\n %s %d lba: %lld pba: %lld nrsectors: %d max_pba: %llu entry_nr: %d ptr: %p\n" , __func__, __LINE__, lba, pba, ctx->sb->max_pba, nrsectors, entry_nr, ptr);
 		BUG();
 	}
 	if((lba + nrsectors) > ctx->sb->max_pba) {
-		printk(KERN_ERR "\n %s %d lba: %lld pba: %lld nrsectors: %d max_pba: %lld entry_nr: %d ptr: %p\n" , __func__, __LINE__, lba, pba, ctx->sb->max_pba, nrsectors, entry_nr, ptr);
+		printk(KERN_ERR "\n %s %d lba: %lld pba: %lld nrsectors: %d max_pba: %llu entry_nr: %d ptr: %p\n" , __func__, __LINE__, lba, pba, ctx->sb->max_pba, nrsectors, entry_nr, ptr);
 		BUG();
 	}
 	if (NR_EXT_ENTRIES_PER_SEC == (entry_nr+1)) {

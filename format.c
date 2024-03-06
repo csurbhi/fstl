@@ -43,6 +43,7 @@ int open_disk(char *dname)
 	fd = open(dname, O_RDWR);
 	if (fd < 0) {
 		perror("Could not open the disk: ");
+		printf("\n");
 		exit(errno);
 	}
 	printf("\n %s opened with fd: %d ", dname, fd);
@@ -116,9 +117,14 @@ __le32 get_zone_count(int fd)
 		return zone_count;
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/zonesz));
+	//return 16500;
+	//return 28200;
+	return zone_count;
+	//return 4500;
+	return 9000;
 	//return 10000;
-	return 906;
-	//return 832;
+	// 2048 GB
+	//return 8192;
 	//return 29807;
 	//return (capacity/zonesz);
 	//return 100;
@@ -342,16 +348,19 @@ void read_sb(int fd, unsigned long sectornr)
 	ret = lseek64(fd, offset, SEEK_SET);
 	if (ret < 0) {
 		perror("\n Could not lseek64: ");
+		printf("\n");
 		exit(errno);
 	}
 
 	ret = read(fd, sb, BLK_SZ);
 	if (ret < 0) {
 		perror("\n COuld not read the sb: ");
+		printf("\n");
 		exit(errno);
 	}
 	if (sb->magic != STL_SB_MAGIC) {
 		printf("\n wrong superblock!");
+		printf("\n");
 		exit(-1);
 	}
 	printf("\n sb->magic: %d", sb->magic);
@@ -359,8 +368,8 @@ void read_sb(int fd, unsigned long sectornr)
 	printf("\n sb->log_sector_size %d", sb->log_sector_size);
 	printf("\n sb->log_block_size %d", sb->log_block_size);
 	printf("\n sb->log_zone_size: %d", sb->log_zone_size);
-	printf("\n sb->blk_count_ckpt %d", sb->blk_count_ckpt);
-	printf("\n sb->max_pba: %d ", sb->max_pba);
+	printf("\n sb->blk_count_ckpt %lu", sb->blk_count_ckpt);
+	printf("\n sb->max_pba: %lu ", sb->max_pba);
 	//printf("\n sb-> %d", sb->);
 	printf("\n sb->zone_count: %d", sb->zone_count);
 	printf("\n Read verified!!!");
@@ -387,6 +396,7 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 	if (ret < 0) {
 		printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, pba, ret);
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n");
 		exit(errno);
 	}
 	memset(buffer, 0, BLK_SZ);
@@ -395,6 +405,7 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 		ret = write(fd, buffer, BLK_SZ);
 		if (ret < 0) {
 			perror("Error while writing: ");
+			printf("\n");
 			exit(errno);
 		}
 	}
@@ -413,12 +424,14 @@ void read_block(int fd, sector_t pba, unsigned nr_blks)
 	ret = lseek64(fd, (pba * SECTOR_SIZE), SEEK_SET);
 	if (ret < 0) {
 		perror(">>>> (before read) Error in lseek64: \n");
+		printf("\n");
 		exit(errno);
 	}
 	for (i=0; i<nr_blks; i++) {
 		ret = read(fd, buffer, 4096);
 		if (ret < 4096) {
 			perror("Error while reading: ");
+			printf("\n");
 			exit(errno);
 		}
 		for(j=0; j<ret; j++) {
@@ -497,6 +510,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	if (ioctl(fd, BLKGETZONESZ, &zonesz) < 0) {
 		sprintf(str, "Get zone size failed %d (%s)\n", errno, strerror(errno));
 		perror(str);
+		printf("\n");
 		exit(errno);
 	}
 	printf("\n ZONE size: %llu", zonesz);
@@ -513,6 +527,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	if (ioctl(fd, BLKGETNRZONES, &zone_count) < 0) {
 		sprintf(str, "Get nr of zones ioctl failed %d (%s)\n", errno, strerror(errno));
 		perror(str);
+		printf("\n");
 		exit(errno);
 	}
 
@@ -629,6 +644,7 @@ struct lsdm_ckpt * read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba
 	ret = lseek64(fd, offset, SEEK_SET);
 	if (ret < 0) {
 		perror("in read_ckpt lseek64 failed: ");
+		printf("\n");
 		exit(-1);
 	}
 
@@ -636,6 +652,7 @@ struct lsdm_ckpt * read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba
 	if (ret < 0) {
 		printf("\n read from disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		perror("\n Could not read from disk because: ");
+		printf("\n");
 		exit(errno);
 	}
 	printf("\n Read checkpoint, ckpt->magic: %d ckpt->hot_frontier_pba: %lld", ckpt->magic, ckpt->hot_frontier_pba);
@@ -679,6 +696,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	if (ret < 0) {
 		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n");
 		exit(errno);
 	}
 	memset(buffer, 0, BLK_SZ);
@@ -686,6 +704,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	ret = write(fd, buffer, BLK_SZ);
 	if (ret < 0) {
 		perror("Error while writing ckpt1: ");
+		printf("\n");
 		exit(errno);
 	}
 
@@ -694,11 +713,13 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	if (ret < 0) {
 		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n");
 		exit(errno);
 	}
 	ret = write(fd, ckpt, BLK_SZ);
 	if (ret < 0) {
 		perror("Error while writing ckpt2: ");
+		printf("\n");
 		exit(errno);
 	}
 
@@ -717,11 +738,13 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	if (ret < 0) {
 		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n");
 		exit(errno);
 	}
 	ret = read(fd, ckpt1, BLK_SZ);
 	if (ret < 0) {
 		perror("Error while writing: ");
+		printf("\n");
 		exit(errno);
 	}
 
@@ -799,6 +822,7 @@ void report_zone(unsigned int fd, unsigned long zonenr, struct blk_zone * bzone)
 	if (ret) {
 		fprintf(stderr, "\n blkreportzone for zonenr: %d ioctl failed, ret: %d ", zonenr, ret);
 		perror("\n blkreportzone failed because: ");
+		printf("\n");
 		return;
 	}
 	assert(bzr->nr_zones == 1);
@@ -837,6 +861,7 @@ long reset_shingled_zones(int fd)
 	if (ret) {
 		fprintf(stdout, "\n blkreportzone for zonenr: %d ioctl failed, ret: %d ", 0, ret);
 		perror("\n blkreportzone failed because: ");
+		printf("\n");
 		return;
 	}
 
@@ -859,10 +884,11 @@ long reset_shingled_zones(int fd)
 			if (ret) {
 				fprintf(stdout, "\n Could not reset zonenr with sector: %ld", bz_range.sector);
 				perror("\n blkresetzone failed because: ");
+				printf("\n");
 			}
 			//report_zone(fd, i, &bzr->zones[i]);
 		} else {
-			printf("\n zonenr: %d is a non shingled zone! ", i);
+			//printf("\n zonenr: %d is a non shingled zone! ", i);
 			cmr++;
 		}
 	}
@@ -894,6 +920,7 @@ int main(int argc, char * argv[])
 	blkdev = argv[1];
 	fd = open_disk(blkdev);
 	cmr = reset_shingled_zones(fd);
+	printf("\n Number of cmr zones: %d ", cmr);
 	sb1 = write_sb(fd, 0, cmr);
 	printf("\n Superblock written at pba: %d", pba);
 	printf("\n sizeof sb: %ld", sizeof(struct lsdm_sb));
@@ -917,6 +944,7 @@ int main(int argc, char * argv[])
 	printf("\n Segment Information Table written");
 	pba = 0;
 	free(sb1);
+	return 0;
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 0;
 	char str[SECTOR_SIZE];
@@ -924,6 +952,7 @@ int main(int argc, char * argv[])
 	if (ioctl(fd, BLKGETZONESZ, &zone_lbas) < 0) {
 		sprintf(str, "Get zone size failed %d (%s)\n", errno, strerror(errno));
 		perror(str);
+		printf("\n");
 		exit(errno);
 	}
 
