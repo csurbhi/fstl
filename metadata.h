@@ -17,7 +17,7 @@
 #define NR_SECTORS_IN_BLK 8
 #define BITS_IN_BYTE 8
 #define LOG_SECTOR_SIZE 9
-#define SECTOR_SHIFT 3
+#define SECTOR_BLK_SHIFT 3
 
 
 #define REVMAP_PRIV_MAGIC 0x5
@@ -103,7 +103,7 @@ struct lsdm_bioctx {
 struct extent_entry {
 	sector_t lba;
 	sector_t pba;
-	size_t len;
+	sector_t len;
 };
 
 struct lsdm_sub_bioctx {

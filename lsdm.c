@@ -1224,7 +1224,7 @@ static int read_gc_extents(struct ctx *ctx)
 	list_for_each(pos, &ctx->gc_extents->list) {
 		gc_extent = list_entry(pos, struct gc_extents, list);
 		if ((gc_extent->e.len == 0) || ((gc_extent->e.pba + gc_extent->e.len) > ctx->sb->max_pba)) {
-			printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %ld ", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+			printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %llu ", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 			BUG();
 		}
 		if (read_extent_bio(ctx, gc_extent)) {
@@ -1726,7 +1726,7 @@ int print_gc_extents(struct ctx *ctx, int zonenr)
 			temp.lba = e->lba + diff;
 			temp.len = e->len - diff;
 			BUG_ON(!temp.len);
-			printk(KERN_ERR "\n %s Adjusted pba (lba: %llu, pba: %llu len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
+			printk(KERN_ERR "\n %s Adjusted pba (lba: %llu, pba: %llu len: %llu) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
 		} else {
 			/*
 			 * 	e------
@@ -1735,14 +1735,14 @@ int print_gc_extents(struct ctx *ctx, int zonenr)
 			temp.pba = e->pba;
 			temp.lba = e->lba;
 			temp.len = e->len;
-			printk(KERN_ERR "\n %s Copied e (lba: %llu, pba: %llu len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
+			printk(KERN_ERR "\n %s Copied e (lba: %llu, pba: %llu len: %llu) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
 		}
 		/* if start is 0, len is 4, then you want to read 4 sectors. If last_pba is
 		 * 3, you want len to be 4.
 		 */
 		if (temp.pba + temp.len >= last_pba + 1) {
 			temp.len = last_pba - temp.pba + 1;
-			printk(KERN_ERR "\n %s Adjusted len: (lba: %llu, pba: %llu len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
+			printk(KERN_ERR "\n %s Adjusted len: (lba: %llu, pba: %llu len: %llu) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
 		}
 		total_len = total_len + temp.len;
 		pba = temp.pba + temp.len;
