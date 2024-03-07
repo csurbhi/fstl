@@ -140,7 +140,8 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones)
 	struct tm_entry *entry;
 	char buffer[BLK_SZ];
 	u64 offset;
-	unsigned data_pba, remaining_entries;
+	unsigned remaining_entries;
+	unsigned long long data_pba;
 	int i, j, ret;
 
 	u64 nr_tm_entries = (nr_zones * NR_BLKS_IN_ZONE);
@@ -170,7 +171,7 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones)
 
 	remaining_entries = nr_tm_entries;
 	printf("\n remaining entries: %llu #entries per blk: %llu nr_tm_blks: %llu", remaining_entries, nr_tm_entries_per_blk, nr_tm_blks);
-	int lba = 0;
+	unsigned long long lba = 0;
 	for(i=0; i<nr_tm_blks; i++) {
 		memset(buffer, 0, BLK_SZ);
 		memset(entry, 0, sizeof(struct tm_entry));
@@ -178,7 +179,8 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones)
 		for(j=0; j<nr_tm_entries_per_blk; j++) {
 			entry->pba = data_pba;
 			memcpy(buffer + offset, entry, sizeof(struct tm_entry));
-			//printf("\n lba: %llu, pba: %llu ", lba, data_pba);
+			if ((lba == 9437184) || (data_pba == 9437184)) 
+				printf("\n >>>>>>>>>>>>>>>>>>>>>>> lba: %llu, pba: %llu ", lba, data_pba);
 			data_pba = data_pba + NR_SECTORS_IN_BLK;
 			lba = lba + NR_SECTORS_IN_BLK;
 			assert(data_pba < sb->max_pba);
@@ -351,11 +353,14 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 	ckpt->version = 0;
 	ckpt->user_block_count = sb->zone_count_main << (sb->log_zone_size - sb->log_block_size);
 	ckpt->nr_invalid_zones = 0;
-	ckpt->hot_frontier_pba = sb->zone0_pba + (nr_zones << (sb->log_zone_size - sb->log_sector_size));
+	ckpt->hot_frontier_pba = sb->zone0_pba + ((__le64) nr_zones << (sb->log_zone_size - sb->log_sector_size));
+	printf("\n <3 <3 <3 <3 <3 <3 <3...................     ckpt->hot_frontier_pba = %llu ", ckpt->hot_frontier_pba);
 	/* Next zone is gc frontier */
 	ckpt->warm_gc_frontier_pba = ckpt->hot_frontier_pba + (1 << (sb->log_zone_size - sb->log_sector_size));
+	printf("\n <3 <3 <3 <3 <3 <3 <3...................     ckpt->warm_frontier_pba = %llu ", ckpt->hot_frontier_pba);
+	printf("\n");
 	printf("\n last_gc_pba: %llu , max_pba: %llu \n", ckpt->warm_gc_frontier_pba +  (1 << (sb->log_zone_size - sb->log_sector_size)), sb->max_pba);
-	assert(ckpt->warm_gc_frontier_pba +  (1 << (sb->log_zone_size - sb->log_sector_size)) <= sb->max_pba);
+	assert(ckpt->warm_gc_frontier_pba  <= sb->max_pba);
 	ckpt->nr_free_zones = sb->zone_count_main - 2 - nr_zones; //1 for the current frontier and gc frontier
 	ckpt->elapsed_time = 0;
 	ckpt->clean = 1;  /* 1 indicates clean datastructures */
@@ -395,7 +400,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 
 	printf("\n 1) ckpt->nr_free_zones: %llu", ckpt->nr_free_zones);
 	printf("\n Checkpoint written at pba: %llu", ckpt_pba);
-	printf("\n ckpt->magic: %d ckpt->hot_frontier_pba: %lld", ckpt->magic, ckpt->hot_frontier_pba);
+	printf("\n ckpt->magic: %d ckpt->hot_frontier_pba: %llu", ckpt->magic, ckpt->hot_frontier_pba);
 	printf("\n sb->zone0_pba: %llu", sb->zone0_pba);
 	printf("\n warm_gc_frontier_pba: %llu" , ckpt->warm_gc_frontier_pba);
 
