@@ -353,7 +353,7 @@ struct extent {
 	struct rb_node rb;	/* 20 bytes */
 	sector_t lba;		/* 512B LBA */
 	sector_t pba;		
-	u32      len;
+	sector_t len;
 	void * ptr_to_rev;
 }; 
 
