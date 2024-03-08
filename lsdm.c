@@ -48,6 +48,7 @@
 #include <linux/blk_types.h>
 #include <linux/blkdev.h>
 #include <linux/refcount.h>
+#include <linux/debugfs.h>
 
 #include "metadata.h"
 #define DM_MSG_PREFIX "lsdm"
@@ -139,6 +140,8 @@ void __exit ls_dm_exit(void);
 
 long nrpages;
 
+struct dentry * debug_dir;
+
 void lsdm_ioidle(struct mykref *kref);
 
 static inline void mykref_init(struct mykref *kref)
@@ -183,7 +186,7 @@ static int get_new_zone(struct ctx *ctx);
 #define IN_CLEANING 1
 #define STALLED_WRITE 2
 
-static void extent_init(struct extent *e, sector_t lba, sector_t pba, unsigned len)
+static void extent_init(struct extent *e, sector_t lba, sector_t pba, sector_t len)
 {
 	memset(e, 0, sizeof(*e));
 	e->lba = lba;
@@ -260,11 +263,11 @@ static struct extent *_lsdm_rb_geq(struct rb_root *root, off_t lba, int print)
 	while (node) {
 		e = container_of(node, struct extent, rb);
 		if (print) {
-			printk(KERN_ERR "\n %s Searching lba: %lu, found:  (e->lba: %llu, e->pba: %llu e->len: %u)", __func__, lba, e->lba, e->pba, e->len); 
+			printk(KERN_ERR "\n %s Searching lba: %lu, found:  (e->lba: %llu, e->pba: %llu e->len: %llu)", __func__, lba, e->lba, e->pba, e->len); 
 		}
 		if ((e->lba >= lba) && (!higher || (e->lba < higher->lba))) {
 			higher = e;
-			//printk(KERN_ERR "\n %s Searching lba: %llu, higher:  (e->lba: %llu, e->pba: %llu e->len: %lu)", __func__, lba, e->lba, e->pba, e->len); 
+			//printk(KERN_ERR "\n %s Searching lba: %llu, higher:  (e->lba: %llu, e->pba: %llu e->len: %llu)", __func__, lba, e->lba, e->pba, e->len); 
 		}
 		if (e->lba > lba) {
 			node = node->rb_left;
@@ -466,7 +469,7 @@ void print_sub_tree(struct rb_node *parent)
 		left= rb_entry(parent->rb_left, struct rev_extent, rb);
 		BUG_ON(left->pba >= rev_e->pba);
 	}
-	printk(KERN_ERR "\n %s pba: %llu points to (lba: %llu, pba: %llu, len: %d) ",  __func__, rev_e->pba, e->lba, e->pba, e->len);
+	printk(KERN_ERR "\n %s pba: %llu points to (lba: %llu, pba: %llu, len: %llu) ",  __func__, rev_e->pba, e->lba, e->pba, e->len);
 	BUG_ON(rev_e->pba != e->pba);
 	if (parent->rb_right) {
 		right = rb_entry(parent->rb_right, struct rev_extent, rb);
@@ -676,8 +679,8 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
 				/* We find an overlapping pba when the gc_extent was split due to space
 				 * requirements in the gc frontier
 				 */
-				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %u) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
-				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %u) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %llu) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
 				BUG_ON("1. Bug while adding revmap entry ! (less than case)");
 			}
 
@@ -689,15 +692,15 @@ struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent
 				/* We find an overlapping pba when the gc_extent was split due to space
 				 * requirements in the gc frontier
 				 */
-				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %u) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
-				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %u) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %llu) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
+				printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
 				BUG_ON("2. Bug while adding revmap entry !");
 			}
 			link = &(parent->rb_right);
 			continue;
 		} 
-		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %u) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
-		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %u) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
+		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, Existing -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %llu) \n", __func__, r_new->pba, e->lba, e->pba, get_zone_nr(ctx, e->pba), e->len);
+		printk(KERN_ERR "\n %s Error while Inserting pba: %llu, New -> pointing to (lba, pba (zone), len): (%llu, %llu (%u), %llu) \n", __func__, r_new->pba, extent->lba, extent->pba, get_zone_nr(ctx, extent->pba), extent->len);
 		BUG_ON("3. Bug while adding revmap entry !");
 	}
 	//printk( KERN_ERR "\n %s Inserting pba: %llu, pointing to (lba, len): (%llu, %u)", __func__, r_new->pba, extent->lba, extent->len);
@@ -737,7 +740,7 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 		r_e = e->ptr_to_rev;
 		BUG_ON(!r_e);
 		if (e->pba != r_e->pba) {
-			printk(KERN_ERR "\n %s parent->lba: %llu, parent->pba: %llu, parent->len: %u r_e->pba: %llu", __func__, e->lba, e->pba, e->len, r_e->pba);
+			printk(KERN_ERR "\n %s parent->lba: %llu, parent->pba: %llu, parent->len: %llu r_e->pba: %llu", __func__, e->lba, e->pba, e->len, r_e->pba);
 			BUG();
 		}
 		if (e->lba >= (new->lba + new->len)) {
@@ -795,7 +798,7 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 {
 	struct extent *e = NULL, *new = NULL, *split = NULL, *prev = NULL;
 	struct extent *tmp = NULL;
-	int diff = 0;
+	sector_t diff = 0;
 
 	//printk(KERN_ERR "\n Entering %s lba: %llu, pba: %llu, len:%ld ", __func__, lba, pba, len);
 	
@@ -847,7 +850,7 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 		if (lsdm_rb_insert(ctx, e)) {
 			printk(KERN_ERR"\n Corruption in case 1!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
-			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %llu diff:%llu ", e->lba, e->pba, e->len, diff); 
 			printk(KERN_ERR"\n"); 
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
@@ -857,19 +860,19 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 
 		//printk("\n Case1: Modified: (new->lba: %llu, new->pba: %llu, new->len: %lu) ", e->lba, e->pba, e->len);
 		if (lsdm_rb_insert(ctx, new)) {
-			printk(KERN_ERR"\n Corruption in case 1.1, diff: %d !! ", diff);
+			printk(KERN_ERR"\n Corruption in case 1.1, diff: %llu !! ", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
-			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %llu diff:%llu ", e->lba, e->pba, e->len, diff); 
 			printk(KERN_ERR"\n"); 
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
 		}
 		BUG_ON(split->len <= 0);
 		if (lsdm_rb_insert(ctx, split)) {
-			printk(KERN_ERR"\n Corruption in case 1.2!! diff: %d", diff);
+			printk(KERN_ERR"\n Corruption in case 1.2!! diff: %llu", diff);
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
-			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff);
-			printk(KERN_ERR "\n split->lba: %lld split->pba: %lld split->len: %d ", split->lba, split->pba, split->len);
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %llu diff:%llu ", e->lba, e->pba, e->len, diff);
+			printk(KERN_ERR "\n split->lba: %lld split->pba: %lld split->len: %llu ", split->lba, split->pba, split->len);
 			printk(KERN_ERR"\n"); 
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
@@ -915,7 +918,7 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 		if (lsdm_rb_insert(ctx, e)) {
 			printk(KERN_ERR"\n Corruption in case 2!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
-			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %llu diff:%llu ", e->lba, e->pba, e->len, diff); 
 			printk(KERN_ERR"\n"); 
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
@@ -952,7 +955,7 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 		if (lsdm_rb_insert(ctx, new)) {
 			printk(KERN_ERR"\n Corruption in case 3!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
-			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %llu diff:%llu ", e->lba, e->pba, e->len, diff); 
 			printk(KERN_ERR"\n"); 
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
@@ -976,12 +979,12 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 	 */
 	if ((lba <= e->lba) && ((lba + len) > e->lba) && ((lba + len) < (e->lba + e->len)))  {
 		diff = lba + len - e->lba;
-		//printk("\n Case4, Removing: (e->lba: %llu, e->pba: %llu, e->len: %lu) diff: %d", e->lba, e->pba, e->len, diff);
+		//printk("\n Case4, Removing: (e->lba: %llu, e->pba: %llu, e->len: %lu) diff: %llu", e->lba, e->pba, e->len, diff);
 		lsdm_rb_remove(ctx, e);
 		if (lsdm_rb_insert(ctx, new)) {
 			printk(KERN_ERR"\n Corruption in case 4.1!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
-			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %llu diff:%llu ", e->lba, e->pba, e->len, diff); 
 			printk(KERN_ERR"\n"); 
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
@@ -995,7 +998,7 @@ static int lsdm_rb_update_range(struct ctx *ctx, sector_t lba, sector_t pba, siz
 		if (lsdm_rb_insert(ctx, e)) {
 			printk(KERN_ERR"\n Corruption in case 4.2!! ");
 			printk(KERN_ERR "\n lba: %lld pba: %lld len: %ld ", lba, pba, len); 
-			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %d diff:%d ", e->lba, e->pba, e->len, diff); 
+			printk(KERN_ERR "\n e->lba: %lld e->pba: %lld e->len: %llu diff:%llu ", e->lba, e->pba, e->len, diff); 
 			printk(KERN_ERR"\n"); 
 			printk(KERN_ERR "\n RBTree corruption!!" );
 			BUG();
@@ -1162,6 +1165,9 @@ static int add_extent_to_gclist(struct ctx *ctx, struct extent_entry *e)
 	int maxlen = (BIO_MAX_PAGES >> 1) << SECTOR_BLK_SHIFT;
 	int temp = 0;
 	unsigned int pagecount, s8, count = 0;
+	
+	if (!e->len)
+		return 0;
 
 	while (1) {
 		BUG_ON(e->len == 0);
@@ -1787,7 +1793,7 @@ int print_gc_extents(struct ctx *ctx, int zonenr)
 	e = rev_e->ptr_to_tm;
 	while(pba <= last_pba) {
 		e = rev_e->ptr_to_tm;
-		printk(KERN_ERR "\n %s Looking for pba: %llu! Found e, LBA: %llu, PBA: %llu, len: %u e->(pba+len): %llu, remaining: %llu", __func__, pba, e->lba, e->pba, e->len, e->pba + e->len, last_pba -(e->pba + e->len));
+		printk(KERN_ERR "\n %s Looking for pba: %llu! Found e, LBA: %llu, PBA: %llu, len: %llu e->(pba+len): %llu, remaining: %llu", __func__, pba, e->lba, e->pba, e->len, e->pba + e->len, last_pba -(e->pba + e->len));
 		
 		/* Don't change e directly, as e belongs to the
 		 * reverse map rb tree and we have the node address
@@ -1896,7 +1902,7 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 			 * 	pba
 			 */
 			if((e->pba + e->len) < pba) {
-				printk(KERN_ERR "\n %s BUG: (GC) considering pba: %llu, found: (lba: %llu, pba: %llu len: %u) last_pba: %llu", __func__, pba, e->lba, e->pba, e->len, last_pba);
+				printk(KERN_ERR "\n %s BUG: (GC) considering pba: %llu, found: (lba: %llu, pba: %llu len: %llu) last_pba: %llu", __func__, pba, e->lba, e->pba, e->len, last_pba);
 				BUG();
 			}
 			diff = pba - e->pba;
@@ -1922,6 +1928,9 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 		if (temp.pba + temp.len >= last_pba + 1) {
 			temp.len = last_pba - temp.pba + 1;
 			//printk(KERN_ERR "\n %s Adjusted len: (lba: %llu, pba: %llu len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
+		}
+		if (!temp.len) {
+			printk(KERN_ERR "\n %s Copied e (lba: %llu, pba: %llu len: %llu) last_pba: %llu", __func__, e->lba, e->pba, e->len, last_pba);
 		}
 		total_len = total_len + temp.len;
 		pba = temp.pba + temp.len;
@@ -2073,7 +2082,7 @@ again:
 	ctx->gc_total += interval;
 	ctx->gc_count += gc_count;
 	ctx->gc_average = ctx->gc_total/ ctx->gc_count;
-	printk(KERN_ERR "\n %s gc_count: %llu total time: %llu (milliseconds) gc_writes: %llu", __func__, gc_count, interval, gc_writes);
+	printk(KERN_ERR "\n %s gc_count: %llu total time: %llu (milliseconds) gc_writes: %llu gc_mode:%d ", __func__, gc_count, interval, gc_writes, gc_mode);
 	gc_writes = 0;
 	//printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
 	/* while gc thread was running, urgent mode triggered */
@@ -2138,7 +2147,7 @@ void print_sub_extents(struct rb_node *parent)
 	r_e = e->ptr_to_rev;
 	BUG_ON(e->pba != r_e->pba);
 	print_sub_extents(parent->rb_left);
-	printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %u", __func__, e->lba, e->pba, e->len);
+	printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %llu", __func__, e->lba, e->pba, e->len);
 	print_sub_extents(parent->rb_right);
 }
 
@@ -6640,7 +6649,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	ctx->lower_watermark = 3;
 	ctx->middle_watermark = 6;
 	ctx->higher_watermark = 10;
-	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->higher_watermark);
+	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
 	//ctx->higher_watermark = ctx->lower_watermark >> 2; 
 	/*
 	if (ctx->sb->zone_count > SMALL_NR_ZONES) {
@@ -6673,6 +6682,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
 	*/
+	debugfs_create_u32("freezones", 0444, debug_dir, &ctx->ckpt->nr_free_zones);
 	printk(KERN_ERR "\n ctr() done!!");
 	return 0;
 /* failed case */
@@ -6876,12 +6886,19 @@ static struct target_type lsdm_target = {
 /* Called on module entry (insmod) */
 int __init ls_dm_init(void)
 {
+	debug_dir = debugfs_create_dir("lsdm", NULL);
+	if (!debug_dir) {
+		printk(KERN_ERR "\n Could not create directory in debugfs ");
+		return -1;
+	}
+	
 	return dm_register_target(&lsdm_target);
 }
 
 /* Called on module exit (rmmod) */
 void __exit ls_dm_exit(void)
 {
+	debugfs_remove_recursive(debug_dir);
 	dm_unregister_target(&lsdm_target);
 }
 
@@ -6889,6 +6906,6 @@ void __exit ls_dm_exit(void)
 module_init(ls_dm_init);
 module_exit(ls_dm_exit);
 
-MODULE_DESCRIPTION(DM_NAME "log structured SMR Translation Layer");
+MODULE_DESCRIPTION(DM_NAME " Log Structured SMR Translation Layer");
 MODULE_AUTHOR("Surbhi Palande <csurbhi@gmail.com>");
 MODULE_LICENSE("GPL");
