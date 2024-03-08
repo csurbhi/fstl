@@ -56,6 +56,87 @@
 
 #undef LSDM_DEBUG
 
+void print_sub_tree(struct rb_node *parent);
+void print_revmap_tree(struct ctx *ctx);
+struct rev_extent * lsdm_revmap_find_print(struct ctx *ctx, u64 pba, size_t len, u64 last_pba);
+struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, size_t len, u64 last_pba, const char * caller);
+struct rev_extent * lsdm_rb_revmap_insert(struct ctx *ctx, struct extent *extent);
+int lsdm_flush_thread_start(struct ctx * ctx);
+int lsdm_flush_thread_stop(struct ctx *ctx);
+void read_gcextent_done(struct bio * bio);
+int complete_revmap_blk_flush(struct ctx * ctx, struct page *page);
+int verify_gc_zone(struct ctx *ctx, int zonenr, sector_t pba);
+void print_memory_usage(struct ctx *ctx, const char *action);
+int create_gc_extents(struct ctx *ctx, int zonenr);
+void print_sub_extents(struct rb_node *parent);
+int lsdm_gc_thread_start(struct ctx *ctx);
+int lsdm_gc_thread_stop(struct ctx *ctx);
+void invoke_gc(unsigned long ptr);
+void no_op(struct kref *kref);
+void complete_small_reads(struct bio *clone);
+struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_read_ctx * readctx);
+void request_start_unaligned(struct ctx *ctx, struct bio *clone, struct app_read_ctx *read_ctx, sector_t pba, sector_t zerolen);
+int zero_fill_inital_bio(struct ctx *ctx, struct bio *bio, struct bio *clone, sector_t zerolen, struct app_read_ctx *read_ctx);
+int handle_partial_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, sector_t overlap, struct app_read_ctx *read_ctx, sector_t pba);
+int handle_full_overlap(struct ctx *ctx, struct bio * bio, struct bio *clone, sector_t nr_sectors, sector_t pba, struct app_read_ctx *read_ctx, int print);
+void remove_partial_entries(struct ctx *ctx, struct bio * bio);
+int is_disk_full(struct ctx *ctx);
+struct sit_page * search_sit_kv_store(struct ctx *ctx, sector_t pba, struct rb_node **parent);
+struct sit_page * search_sit_blk(struct ctx *ctx, sector_t blknr);
+void mark_zone_erroneous(struct ctx *ctx, sector_t pba);
+void get_byte_string(char byte, char *str);
+void flush_revmap_bitmap(struct ctx *ctx);
+void flush_checkpoint(struct ctx *ctx);
+void flush_sit_nodes(struct ctx *ctx, struct rb_node *node);
+void remove_gc_cost_nodes(struct ctx *ctx);
+void remove_gc_zone_nodes(struct ctx *ctx);
+u32 calculate_crc(struct ctx *ctx, struct page *page);
+void update_checkpoint(struct ctx *ctx);
+void move_write_frontier(struct ctx *ctx, sector_t s8);
+struct page * read_tm_page(struct ctx * ctx, u64 lba);
+void free_translation_pages(struct ctx *ctx);
+void remove_sit_page(struct ctx *ctx, struct rb_node *node);
+void mark_revmap_bit(struct ctx *ctx, u64 pba);
+void clear_revmap_bit(struct ctx *ctx, u64 pba);
+void revmap_blk_flushed(struct bio *bio);
+int flush_revmap_block_disk(struct ctx * ctx, struct page *page, sector_t revmap_pba);
+void shrink_next_entries(struct ctx *ctx, sector_t lba, sector_t pba, unsigned long len, struct page *page);
+int merge_rev_entries(struct ctx * ctx, sector_t lba, sector_t pba, unsigned long len, struct page *page);
+void write_done(struct kref *kref);
+void sub_write_done(struct work_struct * w);
+void sub_write_err(struct work_struct * w);
+void lsdm_clone_endio(struct bio * clone);
+int lsdm_write_checks(struct ctx *ctx, struct bio *bio);
+void fill_bio(struct bio *bio, sector_t pba, sector_t len, struct block_device *bdev, struct lsdm_sub_bioctx * subbio_ctx);
+void fill_subbioctx(struct lsdm_sub_bioctx * subbio_ctx, struct lsdm_bioctx *bioctx, sector_t lba, sector_t pba, sector_t len);
+int prepare_bio(struct bio * clone, sector_t s8, sector_t wf);
+struct bio * split_submit(struct bio *clone, sector_t s8, sector_t wf);
+int submit_bio_write(struct ctx *ctx, struct bio *clone);
+void lsdm_handle_write(struct ctx *ctx);
+int lsdm_write_io(struct ctx *ctx, struct bio *bio);
+void put_free_zone(struct ctx *ctx, u64 pba);
+struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba);
+int do_recovery(struct ctx *ctx);
+struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx);
+int add_tm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr);
+int read_revmap_bitmap(struct ctx *ctx);
+void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page);
+int read_revmap(struct ctx *ctx);
+sector_t get_zone_pba(struct lsdm_sb * sb, unsigned int segnr);
+void lsdm_subread_done(struct bio *clone);
+sector_t get_zone_end(struct lsdm_sb *sb, sector_t pba_start);
+int allocate_freebitmap(struct ctx *ctx);
+unsigned int get_cb_cost(struct ctx *ctx , u32 nrblks, u64 mtime);
+unsigned int get_cost(struct ctx *ctx, u32 nrblks, u64 age, char gc_mode);
+struct gc_zone_node * add_zonenr_gc_zone_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks);
+int add_sit_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, sector_t sector_nr);
+int read_seg_info_table(struct ctx *ctx);
+struct lsdm_sb * read_superblock(struct ctx *ctx, unsigned long pba);
+int read_metadata(struct ctx * ctx);
+int lsdm_map_io(struct dm_target *dm_target, struct bio *bio);
+int __init ls_dm_init(void);
+void __exit ls_dm_exit(void);
+
 long nrpages;
 
 void lsdm_ioidle(struct mykref *kref);
@@ -76,7 +157,7 @@ static inline int mykref_put(struct mykref *kref, void (*callback)(struct mykref
 	bool val;
 	val = refcount_dec_not_one(&kref->refcount);
 	if (val) {
-		WARN_ONCE(val, "\n mykref Value is already 1 \n");
+		//WARN_ONCE(val, "\n mykref Value is already 1 \n");
 	}
 	if (refcount_read(&kref->refcount) == 1) {
 		/* refcount is one */
@@ -369,6 +450,7 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 		}
 	}
 }
+
 
 void print_sub_tree(struct rb_node *parent)
 {
@@ -2864,14 +2946,11 @@ static void mark_zone_free(struct ctx *ctx , int zonenr, int resetZone)
 		}
 	}
 
-	//mutex_lock(&ctx->bm_lock);
-
 	/* The bit was 0 as its in use and hence we or it with
 	 * 1 to set it
 	 */
 	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
-	//mutex_unlock(&ctx->bm_lock);
 	//get_byte_string(bitmap[bytenr], str);
 	//printk(KERN_ERR "\n %s Freed zonenr: %d, bytenr: %d, bitnr: %d byte:%s", __func__, zonenr, bytenr, bitnr, str);
 	/* we need to reset the  zone that we are about to use */
@@ -5973,13 +6052,8 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 	int i = 0;
 	struct lsdm_sb *sb;
 	unsigned int nr_blks_in_zone;
-	int ret = 0;
        
-	if (!ctx)
-		return -1;
-
 	sb = ctx->sb;
-
 	nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
 	//printk("\n Number of seg entries: %u", nr_seg_entries);
 
@@ -5994,8 +6068,8 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			i++;
 			continue;
 		}
-		if (entry->vblocks == 0) {
-    			//trace_printk("\n *segnr: %u", *zonenr);
+		else if (entry->vblocks == 0) {
+    			//printk(KERN_ERR "\n *segnr: %u", *zonenr);
 			mark_zone_free(ctx , *zonenr, 1);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
@@ -6009,12 +6083,11 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			ctx->min_mtime = entry->mtime;
 		if (ctx->max_mtime < entry->mtime)
 			ctx->max_mtime = entry->mtime;
-		ret = 1;
 		entry = entry + 1;
 		*zonenr= *zonenr + 1;
 		i++;
 	}
-	return ret;
+	return 0;
 }
 
 /*
@@ -6082,15 +6155,11 @@ int read_seg_info_table(struct ctx *ctx)
 		}
 		else {
 			nr_seg_entries_read = nr_data_zones;
+			printk(KERN_ERR "\n Usual segentries: %d, (now) last blk has: %lu \n", nr_seg_entries_blk, nr_data_zones);
 		}
 		nr_data_zones = nr_data_zones - nr_seg_entries_read;
 		ret = read_seg_entries_from_block(ctx, entry0, nr_seg_entries_read, &zonenr);
-		if (!ret) {
-			__free_pages(sit_page, 0);
-			nrpages--;
-		} else {
-			add_sit_page_kv_store_by_blknr(ctx, sit_page, sectornr);
-		}
+		add_sit_page_kv_store_by_blknr(ctx, sit_page, sectornr);
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		//sectornr = sectornr + (ctx->q->limits.physical_block_size/ctx->q->limits.logical_block_size);
 		sectornr = sectornr + NR_SECTORS_IN_BLK;
@@ -6240,7 +6309,6 @@ int read_metadata(struct ctx * ctx)
 	printk(KERN_ERR "\n %s Nr of zones in main are: %llu, bitmap_bytes: %d, bitmap_bit: %d ", __func__, sb2->zone_count_main, ctx->bitmap_bytes, ctx->bitmap_bit);
 	if (sb2->zone_count_main % BITS_IN_BYTE > 0)
 		ctx->bitmap_bytes += 1;
-	ctx->nr_freezones = 0;
 	read_seg_info_table(ctx);
 	printk(KERN_INFO "\n %s ctx->nr_freezones: %u, ckpt->nr_free_zones:%u", __func__, ctx->nr_freezones, ckpt->nr_free_zones);
 	if (ctx->nr_freezones != ckpt->nr_free_zones) { 
@@ -6440,7 +6508,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 		goto free_ctx;
 	}
 
-	if (bdev_zoned_model(ctx->dev->bdev) == BLK_ZONED_NONE) {
+	if (!bdev_is_zoned(ctx->dev->bdev)) {
                 target->error = "Not a zoned block device";
                 ret = -EINVAL;
                 goto free_ctx;
@@ -6559,9 +6627,9 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	max_pba = (ctx->dev->bdev->bd_inode->i_size) / 512;
 	sprintf(ctx->nodename, "lsdm/%s", argv[1]);
 	ret = -EINVAL;
-	printk(KERN_ERR "\n device records max_pba: %llu", max_pba);
-	printk(KERN_ERR "\n formatted max_pba: %llu", ctx->max_pba);
 	if (ctx->max_pba > max_pba) {
+		printk(KERN_ERR "\n formatted max_pba (ctx->max_pba): %llu", ctx->max_pba);
+		printk(KERN_ERR "\n device records max_pba: %llu", max_pba);
 		target->error = "dm-lsdm: Invalid max pba found on sb";
 		goto destroy_gc_page_pool;
 	}
@@ -6786,7 +6854,7 @@ static void lsdm_io_hints(struct dm_target *ti, struct queue_limits *limits)
         limits->max_sectors = nrblks;
 
 	/* expose the device as a regular non zoned device */
-        limits->zoned = BLK_ZONED_NONE;
+        //limits->zoned = BLK_ZONED_NONE;
 }
 
 
