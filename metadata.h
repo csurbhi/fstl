@@ -311,7 +311,6 @@ struct ctx {
 					 * when one zone worth of entries are written to the disk
 					 */
 	wait_queue_head_t refq;
-	wait_queue_head_t rev_blk_flushq;
 	wait_queue_head_t sitq;
 	wait_queue_head_t tmq;
 	struct page * revmap_page;
@@ -330,7 +329,6 @@ struct ctx {
 	sector_t ckpt_pba;
 	sector_t revmap_pba;
 	atomic_t nr_pending_writes;
-	atomic_t nr_revmap_flushes;
 	atomic_t nr_tm_writes;
 	atomic_t nr_sit_pages;
 	atomic_t nr_tm_pages;

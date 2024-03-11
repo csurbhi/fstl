@@ -111,10 +111,10 @@ __le32 get_zone_count(int fd)
 	 * Doing this manually for now for a 20GB 
 	 * harddisk and 256MB zone size.
 	 */
-	if (zone_count <= (capacity/zonesz)) {
+	if (zone_count >= (capacity/zonesz)) {
 		printf("\n Number of zones: %d ", zone_count);
 		printf("\n capacity/ZONE_SZ: %d ", capacity/zonesz);
-		return zone_count;
+		return capacity/zonesz;
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/zonesz));
 	//return 16500;
@@ -381,7 +381,7 @@ __le64 get_max_pba(struct lsdm_sb *sb)
 {
 	/* We test with a disk of size 1 TB, that is 4032 zones! */
 	printf("\n %s zone_count: %d log_zone_size: %d log_sector_size: %d ", __func__, sb->zone_count , sb->log_zone_size, sb->log_sector_size);
-	return (sb->zone_count * (1 << (sb->log_zone_size - sb->log_sector_size))); 
+	return (sb->zone_count << (sb->log_zone_size - sb->log_sector_size)); 
 }
 
 void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
@@ -524,6 +524,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	}
 	/* since the zonesz is the number of addressable LBAs */
 	logzonesz = logzonesz + 9;
+	printf("\n ********************************* LOG ZONE SZ: %d ", logzonesz);
 	if (ioctl(fd, BLKGETNRZONES, &zone_count) < 0) {
 		sprintf(str, "Get nr of zones ioctl failed %d (%s)\n", errno, strerror(errno));
 		perror(str);
@@ -888,7 +889,7 @@ long reset_shingled_zones(int fd)
 			}
 			//report_zone(fd, i, &bzr->zones[i]);
 		} else {
-			//printf("\n zonenr: %d is a non shingled zone! ", i);
+			printf("\n zonenr: %d is a non shingled zone! ", i);
 			cmr++;
 		}
 	}
@@ -944,19 +945,19 @@ int main(int argc, char * argv[])
 	printf("\n Segment Information Table written");
 	pba = 0;
 	free(sb1);
-	return 0;
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
 	unsigned long zone_lbas = 0;
 	char str[SECTOR_SIZE];
 
+	/*
 	if (ioctl(fd, BLKGETZONESZ, &zone_lbas) < 0) {
 		sprintf(str, "Get zone size failed %d (%s)\n", errno, strerror(errno));
 		perror(str);
 		printf("\n");
 		exit(errno);
-	}
+	}*/
 
-
+	zone_lbas = 524288;
 	printf("\n # lbas in ZONE: %llu", zone_lbas);
 	close(fd);
 	unsigned long data_zones = sb1->zone_count_main;
