@@ -121,7 +121,7 @@ __le32 get_zone_count(int fd)
 	//return 28200;
 	return zone_count;
 	//return 4500;
-	return 9000;
+	//return 9000;
 	//return 10000;
 	// 2048 GB
 	//return 8192;

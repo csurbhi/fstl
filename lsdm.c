@@ -4700,6 +4700,7 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 	int entry_nr, sector_nr;
 	struct page * page = NULL;
 
+#ifdef LSDM_DEBUG
 	BUG_ON(pba == 0);
 	BUG_ON(pba > ctx->sb->max_pba);
 	BUG_ON(lba > ctx->sb->max_pba);
@@ -4711,6 +4712,7 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 		printk(KERN_ERR "\n %s %d lba: %lld pba: %lld nrsectors: %d max_pba: %llu entry_nr: %d ptr: %p\n" , __func__, __LINE__, lba, pba, nrsectors, ctx->sb->max_pba, entry_nr, ptr);
 		BUG();
 	}
+#endif
 	/* Merge entries by increasing the length if there lies a
 	 * matching entry in the revmap page
 	 */
@@ -4749,7 +4751,7 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 		if (NR_SECTORS_PER_BLK == (sector_nr + 1)) {
 			atomic_set(&ctx->revmap_sector_nr, 0);
 			/* TODO: do this in parallel, dont wait. Called from the write context */
-			flush_revmap_block_disk(ctx, page, ctx->revmap_pba);
+			//flush_revmap_block_disk(ctx, page, ctx->revmap_pba);
 			ctx->revmap_page = 0;
 			/* Adjust the revmap_pba for the next block. Addressing is based on 512bytes sector. */
 			ctx->revmap_pba += NR_SECTORS_IN_BLK; 
@@ -6712,6 +6714,9 @@ static void lsdm_dtr(struct dm_target *dm_target)
 	 */
 	printk(KERN_ERR "\n translation blocks flushed! ");
 	do_checkpoint(ctx);
+	void * ptr = page_address(ctx->revmap_bm);
+	memset(ptr, 0, 4096);
+	flush_revmap_bitmap(ctx);
 	//trace_printk("\n checkpoint done!");
 	/* If we are here, then there was no crash while writing out
 	 * the disk metadata
