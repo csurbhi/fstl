@@ -140,9 +140,8 @@ int __init ls_dm_init(void);
 void __exit ls_dm_exit(void);
 
 long nrpages;
-
 struct dentry * debug_dir;
-
+struct kobject * config_obj;
 void lsdm_ioidle(struct mykref *kref);
 
 static inline void mykref_init(struct mykref *kref)
@@ -6350,6 +6349,37 @@ static struct lsdm_shrinker {
 };
 */
 
+struct lsdm_attribute {
+	struct attribute attr;
+	struct ctx const * ctx;
+	ssize_t (*show)(struct device *dev, struct device_attribute *attr,
+                        char *buf);
+	ssize_t (*store)(struct device *dev, struct device_attribute *attr,
+                        const char *buf, size_t count);
+};
+
+
+
+static ssize_t lsdm_attr_lwm_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
+{
+	struct lsdm_attribute *lattr = (struct lsdm_attribute *) attr;
+	struct ctx *ctx = lattr->ctx;
+	return sysfs_emit(buf, "%d\n", ctx->lower_watermark);
+
+}
+
+static ssize_t lsdm_attr_lwm_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t count)
+{
+	struct lsdm_attribute *lattr = (struct lsdm_attribute *) attr;
+	struct ctx *ctx = lattr->ctx;
+	kstrtouint(buf, 10, &ctx->lower_watermark);
+	ctx->higher_watermark = ctx->lower_watermark + 5;
+	ctx->middle_watermark = ctx->lower_watermark + 2;
+	return count;
+}
+
+const struct lsdm_attribute  lsdm_attr_lwm = __ATTR(lsdm_lwm, 0660, lsdm_attr_lwm_show, lsdm_attr_lwm_store);
+
 static void destroy_caches(struct ctx *ctx)
 {
 	kmem_cache_destroy(ctx->bio_cache);
@@ -6647,7 +6677,11 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
 	*/
+	lsdm_attr_lwm.ctx = ctx;
 	debugfs_create_u32("freezones", 0444, debug_dir, &ctx->ckpt->nr_free_zones);
+	if (!sysfs_create_file(config_obj, &lsdm_attr_lwm.attr)) {
+		printk(KERN_ERR "\n Could not create a sysfs file to configure GC watermarks!");
+	}
 	printk(KERN_ERR "\n ctr() done!!");
 	return 0;
 /* failed case */
@@ -6852,13 +6886,19 @@ int __init ls_dm_init(void)
 		printk(KERN_ERR "\n Could not create directory in debugfs ");
 		return -1;
 	}
-	
+	config_obj = kobject_create_and_add("lsdm", NULL);
+	if (!config_obj) {
+		printk(KERN_ERR "\n Could not create a directory in sysfs ");
+		debugfs_remove_recursive(debug_dir);
+		return -1;
+	}
 	return dm_register_target(&lsdm_target);
 }
 
 /* Called on module exit (rmmod) */
 void __exit ls_dm_exit(void)
 {
+	kobject_put(config_obj);
 	debugfs_remove_recursive(debug_dir);
 	dm_unregister_target(&lsdm_target);
 }
