@@ -4168,13 +4168,11 @@ void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 	if (!tm_page) {
 		return;
 	}
-
 	flush_tm_nodes(node->rb_left, ctx);
-	flush_tm_nodes(node->rb_right, ctx);
-	
 	if(tm_page->flag == NEEDS_FLUSH) {
 		flush_tm_node_page(ctx, tm_page);
 	}
+	flush_tm_nodes(node->rb_right, ctx);
 	return;
 }
 
@@ -4561,7 +4559,7 @@ int flush_revmap_block_disk(struct ctx * ctx, struct page *page, sector_t revmap
 	}
 
 	bio->bi_iter.bi_sector = revmap_pba;
-	printk(KERN_ERR "%s Flushing revmap blk at pba:%llu ctx->revmap_pba: %llu", __func__, bio->bi_iter.bi_sector, ctx->revmap_pba);
+	//printk(KERN_ERR "%s Flushing revmap blk at pba:%llu ctx->revmap_pba: %llu", __func__, bio->bi_iter.bi_sector, ctx->revmap_pba);
 	bio->bi_end_io = revmap_blk_flushed;
 	bio->bi_opf = REQ_OP_WRITE;
 	//bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
@@ -5306,7 +5304,7 @@ void do_checkpoint(struct ctx *ctx)
 	update_checkpoint(ctx);
 	flush_checkpoint(ctx);
 
-	printk(KERN_ERR "\n checkpoint flushed! nr_pages: %ld \n", nrpages);
+	//printk(KERN_ERR "\n checkpoint flushed! nr_pages: %ld \n", nrpages);
 	//printk(KERN_ERR "\n sit pages flushed! nr_sit_pages: %llu sit_flush_count: %llu", atomic_read(&ctx->nr_sit_pages), atomic_read(&ctx->sit_flush_count));
 	/* We need to wait for all of this to be over before 
 	 * we proceed
