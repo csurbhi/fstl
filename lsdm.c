@@ -2689,6 +2689,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			if (ret)
 				return ret;
 			/* Since e was smaller, we want to search for the next e */
+			lba = lba + overlap;  //for the next search
 		}
 	}
 	//printk(KERN_INFO "\t %s end \n", __func__);
