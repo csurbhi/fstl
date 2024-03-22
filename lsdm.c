@@ -1056,6 +1056,7 @@ void flush_translation_blocks(struct ctx *ctx);
 void flush_sit(struct ctx *ctx);
 
 #define DEF_FLUSH_TIME 10000 /* (milliseconds) */
+#define DEF_GC_TIME	10000000 /*1000 seconds */
 
 void do_checkpoint(struct ctx *ctx);
 void remove_translation_pages(struct ctx *ctx);
@@ -1849,7 +1850,6 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 	int count;
 	sector_t pba, last_pba; 
 	int vblks;
-	struct rb_node *node;
 
 	pba = get_first_pba_for_zone(ctx, zonenr);
 	last_pba = get_last_pba_for_zone(ctx, zonenr);
@@ -1867,17 +1867,17 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 	temp.pba = 0;
 	temp.lba = 0;
 	temp.len = 0;
-	//printk(KERN_ERR "\n %s zonenr: %d first_pba: %llu last_pba: %llu #valid blks: %d", __func__, zonenr, pba, last_pba, vblks);
-	rev_e = lsdm_rb_revmap_find(ctx, pba, 0, last_pba, __func__);
-	//BUG_ON(NULL == rev_e);
-	if (!rev_e) {
-		/* this zone could be emptied by concurrent i/o */
-		return 0;
-	}
-	e = rev_e->ptr_to_tm;
-	BUG_ON(rev_e->pba != e->pba);
-	BUG_ON((e->pba + e->len) < e->pba);
 	while(pba <= last_pba) {
+		//printk(KERN_ERR "\n %s zonenr: %d first_pba: %llu last_pba: %llu #valid blks: %d", __func__, zonenr, pba, last_pba, vblks);
+		rev_e = lsdm_rb_revmap_find(ctx, pba, 0, last_pba, __func__);
+		//BUG_ON(NULL == rev_e);
+		if (!rev_e) {
+			/* this zone could be emptied by concurrent i/o */
+			break;
+		}
+		e = rev_e->ptr_to_tm;
+		BUG_ON(rev_e->pba != e->pba);
+		BUG_ON((e->pba + e->len) < e->pba);
 		e = rev_e->ptr_to_tm;
 		//printk(KERN_ERR "\n %s Looking for pba: %llu! Found e, LBA: %llu, PBA: %llu, len: %u e->(pba+len): %llu, remaining: %d", __func__, pba, e->lba, e->pba, e->len, e->pba + e->len, last_pba -(e->pba + e->len));
 		
@@ -1902,7 +1902,10 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 			temp.pba = pba;
 			temp.lba = e->lba + diff;
 			temp.len = e->len - diff;
-			BUG_ON(!temp.len);
+			if (!temp.len) {
+				printk(KERN_ERR "\n %s BUG: (GC) considering pba: %llu, found: (lba: %llu, pba: %llu len: %llu) last_pba: %llu", __func__, pba, e->lba, e->pba, e->len, last_pba);
+				BUG_ON(!temp.len);
+			}
 		} else {
 			/*
 			 * 	e------
@@ -1923,18 +1926,13 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 			//printk(KERN_ERR "\n %s Adjusted len: (lba: %llu, pba: %llu len: %ld) last_pba: %lld", __func__, temp.lba, temp.pba, temp.len, last_pba);
 		}
 		if (!temp.len) {
-			printk(KERN_ERR "\n %s Copied e (lba: %llu, pba: %llu len: %llu) last_pba: %llu", __func__, e->lba, e->pba, e->len, last_pba);
+			printk(KERN_ERR "\n %s !!!!!! Copied e (lba: %llu, pba: %llu len: %llu) last_pba: %llu", __func__, e->lba, e->pba, e->len, last_pba);
+			break;
 		}
 		total_len = total_len + temp.len;
 		pba = temp.pba + temp.len;
 		count = add_extent_to_gclist(ctx, &temp);
 		total_extents = total_extents + count;
-		node = rb_next(&rev_e->rb);
-		if (NULL == node) {
-			//printk(KERN_ERR "\n %s Found NULL! No next node!! last_pba: %llu , last_found_pba: %llu", __func__, last_pba, e->pba);
-			break;
-		}
-		rev_e = container_of(node, struct rev_extent, rb);
 	}
 #ifdef LSDM_DEBUG
 	printk(KERN_ERR "\n %s Total extents: %llu, total_len: %llu vblks: %d \n", __func__, total_extents, total_len, vblks);
@@ -2220,8 +2218,10 @@ static int gc_thread_fn(void * data)
 			printk(KERN_ERR "\n Starting BG GC ");
 			start_t = ktime_get_ns();
 		}
+		ctx->flush_th->sleep_time = DEF_GC_TIME;
 		/* Doing this for now! ret part */
 		ret = lsdm_gc(ctx, mode, 0);
+		ctx->flush_th->sleep_time = DEF_FLUSH_TIME;
 		if (mode == BG_GC) {
 			end_t = ktime_get_ns();
 			interval += (end_t - start_t)/1000000;
@@ -4824,10 +4824,10 @@ void sub_write_done(struct work_struct * w)
 	len = subbioctx->extent.len;
 	len = (len >> SECTOR_BLK_SHIFT) << SECTOR_BLK_SHIFT;
 
-	BUG_ON(pba == 0);
-	BUG_ON(pba > ctx->sb->max_pba);
-	BUG_ON(lba > ctx->sb->max_pba);
-	BUG_ON(len % 8 != 0);
+	//BUG_ON(pba == 0);
+	//BUG_ON(pba > ctx->sb->max_pba);
+	//BUG_ON(lba > ctx->sb->max_pba);
+	//BUG_ON(len % 8 != 0);
 	down_write(&ctx->lsdm_rb_lock);
 	/**************************************/
 	lsdm_rb_update_range(ctx, lba, pba, len);
