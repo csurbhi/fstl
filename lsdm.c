@@ -432,6 +432,7 @@ static void merge(struct ctx *ctx, struct rb_root *root, struct extent *e)
 		if((prev->lba + prev->len) == e->lba) {
 			if ((prev->pba + prev->len) == e->pba) {
 				prev->len += e->len;
+				//printk(KERN_ERR "\n Merged with prev ! e->lba: %llu e->pba: %llu e->len: %llu, new len: %llu", e->lba, e->pba, e->len, prev->len);
 				lsdm_rb_remove(ctx, e);
 				kmem_cache_free(ctx->extent_cache, e);
 				e = prev;
@@ -1390,8 +1391,8 @@ static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	add_revmap_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	/*---------------------*/
 	up_write(&ctx->lsdm_rev_lock);
+	//printk(KERN_ERR "\n %s About to add: lba: %llu pba: %llu , len: %llu e.len: %llu" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	add_translation_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
-	//printk(KERN_ERR "\n %s About to add: lba: %llu pba: %llu , len: %llu e.len: %u" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	//printk(KERN_ERR "\n %s Added rb entry ! lba: %llu pba: %llu , len: %llu e.len: %u" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	return 0;
@@ -1545,6 +1546,8 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 
 	
 	total_vblks = get_sit_ent_vblocks(ctx, zonenr);
+	//gc_writes = total_vblks;
+	gc_writes = 0;
 	last_pba_read = get_last_pba_for_zone(ctx, zonenr);
 	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
 		/* Reverse map stores PBA as e->lba and LBA as e->pba
@@ -2645,9 +2648,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 *	[---------bio------] 
 		 */
 			zerolen = e->lba - lba;
-			if (origlba >= 15597042700) {
-				printk(KERN_ERR "\n %s Case of partial overlap! (no left overlap), origlba: %llu", __func__, origlba);
-			}
+			BUG_ON(zerolen != nr_sectors);
 			ret = zero_fill_inital_bio(ctx, bio, clone, zerolen, read_ctx);
 			if (!ret)
 				return ret;
@@ -2667,9 +2668,6 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		diff = lba - e->lba;
 		BUG_ON(diff < 0);
 		pba = e->pba + diff;
-		if (origlba >= 15597042700) {
-			printk(KERN_ERR "\n %s overlap: %u, nr_sectors: %u diff: %u lba: %llu, pba: %llu", __func__, overlap, nr_sectors, diff, lba, pba);
-		}
 		if (overlap >= nr_sectors) { 
 		/* e is bigger than bio, so overlap >= nr_sectors, no further
 		 * splitting is required. Previous splits if any, are chained
@@ -5450,19 +5448,26 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 		 * dont add an entries further
 		 */
 		if (entry->pba == 0) {
+			entry = entry + 1;
 			continue;
 			
 		}
-		//printk(KERN_ERR "\n %s i: %d entry->lba: %llu entry->pba: %llu", __func__, i, lba, entry->pba);
-		BUG_ON(entry->pba > ctx->sb->max_pba);
+		if (entry->pba > ctx->sb->max_pba) {
+			printk(KERN_ERR "\n %s i: %d lba: %llu entry->pba: %llu (> max_pba: %llu)", __func__, i, lba, entry->pba, ctx->sb->max_pba);
+			dump_stack();
+			entry->pba = 0;
+			entry = entry + 1;
+			continue;
+		}
 		/* TODO: right now everything should be zeroed out */
 		//panic("Why are there any already mapped extents?");
+		//printk(KERN_ERR "\n %s i: %d lba: %llu entry->pba: %llu", __func__, i, lba, entry->pba);
 		down_write(&ctx->lsdm_rb_lock);
 		lsdm_rb_update_range(ctx, lba, entry->pba, NR_SECTORS_IN_BLK);
 		up_write(&ctx->lsdm_rb_lock);
 		lba = lba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
 		entry = entry + 1;
-		ret = 1;
+		ret++;
 	}
 	return ret;
 }
@@ -5543,13 +5548,15 @@ int read_translation_map(struct ctx *ctx)
 	int i = 0, ret = 0;
 	struct tm_entry * tm_entry = NULL;
 	u64 lba = 0;
+	int valid=0; //, nrentries =0, zonenr = 0;
 
 	printk(KERN_ERR "\n %s Reading TM entries from: %llu, nrblks: %ld", __func__, ctx->sb->tm_pba, nrblks);
 	
 	ctx->n_extents = 0;
 	sectornr = 0;
+	valid = 0;
 	while(i < nrblks) {
-		//printk(KERN_ERR "\n reading block: %llu, sector: %llu", ctx->sb->tm_pba, sectornr);
+		//printk(KERN_ERR "\n reading block: %llu, sector: %lu", ctx->sb->tm_pba, sectornr);
 		page = read_block(ctx, ctx->sb->tm_pba, sectornr);
 		if (!page)
 			return -1;
@@ -5559,12 +5566,18 @@ int read_translation_map(struct ctx *ctx)
 		//trace_printk("\n pba: %llu", pba);
 		tm_entry = (struct tm_entry *) page_address(page);
 		ret = read_extents_from_block(ctx, tm_entry, lba);
-		if (!ret) {
-			__free_pages(page, 0);
-			nrpages--;
-		} else {
-			add_tm_page_kv_store_by_blknr(ctx, page, sectornr/NR_SECTORS_IN_BLK);
-		}
+		/*
+		valid = valid + ret;
+		nrentries = nrentries + TM_ENTRIES_BLK;
+		if (nrentries == 65536) {
+			if (valid != 0) {
+				printk(KERN_ERR "\n zonenr: %d has %d valid blks ", zonenr, valid);
+			}
+			valid = 0;
+			nrentries = 0;
+			zonenr++;
+		} */
+		add_tm_page_kv_store_by_blknr(ctx, page, sectornr/NR_SECTORS_IN_BLK);
 		/* Every 512 byte sector has a LBA in SMR drives, the translation map is recorded for every block
 		 * instead. So every translation entry covers 8 sectors or 8 lbas.
 		 */
@@ -5820,7 +5833,7 @@ struct gc_zone_node * add_zonenr_gc_zone_tree(struct ctx *ctx, unsigned int zone
 	 */
 	rb_link_node(&znew->rb, parent, link);
 	rb_insert_color(&znew->rb, root);
-	//printk(KERN_ERR "\n %s Added zone: %d nrblks: %d to gc tree!znode: %p  znode->list: %p \n", __func__, zonenr, nrblks, znew, znew->list);
+	//printk(KERN_ERR "\n %s Added zone: %d nrblks: %d to gc tree!znode: %p  znode->list: %p \n", __func__, zonenr, nrblks, znew, &znew->list);
 	return znew;
 }
 
@@ -5888,7 +5901,8 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 	znode = add_zonenr_gc_zone_tree(ctx, zonenr, nrblks);
 	if (!znode) {
 		printk(KERN_ERR "\n %s gc data structure allocation failed!! \n", __func__);
-		panic("No memory available for znode");
+		dump_stack();
+		//panic("No memory available for znode");
 	}
 
 	if (znode->ptr_to_cost_node) {
@@ -5899,7 +5913,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		/* else, we remove znode from the list maintained by cost node. If this is the last node on the list
 		 * then we have to remove the cost node from the tree
 		 */
-		//printk(KERN_ERR "\n %s zonenr: %d vblks: %d cost_node:%p ", __func__, zonenr, nrblks, new);
+		//printk(KERN_ERR "\n %s zonenr: %u vblks: %u cost_node:%p ", __func__, zonenr, nrblks, new);
 		remove_zone_from_cost_node(ctx, new, zonenr);
 		new = NULL;
 		znode->ptr_to_cost_node = NULL;
@@ -5914,7 +5928,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		if (cost == cost_node->cost) {
 			znode->ptr_to_cost_node = cost_node;
 			list_add_tail(&znode->list, &cost_node->znodes_list);
-			//printk(KERN_ERR "\n %s zonenr: %d nrblks: %u, mtime: %llu caller: (%s) cost:%d cost_node: %p list_head: %p \n", __func__, zonenr, nrblks, mtime, caller, cost, cost_node, cost_node->znodes_list);
+			//printk(KERN_ERR "\n %s zonenr: %u nrblks: %u, mtime: %llu caller: (%s) cost:%u cost_node: %p list_head: %p \n", __func__, zonenr, nrblks, mtime, caller, cost, cost_node, &cost_node->znodes_list);
 			return 0;
 		}
 		 /* For Greedy, cost is #valid blks. We prefer lower cost.
@@ -5932,7 +5946,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		return -ENOMEM;
 	}
 	INIT_LIST_HEAD(&new->znodes_list);
-	//printk(KERN_ERR "\n Allocate gc_cost_node: %p, cost: %d zone: %d nrblks: %d list_head: %p \n", new, cost, znode->zonenr, znode->vblks, &new->znodes_list);
+	//printk(KERN_ERR "\n Allocate gc_cost_node: %p, cost: %u zone: %u nrblks: %u list_head: %p \n", new, cost, znode->zonenr, znode->vblks, &new->znodes_list);
 	new->cost = cost;
 	RB_CLEAR_NODE(&new->rb);
 	znode->ptr_to_cost_node = new;
@@ -5948,7 +5962,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 	rb_insert_color(&new->rb, root);
 
 	zonenr = select_zone_to_clean(ctx, BG_GC, __func__);
-	//printk(KERN_ERR "\n %s zone to clean: %d ", __func__, zonenr);
+	//printk(KERN_ERR "\n %s zone to clean: %u ", __func__, zonenr);
 	return 0;
 }
 
@@ -6028,7 +6042,7 @@ int add_sit_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, sector_t 
  */
 int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, unsigned int nr_seg_entries, unsigned int *zonenr)
 {
-	int i = 0;
+	int i = 0, ret = 0;
 	struct lsdm_sb *sb;
 	unsigned int nr_blks_in_zone;
        
@@ -6048,13 +6062,16 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			continue;
 		}
 		else if (entry->vblocks == 0) {
-    			//printk(KERN_ERR "\n *segnr: %u", *zonenr);
+    			//printk(KERN_ERR "\n Free: *segnr: %u", *zonenr);
 			mark_zone_free(ctx , *zonenr, 1);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
-			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %llu entry->mtime: %llu", *zonenr, entry->vblocks, entry->mtime);
-			if (!update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__))
-				panic("Memory error, write a memory shrinker!");
+			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %u entry->mtime: %lu", *zonenr, entry->vblocks, entry->mtime);
+			ret = update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__);
+			if (ret < 0) {
+				printk(KERN_ERR "\n Memory error, write a memory shrinker!");
+				BUG();
+			}
 		} else {
 			//printk(KERN_ERR "\n %s segnr: %llu, vblocks: %llu, mtime: %llu ", __func__, *zonenr, entry->vblocks, entry->mtime);
 		}
@@ -6313,6 +6330,7 @@ int read_metadata(struct ctx * ctx)
 		*/
 	}
 //out:
+	//print_zones_vblocks(ctx);
 	printk(KERN_ERR "\n Metadata read! \n");
 	return 0;
 }
@@ -6593,8 +6611,10 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	ctx->err = 0;
 
     	ret = read_metadata(ctx);
+	/*
 	if (ret < 0) 
 		goto destroy_cache;
+		*/
 
 	unsigned int gc_pool_pages = 1 << (ctx->sb->log_zone_size - ctx->sb->log_block_size);
 	ctx->gc_page_pool = mempool_create_page_pool(gc_pool_pages, 0);
