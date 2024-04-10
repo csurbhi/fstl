@@ -117,9 +117,9 @@ __le32 get_zone_count(int fd)
 		return capacity/zonesz;
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/zonesz));
+	return zone_count;
 	//return 16500;
 	//return 28200;
-	return zone_count;
 	//return 4500;
 	//return 9000;
 	//return 10000;

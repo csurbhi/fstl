@@ -105,16 +105,16 @@ void read_sb(int fd, unsigned long sectornr, struct lsdm_sb **sb)
 	return;
 }
 
-char * read_block(int fd, sector_t pba, unsigned nr_blks)
+char * read_block(int fd, sector_t pba)
 {
-	int i, ret, j;
+	int ret;
 	char * ptr;
 
 	ptr = (char *) malloc(4096);
 	if (!ptr)
 		return NULL;
 
-	printf("\n Reading %d zeroed blks, from pba: %llu", nr_blks, pba);
+	//printf("\n Reading zeroed blks, from pba: %llu", pba);
 	
 	/* lseek64 offset is in  bytes not sectors, pba is in sectors */
 	ret = lseek64(fd, (pba * 512), SEEK_SET);
@@ -122,26 +122,25 @@ char * read_block(int fd, sector_t pba, unsigned nr_blks)
 		perror(">>>> (before read) Error in lseek64: \n");
 		exit(errno);
 	}
-	for (i=0; i<nr_blks; i++) {
-		ret = read(fd, ptr, 4096);
-		if (ret < 4096) {
-			perror("Error while reading: ");
-			exit(errno);
-		}
+	ret = read(fd, ptr, 4096);
+	if (ret < 4096) {
+		perror("Error while reading: ");
+		exit(errno);
 	}
 	return ptr;
 }
 
 /* Each zone has NR_BLKS_IN_ZONE ie 65536 entries */
-void write_tm(int fd, struct lsdm_sb *sb, int nr_zones)
+void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 {
 	sector_t tm_pba;
-	unsigned int nr_blks;
+	unsigned int nr_blks, freed=0, entries=0;
 	struct tm_entry *entry;
 	char buffer[BLK_SZ];
 	u64 offset;
 	unsigned remaining_entries;
 	unsigned long long data_pba;
+	unsigned long long lba = 0;
 	int i, j, ret;
 
 	u64 nr_tm_entries = (nr_zones * NR_BLKS_IN_ZONE);
@@ -171,21 +170,35 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones)
 
 	remaining_entries = nr_tm_entries;
 	printf("\n remaining entries: %llu #entries per blk: %llu nr_tm_blks: %llu", remaining_entries, nr_tm_entries_per_blk, nr_tm_blks);
-	unsigned long long lba = 0;
+	entries = 0;
+	freed = 0;
+	int zonenr = 0;
 	for(i=0; i<nr_tm_blks; i++) {
 		memset(buffer, 0, BLK_SZ);
 		memset(entry, 0, sizeof(struct tm_entry));
 		offset = 0;
 		for(j=0; j<nr_tm_entries_per_blk; j++) {
-			entry->pba = data_pba;
+			if (freed < freeblks) {
+				/* as if trim is run on these blks */
+				freed++;
+				entry->pba = 0;
+			} else {
+				entry->pba = data_pba;
+			}
 			memcpy(buffer + offset, entry, sizeof(struct tm_entry));
-			if ((lba == 9437184) || (data_pba == 9437184)) 
-				printf("\n >>>>>>>>>>>>>>>>>>>>>>> lba: %llu, pba: %llu ", lba, data_pba);
 			data_pba = data_pba + NR_SECTORS_IN_BLK;
 			lba = lba + NR_SECTORS_IN_BLK;
 			assert(data_pba < sb->max_pba);
 			offset = offset + sizeof(struct tm_entry);
 			remaining_entries--;
+			entries++;
+			if (entries == 65536) {
+				entries = 0;
+				if (freed != 6553)
+					printf("\n %d Freed: %d ", zonenr, freed);
+				freed = 0;
+				zonenr++;
+			}
 			if (!remaining_entries)
 				break;
 		}
@@ -195,11 +208,38 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones)
 			exit(errno);
 		}
 	}
-	printf("\n lba: %llu, pba: %llu ", lba, data_pba);
-	//read_block(fd, tm_pba, nr_blks);
+	free(entry);
+
+	int vblks = 0;
+	entries = 0;
+	char * ptr;
+	zonenr = 0;
+	tm_pba = sb->tm_pba;
+	/*
+	for(i=0; i<nr_tm_blks; i++) {
+		offset = 0;
+		ptr = read_block(fd, tm_pba);
+		entry = ptr;
+		for(j=0; j<nr_tm_entries_per_blk; j++) {
+			if (entry->pba !=0 ) {
+				vblks = vblks + 1;
+			}
+			entries++;
+			if (entries == 65536) {
+				if (vblks != 0)
+					printf("\n Zone %d has %d valid blks ", zonenr, vblks);
+				vblks = 0;
+				zonenr++;
+				entries = 0;
+			}
+			entry++;
+		}
+		tm_pba = tm_pba + 8;
+		free(ptr);
+	}*/
 }
 
-void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones)
+void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int freeblks)
 {
 	unsigned entries_in_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
 	unsigned int nr_sit_blks = (nr_zones)/entries_in_blk;
@@ -236,7 +276,7 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones)
 		memset(buffer, 0, BLK_SZ);
 		offset = 0;
 		for(j=0; j<entries_in_blk; j++) {
-			entry->vblocks = NR_BLKS_IN_ZONE;
+			entry->vblocks = NR_BLKS_IN_ZONE - freeblks;
 			entry->mtime = mtime;
 			mtime = mtime + 10;
 			memcpy(buffer + offset, entry, sizeof(struct lsdm_seg_entry));
@@ -283,6 +323,9 @@ int read_seg_entries_from_block(struct lsdm_sb *sb, struct lsdm_ckpt *ckpt, stru
                 if (entry->vblocks == 0) {
 			free++;
                 }
+		if (entry->vblocks != 58983) {
+			printf("\n vblocks! does not match!!!! : %d", entry->vblocks);
+		}
                 entry = entry + 1;
                 *zonenr= *zonenr + 1;
                 i++;
@@ -317,7 +360,7 @@ int read_seg_info_table(struct lsdm_sb *sb, struct lsdm_ckpt *ckpt, int fd)
 			printf("\n Seg entry blknr cannot be bigger than the data blknr");
 			return -1;
 		}
-		ptr = read_block(fd, sectornr, 1);
+		ptr = read_block(fd, sectornr);
 		if (!ptr) {
 			printf("\n could not read! \n");
 			exit(-1);
@@ -463,14 +506,14 @@ int main(int argc, char * argv[])
 	struct lsdm_sb *sb;
 	char cmd[256];
 	unsigned long nrblks;
-	unsigned int ret = 0, nr_zones = 0;
+	unsigned int ret = 0, nr_zones = 0, free_blks=0;
 	long cmr;
 	char * blkdev;
 	int fd;
 
 	printf("\n %s argc: %d \n ", __func__, argc);
-	if (argc != 3) {
-		fprintf(stderr, "\n Usage: %s device-name size \n", argv[0]);
+	if (argc != 4) {
+		fprintf(stderr, "\n Usage: %s device-name seq-data-zones(# zones filled with seq data) freeblks (#blks in every zone freed)  \n", argv[0]);
 		exit(EXIT_FAILURE);
 	}
 	blkdev = argv[1];
@@ -481,14 +524,15 @@ int main(int argc, char * argv[])
 		printf("\n");
 		return 0;
 	}
+	free_blks = atoi(argv[3]);
 	read_sb(fd, 0, &sb);
 	if (nr_zones > (sb->zone_count_main - 2)) {
 		printf("\n Device has %llu zones, cannot populate more!", sb->zone_count_main);
 		printf("\n");
 		return 0;
 	}
-	write_tm(fd, sb,  nr_zones);
-	write_sit(fd, sb, nr_zones);
+	write_tm(fd, sb,  nr_zones, free_blks);
+	write_sit(fd, sb, nr_zones, free_blks);
 	write_ckpt(fd, sb, nr_zones);
 	printf("\n Populated %d zones ", nr_zones);
 	printf("\n \n");
