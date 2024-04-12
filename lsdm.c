@@ -1227,13 +1227,15 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	struct page *page;
 	struct bio *bio;
 	struct bvec_iter_all iter_all;
-	unsigned int s8, pagecount;
+	unsigned int pagecount;
+	sector_t s8;
 	int i;
 
 	//refcount_inc(&gc_extent->ref);
 	s8 = gc_extent->e.len;
 	BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_BLK_SHIFT));
 	pagecount = (s8 >> SECTOR_BLK_SHIFT);
+	//printk(KERN_ERR "\n %s gc_extent: (lba: %llu pba: %llu len: %llu), s8: %llu max_pba: %llu", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, s8, ctx->sb->max_pba);
 
 	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
 	 * individually to the bio vectors
@@ -1377,7 +1379,7 @@ static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	move_gc_write_frontier(ctx, gc_extent->e.len);
 	//up_write(&ctx->wf_lock);
 
-	//printk(KERN_ERR "\n %s gc_extent: (lba: %d pba: %d len: %d), s8: %d max_pba: %llu", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, s8, ctx->sb->max_pba);
+	//printk(KERN_ERR "\n %s gc_extent: (lba: %llu pba: %llu len: %llu), s8: %llu max_pba: %llu", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, s8, ctx->sb->max_pba);
 #ifdef LSDM_DEBUG
 	BUG_ON(gc_extent->e.len != s8);
 	BUG_ON(gc_extent->e.pba == 0 );
@@ -1548,6 +1550,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	total_vblks = get_sit_ent_vblocks(ctx, zonenr);
 	//gc_writes = total_vblks;
 	gc_writes = 0;
+	s8 = 0;
 	last_pba_read = get_last_pba_for_zone(ctx, zonenr);
 	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
 		/* Reverse map stores PBA as e->lba and LBA as e->pba
@@ -1652,7 +1655,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 			}
 			list_add(&newgc_extent->list, &gc_extent->list);
 			next_ptr = newgc_extent;
-			//printk(KERN_ERR "\n %s gc_extent::len: %d newgc_extent::len: %d ", __func__, gc_extent->e.len, newgc_extent->e.len);
+			//printk(KERN_ERR "\n %s gc_extent::len: %llu newgc_extent::len: %llu ", __func__, gc_extent->e.len, newgc_extent->e.len);
 		}
 
 		/* Now you verify all this after holding a lock */
@@ -1666,8 +1669,8 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		 * Mark such a read.
 		 */
 		submit_bio_wait(gc_extent->bio);
-		ctx->nr_gc_writes += s8;
-		gc_writes += s8;
+		ctx->nr_gc_writes += gc_extent->e.len;
+		gc_writes += gc_extent->e.len;
 		//flush_workqueue(ctx->tm_wq);
 		free_gc_extent(ctx, gc_extent);
 		count++;
@@ -1932,6 +1935,7 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 			printk(KERN_ERR "\n %s !!!!!! Copied e (lba: %llu, pba: %llu len: %llu) last_pba: %llu", __func__, e->lba, e->pba, e->len, last_pba);
 			break;
 		}
+		//printk(KERN_ERR "\n %s extent pba:%llu len: %llu ", __func__, temp.pba, temp.len);
 		total_len = total_len + temp.len;
 		pba = temp.pba + temp.len;
 		count = add_extent_to_gclist(ctx, &temp);
@@ -2178,6 +2182,7 @@ static int gc_thread_fn(void * data)
 
 	wait_ms = gc_th->min_sleep_time;
 	//wait_ms = gc_th->no_gc_sleep_time;
+	//wait_ms = 100;
 	mutex_init(&ctx->gc_lock);
 	printk(KERN_ERR "\n %s executing! pid: %d", __func__, tsk->pid);
 	set_freezable();
@@ -5448,15 +5453,16 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 		 * dont add an entries further
 		 */
 		if (entry->pba == 0) {
+			lba = lba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
 			entry = entry + 1;
 			continue;
-			
 		}
 		if (entry->pba > ctx->sb->max_pba) {
 			printk(KERN_ERR "\n %s i: %d lba: %llu entry->pba: %llu (> max_pba: %llu)", __func__, i, lba, entry->pba, ctx->sb->max_pba);
 			dump_stack();
 			entry->pba = 0;
 			entry = entry + 1;
+			lba = lba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
 			continue;
 		}
 		/* TODO: right now everything should be zeroed out */
@@ -5531,6 +5537,34 @@ int add_tm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr)
 
 #define NR_SECTORS_IN_BLK 8
 
+int verify_translation_map(struct ctx *ctx)
+{
+	sector_t pba = 0, lba = 0;
+	struct rev_extent *rev_e = NULL;
+	struct extent *e = NULL;
+
+	pba = ctx->sb->zone0_pba;
+	while(1) {
+		rev_e = lsdm_rb_revmap_find(ctx, pba, 0, ctx->sb->max_pba, __func__);
+		if (!rev_e) {
+			printk(KERN_ERR "\n Could not find lba: %llu pba: %llu", lba, pba);
+			break;
+		}
+		e = rev_e->ptr_to_tm;
+		if (e->len != (32768 * NR_SECTORS_IN_BLK)) {
+			printk(KERN_ERR "\n %s lsdm_rb stores: lba: %llu pba: %llu len: %llu ", __func__, e->lba, e->pba, e->len);
+		}
+		if (e->pba > pba) {
+			pba = e->pba;
+			lba = e->lba;
+		}
+		pba = pba + e->len;
+		lba = lba + e->len;
+	}
+	printk(KERN_ERR "\n %s TM entries checked!", __func__);
+	return 0;
+}
+
 /* 
  * Create a RB tree from the map on
  * disk
@@ -5548,7 +5582,7 @@ int read_translation_map(struct ctx *ctx)
 	int i = 0, ret = 0;
 	struct tm_entry * tm_entry = NULL;
 	u64 lba = 0;
-	int valid=0; //, nrentries =0, zonenr = 0;
+	int valid=0, nrentries =0, zonenr = 0;
 
 	printk(KERN_ERR "\n %s Reading TM entries from: %llu, nrblks: %ld", __func__, ctx->sb->tm_pba, nrblks);
 	
@@ -5566,17 +5600,16 @@ int read_translation_map(struct ctx *ctx)
 		//trace_printk("\n pba: %llu", pba);
 		tm_entry = (struct tm_entry *) page_address(page);
 		ret = read_extents_from_block(ctx, tm_entry, lba);
-		/*
 		valid = valid + ret;
 		nrentries = nrentries + TM_ENTRIES_BLK;
-		if (nrentries == 65536) {
-			if (valid != 0) {
-				printk(KERN_ERR "\n zonenr: %d has %d valid blks ", zonenr, valid);
+		if (nrentries >= 65536) {
+			if (valid != 32768) {
+				//printk(KERN_ERR "\n zonenr: %d has %d valid blks ", zonenr, valid);
 			}
 			valid = 0;
 			nrentries = 0;
 			zonenr++;
-		} */
+		}
 		add_tm_page_kv_store_by_blknr(ctx, page, sectornr/NR_SECTORS_IN_BLK);
 		/* Every 512 byte sector has a LBA in SMR drives, the translation map is recorded for every block
 		 * instead. So every translation entry covers 8 sectors or 8 lbas.
@@ -5589,6 +5622,7 @@ int read_translation_map(struct ctx *ctx)
 		blknr = blknr + 1;
 	}
 	printk(KERN_ERR "\n %s TM entries read!", __func__);
+	verify_translation_map(ctx);
 	return 0;
 }
 
@@ -6061,12 +6095,13 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			i++;
 			continue;
 		}
-		else if (entry->vblocks == 0) {
+		if (entry->vblocks == 0) {
     			//printk(KERN_ERR "\n Free: *segnr: %u", *zonenr);
 			mark_zone_free(ctx , *zonenr, 1);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
-			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %u entry->mtime: %lu", *zonenr, entry->vblocks, entry->mtime);
+			if (entry->vblocks != 32768)
+				printk(KERN_ERR "\n *segnr: %u entry->vblocks: %u entry->mtime: %lu", *zonenr, entry->vblocks, entry->mtime);
 			ret = update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__);
 			if (ret < 0) {
 				printk(KERN_ERR "\n Memory error, write a memory shrinker!");

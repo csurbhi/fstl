@@ -133,17 +133,16 @@ char * read_block(int fd, sector_t pba)
 /* Each zone has NR_BLKS_IN_ZONE ie 65536 entries */
 void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 {
-	sector_t tm_pba;
+	sector_t tm_pba, data_pba, lba = 0;
 	unsigned int nr_blks, freed=0, entries=0;
 	struct tm_entry *entry;
 	char buffer[BLK_SZ];
 	u64 offset;
+	u32 boffset;
 	unsigned remaining_entries;
-	unsigned long long data_pba;
-	unsigned long long lba = 0;
 	int i, j, ret;
 
-	u64 nr_tm_entries = (nr_zones * NR_BLKS_IN_ZONE);
+	u64 nr_tm_entries = (nr_zones * 65536);
 	u32 nr_tm_entries_per_blk = BLK_SZ/ sizeof(struct tm_entry);
         u64 nr_tm_blks = nr_tm_entries / nr_tm_entries_per_blk;
 	if (nr_tm_entries % nr_tm_entries_per_blk)
@@ -156,16 +155,18 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 		exit(-1);
 	}
 
-	printf("\n ** %s Writing tm blocks at pba: %llu, nrblks: %u", __func__, tm_pba, nr_blks);
+	printf("\n ** %s nr_zones: %d, Writing tm blocks at pba: %llu, nrblks: %u", __func__, nr_zones, tm_pba, nr_blks);
 
-	offset = sb->tm_pba * SECTOR_SIZE;
-	data_pba = sb->zone0_pba;
-	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, tm_pba, ret);
-		perror("!! (before write) Error in lseek64: \n");
-		exit(errno);
+	ret = lseek(fd, 0, SEEK_SET);
+	for (i = 0; i< sb->tm_pba; i++) {
+		ret = lseek(fd, SECTOR_SIZE, SEEK_CUR);
+		if (ret < 0) {
+			printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, tm_pba, ret);
+			perror("!! (before write) Error in lseek64: \n");
+			exit(errno);
+		}
 	}
+	offset = sb->tm_pba * SECTOR_SIZE;
 
 
 	remaining_entries = nr_tm_entries;
@@ -173,10 +174,12 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 	entries = 0;
 	freed = 0;
 	int zonenr = 0;
+	lba = 0;
+	data_pba = sb->zone0_pba;
 	for(i=0; i<nr_tm_blks; i++) {
 		memset(buffer, 0, BLK_SZ);
 		memset(entry, 0, sizeof(struct tm_entry));
-		offset = 0;
+		boffset = 0;
 		for(j=0; j<nr_tm_entries_per_blk; j++) {
 			if (freed < freeblks) {
 				/* as if trim is run on these blks */
@@ -185,16 +188,16 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 			} else {
 				entry->pba = data_pba;
 			}
-			memcpy(buffer + offset, entry, sizeof(struct tm_entry));
+			memcpy(buffer + boffset, entry, sizeof(struct tm_entry));
+			boffset = boffset + sizeof(struct tm_entry);
 			data_pba = data_pba + NR_SECTORS_IN_BLK;
 			lba = lba + NR_SECTORS_IN_BLK;
 			assert(data_pba < sb->max_pba);
-			offset = offset + sizeof(struct tm_entry);
 			remaining_entries--;
 			entries++;
 			if (entries == 65536) {
 				entries = 0;
-				if (freed != 6553)
+				if (freed != 327678)
 					printf("\n %d Freed: %d ", zonenr, freed);
 				freed = 0;
 				zonenr++;
@@ -210,12 +213,12 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 	}
 	free(entry);
 
+	/*
 	int vblks = 0;
 	entries = 0;
 	char * ptr;
 	zonenr = 0;
 	tm_pba = sb->tm_pba;
-	/*
 	for(i=0; i<nr_tm_blks; i++) {
 		offset = 0;
 		ptr = read_block(fd, tm_pba);
@@ -236,7 +239,9 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 		}
 		tm_pba = tm_pba + 8;
 		free(ptr);
-	}*/
+	}
+	printf("\n %s ... end .... zonenr: %d ", __func__, zonenr);
+	*/
 }
 
 void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int freeblks)
