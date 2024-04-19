@@ -17,6 +17,7 @@ all:
 	gcc write_fullzones.c -o writefullzones
 	gcc read_fullzones.c -o readfullzones
 	gcc populate_disk.c -o populate
+	gcc zone-populate.c -o zonepopulate
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean
