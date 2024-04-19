@@ -1141,6 +1141,7 @@ static int select_zone_to_clean(struct ctx *ctx, int mode, const char *func)
 	struct gc_zone_node * znode = NULL;
 
 	//if (mode == BG_GC) {
+	//
 		node = rb_first(&ctx->gc_cost_root);
 		if (!node)
 			return -1;
@@ -5790,6 +5791,7 @@ unsigned int get_cb_cost(struct ctx *ctx , u32 nrblks, u64 mtime)
 
 unsigned int get_cost(struct ctx *ctx, u32 nrblks, u64 age, char gc_mode)
 {
+	return nrblks;
 	if (gc_mode == GC_GREEDY) {
 		return nrblks;
 	}
@@ -5967,7 +5969,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 		}
 		 /* For Greedy, cost is #valid blks. We prefer lower cost.
 		 */
-		if (cost > cost_node->cost) {
+		if (cost < cost_node->cost) {
 			link = &(*link)->rb_left;
 		} else {
 			link = &(*link)->rb_right;
