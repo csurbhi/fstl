@@ -119,7 +119,6 @@ void put_free_zone(struct ctx *ctx, u64 pba);
 struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba);
 int do_recovery(struct ctx *ctx);
 struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx);
-int add_tm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr);
 int read_revmap_bitmap(struct ctx *ctx);
 void process_revmap_entries_on_boot(struct ctx *ctx, struct page *page);
 int read_revmap(struct ctx *ctx);
@@ -138,6 +137,13 @@ static void add_revmap_entry(struct ctx * ctx, __le64 lba, __le64 pba, int nrsec
 int lsdm_map_io(struct dm_target *dm_target, struct bio *bio);
 int __init ls_dm_init(void);
 void __exit ls_dm_exit(void);
+int read_rev_translation_map(struct ctx *);
+void mark_disk_full(struct ctx *ctx);
+void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8);
+static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent);
+int remove_rev_translation_entry(struct ctx * ctx, sector_t pba, unsigned int len);
+int add_rev_translation_entry(struct ctx * ctx, sector_t lba, sector_t pba, size_t len);
+struct tm_page *add_rev_tm_page_kv_store(struct ctx *ctx, sector_t pba);
 
 long nrpages;
 
@@ -789,7 +795,55 @@ static struct extent * lsdm_rb_insert(struct ctx *ctx, struct extent *new)
 	return NULL;
 }
 
+static void find_and_remove_rev_tm(struct ctx *ctx, sector_t lba, unsigned int len)
+{
+	struct extent *e;
+	unsigned overlap, diff;
+	sector_t pba;
 
+	while(1) {
+		e = lsdm_rb_geq(ctx, lba, 0);
+		/* case of no overlap */
+		if ((e == NULL) || (e->lba >= (lba + len)) || ((e->lba + e->len) <= lba))  {
+			break;
+		}
+
+		/* Case of Overlap, e always overlaps with bio */
+		if (e->lba > lba) {
+		/*   		 [eeeeeeeeeeee]
+		 *	[---------bio------] 
+		 */
+			diff = e->lba - lba;
+			lba = lba + diff;
+			len = len - diff;
+			/* we fall through as e->lba == lba now */
+		} 
+		//(e->lba <= lba) 
+		/* [eeeeeeeeeeee] eeeeeeeeeeeee]<- could be shorter or longer
+		 */
+		/*  [---------bio------] */
+		overlap = e->lba + e->len - lba;
+		diff = lba - e->lba;
+		BUG_ON(diff < 0);
+		pba = e->pba + diff;
+		if (overlap >= len) { 
+		/* e is bigger than bio, so overlap >= nr_sectors, no further
+		 * splitting is required. Previous splits if any, are chained
+		 * to the last one as 'clone' is their parent.
+		 */
+			remove_rev_translation_entry(ctx, pba, len);
+			break;
+
+		} else {
+			/* overlap is smaller than nr_sectors remaining. */
+			remove_rev_translation_entry(ctx, pba, overlap);
+			/* Since e was smaller, we want to search for the next e */
+			len = len - overlap;
+			lba = lba + overlap;
+		}
+	}
+	return;
+}
 
 
 /* Update mapping. Removes any total overlaps, edits any partial
@@ -1342,12 +1396,6 @@ static int cmp_list_nodes(void *priv, struct list_head *lha, struct list_head *l
 	return 1;
 }
  */
-void mark_disk_full(struct ctx *ctx);
-void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8);
-
-static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent);
-struct tm_page *add_tm_page_kv_store(struct ctx *, sector_t);
-int add_translation_entry(struct ctx *, sector_t , sector_t , size_t ); 
 /* 
  * The extent that we are about to write will definitely fit into
  * the gc write frontier. No one is writing to the gc frontier
@@ -1395,7 +1443,7 @@ static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	/*---------------------*/
 	up_write(&ctx->lsdm_rev_lock);
 	//printk(KERN_ERR "\n %s About to add: lba: %llu pba: %llu , len: %llu e.len: %llu" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
-	add_translation_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
+	add_rev_translation_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	//printk(KERN_ERR "\n %s Added rb entry ! lba: %llu pba: %llu , len: %llu e.len: %u" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	return 0;
@@ -3755,98 +3803,6 @@ void sit_ent_add_mtime(struct ctx *ctx, sector_t pba)
 }
 
 struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node **parent);
-/*
- * If this length cannot be accomodated in this page
- * search and add another page for this next
- * lba. Remember this translation table will
- * go on the disk and is block based and not 
- * extent based
- *
- * Depending on the location within a page, add the lba.
- */
-int add_translation_entry(struct ctx * ctx, sector_t lba, sector_t pba, size_t len) 
-{
-	struct tm_entry * ptr;
-	int index, i, zonenr = 0, blknr;
-	int nrblks = len >> SECTOR_BLK_SHIFT;
-	struct tm_page * tm_page = NULL;
-	struct page *page;
-
-	BUG_ON(len < 0);
-	BUG_ON(nrblks == 0);
-	BUG_ON(pba == 0);
-	mutex_lock(&ctx->tm_kv_store_lock);
-	tm_page = add_tm_page_kv_store(ctx, lba);
-	if (!tm_page) {
-		mutex_unlock(&ctx->tm_kv_store_lock);
-		printk(KERN_ERR "%s NO memory! ", __func__);
-		BUG();
-	}
-	tm_page->flag = NEEDS_FLUSH;
-	/* Call this under the kv store lock, else it will race with removal/flush code
-	 */
-	page = tm_page->page;
-	ptr = (struct tm_entry *) page_address(page);
-	/* Do not modify the lba, we will need it later */
-	/* lba is sector addressable, whereas translation entry is per block
-	 * so we first convert the address to a blk nr and then find out the
-	 * position in the page using that blknr
-	 */
-	blknr = (lba >> SECTOR_BLK_SHIFT);
-	index = blknr %  TM_ENTRIES_BLK;
-	ptr = ptr + index;
-	BUG_ON(ctx->sb->max_pba == 0);
-	//trace_printk("\n %s zonenr: %d lba: %llu, pba: %llu, len: %zu nrblks: %d", __func__, get_zone_nr(ctx, pba), lba, pba, len, nrblks);
-	for(i=0; i<nrblks; i++) {
-		if (pba > ctx->sb->max_pba) {
-			printk(KERN_ERR "\n %s lba: %llu pba: %llu max_pba: %llu len: %zu i: %d", __func__, lba, pba, ctx->sb->max_pba, len, i);
-			mutex_unlock(&ctx->tm_kv_store_lock);
-			BUG();
-			return -ENOMEM;
-		}
-		/*-----------------------------------------------*/
-		if (ptr->pba == pba) {
-			printk(KERN_ERR "\n 1. lba: %llu, ptr->pba: %llu pba: %llu", lba, ptr->pba, pba);
-			/* repeated entry - retrieved either from on-disk tm  */
-			/* for now we are not flushing, so this should not be here */
-			mutex_unlock(&ctx->tm_kv_store_lock);
-			BUG_ON(1);
-			return -ENOMEM;
-		}
-		/* lba can be 0, but pba cannot be, so this entry is empty! */
-		if (ptr->pba != 0) {
-			/* decrement vblocks for the segment that has
-			 * the stale block
-			 */
-			zonenr = get_zone_nr(ctx, ptr->pba);
-			//trace_printk("\n %s Overwrite a block at LBA: %llu, orig PBA: %llu origzone: %d new PBA: %llu ", __func__, lba, ptr->pba, zonenr, pba);
-			sit_ent_vblocks_decr(ctx, ptr->pba);
-		}
-		ptr->pba = pba;
-		sit_ent_vblocks_incr(ctx, pba);
-		pba = pba + NR_SECTORS_IN_BLK;
-		lba = lba + NR_SECTORS_IN_BLK;
-		index = index + 1;
-		if (index < TM_ENTRIES_BLK) {
-			ptr++;
-			continue;
-		} 
-		tm_page = add_tm_page_kv_store(ctx, lba);
-		if (!tm_page) {
-			printk(KERN_ERR "%s NO memory! ", __func__);
-			mutex_unlock(&ctx->tm_kv_store_lock);
-			BUG_ON(1);
-			return -ENOMEM;
-		}
-		tm_page->flag = NEEDS_FLUSH;
-		page = tm_page->page;
-		ptr = (struct tm_entry *) page_address(page);
-		index = 0;
-	}
-	mutex_unlock(&ctx->tm_kv_store_lock);
-	return 0;	
-}
-
 /* We are reading the lba from the lsdm tree in memory.
  * We will have a problem when the tree becomes so big that
  * it cannot be held in memory
@@ -3929,6 +3885,143 @@ struct page * read_tm_page(struct ctx * ctx, u64 lba)
 	return page;
 }
 
+int add_rev_translation_entry(struct ctx * ctx, sector_t lba, sector_t pba, size_t len) 
+{
+	struct rev_tm_entry * ptr;
+	int index, i, blknr;
+	int nrblks = len >> SECTOR_BLK_SHIFT;
+	struct tm_page * rev_tm_page = NULL;
+	struct page *page;
+
+	BUG_ON(len < 0);
+	BUG_ON(nrblks == 0);
+	BUG_ON(pba == 0);
+	mutex_lock(&ctx->tm_kv_store_lock);
+	rev_tm_page = add_rev_tm_page_kv_store(ctx, lba);
+	if (!rev_tm_page) {
+		mutex_unlock(&ctx->tm_kv_store_lock);
+		printk(KERN_ERR "%s NO memory! ", __func__);
+		BUG();
+	}
+	rev_tm_page->flag = NEEDS_FLUSH;
+	/* Call this under the kv store lock, else it will race with removal/flush code
+	 */
+	page = rev_tm_page->page;
+	ptr = (struct rev_tm_entry *) page_address(page);
+	/* Do not modify the lba, we will need it later */
+	/* lba is sector addressable, whereas translation entry is per block
+	 * so we first convert the address to a blk nr and then find out the
+	 * position in the page using that blknr
+	 */
+	blknr = (pba >> SECTOR_BLK_SHIFT);
+	index = blknr %  REV_TM_ENTRIES_BLK;
+	ptr = ptr + index;
+	BUG_ON(ctx->sb->max_pba == 0);
+	for(i=0; i<nrblks; i++) {
+		if (lba > ctx->sb->max_pba) {
+			printk(KERN_ERR "\n %s lba: %llu pba: %llu max_pba: %llu len: %zu i: %d", __func__, lba, pba, ctx->sb->max_pba, len, i);
+			mutex_unlock(&ctx->tm_kv_store_lock);
+			BUG();
+			return -ENOMEM;
+		}
+		/*-----------------------------------------------*/
+		if (ptr->lba == lba) {
+			printk(KERN_ERR "\n 1. lba: %llu, ptr->pba: %llu pba: %llu", pba, ptr->lba, lba);
+			/* repeated entry - retrieved either from on-disk tm  */
+			/* for now we are not flushing, so this should not be here */
+			mutex_unlock(&ctx->tm_kv_store_lock);
+			BUG_ON(1);
+			return -ENOMEM;
+		}
+		/* we need to incr the vblocks always */
+		ptr->lba = lba;
+		sit_ent_vblocks_incr(ctx, pba);
+		pba = pba + NR_SECTORS_IN_BLK;
+		lba = lba + NR_SECTORS_IN_BLK;
+		index = index + 1;
+		if (index < REV_TM_ENTRIES_BLK) {
+			ptr++;
+			continue;
+		} 
+		rev_tm_page = add_rev_tm_page_kv_store(ctx, lba);
+		if (!rev_tm_page) {
+			printk(KERN_ERR "%s NO memory! ", __func__);
+			mutex_unlock(&ctx->tm_kv_store_lock);
+			BUG_ON(1);
+			return -ENOMEM;
+		}
+		rev_tm_page->flag = NEEDS_FLUSH;
+		page = rev_tm_page->page;
+		ptr = (struct rev_tm_entry *) page_address(page);
+		index = 0;
+	}
+	mutex_unlock(&ctx->tm_kv_store_lock);
+	return 0;	
+}
+
+int remove_rev_translation_entry(struct ctx * ctx, sector_t pba, unsigned int len) 
+{
+	struct rev_tm_entry * ptr;
+	int index, i, blknr;
+	int nrblks = len >> SECTOR_BLK_SHIFT;
+	struct tm_page * rev_tm_page = NULL;
+	struct page *page;
+
+	BUG_ON(len < 0);
+	BUG_ON(nrblks == 0);
+	mutex_lock(&ctx->tm_kv_store_lock);
+	rev_tm_page = add_rev_tm_page_kv_store(ctx, pba);
+	if (!rev_tm_page) {
+		mutex_unlock(&ctx->tm_kv_store_lock);
+		printk(KERN_ERR "%s NO memory! ", __func__);
+		BUG();
+	}
+	rev_tm_page->flag = NEEDS_FLUSH;
+	/* Call this under the kv store lock, else it will race with removal/flush code
+	 */
+	page = rev_tm_page->page;
+	ptr = (struct rev_tm_entry *) page_address(page);
+	/* Do not modify the lba, we will need it later */
+	/* lba is sector addressable, whereas translation entry is per block
+	 * so we first convert the address to a blk nr and then find out the
+	 * position in the page using that blknr
+	 */
+	blknr = (pba >> SECTOR_BLK_SHIFT);
+	index = blknr %  REV_TM_ENTRIES_BLK;
+	ptr = ptr + index;
+	BUG_ON(ctx->sb->max_pba == 0);
+	for(i=0; i<nrblks; i++) {
+		if (pba > ctx->sb->max_pba) {
+			printk(KERN_ERR "\n %s pba: %llu max_pba: %llu len: %u i: %d", __func__, pba, ctx->sb->max_pba, len, i);
+			mutex_unlock(&ctx->tm_kv_store_lock);
+			BUG();
+			return -ENOMEM;
+		}
+		/*-----------------------------------------------*/
+		sit_ent_vblocks_decr(ctx, pba);
+		ptr->lba = 0;
+		pba = pba + NR_SECTORS_IN_BLK;
+		index = index + 1;
+		if (index < REV_TM_ENTRIES_BLK) {
+			ptr++;
+			continue;
+		} 
+		rev_tm_page = add_rev_tm_page_kv_store(ctx, pba);
+		if (!rev_tm_page) {
+			printk(KERN_ERR "%s NO memory! ", __func__);
+			mutex_unlock(&ctx->tm_kv_store_lock);
+			BUG_ON(1);
+			return -ENOMEM;
+		}
+		rev_tm_page->flag = NEEDS_FLUSH;
+		page = rev_tm_page->page;
+		ptr = (struct rev_tm_entry *) page_address(page);
+		index = 0;
+	}
+	mutex_unlock(&ctx->tm_kv_store_lock);
+	return 0;	
+}
+
 /*
  * Note that blknr is 4096 bytes aligned. Whereas our 
  * LBA is 512 bytes aligned. So we convert the blknr
@@ -3991,7 +4084,7 @@ struct page * read_block(struct ctx *ctx, u64 base, u64 sectornr)
  */
 struct tm_page * search_tm_kv_store(struct ctx *ctx, u64 blknr, struct rb_node **parent)
 {
-	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_root *root = &ctx->rev_tm_rb_root;
 	struct rb_node *node = NULL;
 
 	struct tm_page *node_ent;
@@ -4019,7 +4112,7 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page);
 void remove_translation_pages(struct ctx *ctx)
 {
 	struct tm_page *tm_page;
-	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_root *root = &ctx->rev_tm_rb_root;
 	struct rb_node *node = root->rb_node;
 
 	//printk(KERN_ERR "\n Inside %s ", __func__);
@@ -4046,7 +4139,7 @@ void remove_translation_pages(struct ctx *ctx)
 
 void free_translation_pages(struct ctx *ctx)
 {
-	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_root *root = &ctx->rev_tm_rb_root;
 	struct rb_node *node;
 
 	node = root->rb_node;
@@ -4134,9 +4227,9 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	 * We convert it to sector number as bio_submit expects that.
 	 */
 	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
-	BUG_ON(pba > (ctx->sb->tm_pba + (ctx->sb->blk_count_tm << NR_SECTORS_IN_BLK)));
+	BUG_ON(pba > (ctx->sb->tm_pba + (ctx->sb->blk_count_rtm << NR_SECTORS_IN_BLK)));
 
-	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  tm_page->blknr, ctx->sb->blk_count_tm);
+	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  tm_page->blknr, ctx->sb->blk_count_rtm);
 
 	bio->bi_opf = REQ_OP_WRITE;
 	//bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
@@ -4181,7 +4274,6 @@ void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 	return;
 }
 
-int read_translation_map(struct ctx *);
 
 /* This function waits for all the translation blocks to be flushed to
  * the disk by calling wait_for_ckpt_completion and tm_ref
@@ -4189,7 +4281,7 @@ int read_translation_map(struct ctx *);
  */
 void flush_translation_blocks(struct ctx *ctx)
 {
-	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_root *root = &ctx->rev_tm_rb_root;
 	//struct blk_plug plug;
 
 	//printk(KERN_ERR "\n Inside %s ", __func__);
@@ -4276,91 +4368,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	bio_put(bio);
 }	
 
-int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba);
-
-/*
- * lba: from the LBA-PBA pair of a data block.
- * Should be called with
- *
- * LBAs are sector addresses. We expect these LBA to be divisible by 8
- * perfectly, ie. they are always the address of the first sector in a
- * block. The LBA of the next block increases by 8.
- * We expect LBAs to be
- *
- *	(&ctx->tm_kv_store_lock);
- *
- * Here blknr: is the relative TM block number that holds the entry
- * against this LBA. 
- */
-struct tm_page *add_tm_page_kv_store(struct ctx *ctx, sector_t lba)
-{
-	struct rb_root *root = &ctx->tm_rb_root;
-	struct rb_node *parent = NULL, **link = &root->rb_node;
-	struct tm_page *new_tmpage, *parent_ent;
-	u64 blknr, lba_blk;
-	u64 addr;
-	/* convert the sector lba to a blknr and then find out the relative
-	 * blknr where we find the translation entry from the first
-	 * translation block.
-	 *
-	 */
-	BUG_ON(lba > ctx->sb->max_pba);
-	lba_blk = lba >> SECTOR_BLK_SHIFT;
-	blknr = lba_blk/TM_ENTRIES_BLK;
-	BUG_ON(blknr > ctx->sb->blk_count_tm);
-
-	new_tmpage = search_tm_kv_store(ctx, blknr, &parent);
-	if (new_tmpage) {
-		//trace_printk("\n %s 1) lba: %llu, tm blk: %d, page: %p tm_entries_blk: #TM_ENTRIES_BLK", __func__, lba, blknr, new_tmpage);
-		return new_tmpage;
-	}
-
-	if (parent) {
-		parent_ent = rb_entry(parent, struct tm_page, rb);
-		BUG_ON (blknr == parent_ent->blknr);
-		if (blknr < parent_ent->blknr) {
-			/* Attach new node to the left of parent */
-			link = &parent->rb_left;
-		}
-		else { 
-			/* Attach new node to the right of parent */
-			link = &parent->rb_right;
-		}
-	} 
-
-	new_tmpage = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
-	if (!new_tmpage) {
-		printk(KERN_ERR "\n %s cannot allocate new_tmpage ", __func__);
-		return NULL;
-	}
-	
-	RB_CLEAR_NODE(&new_tmpage->rb);
-
-	//printk("\n %s lba: %llu blknr: %d tm_pba: %llu \n", __func__, lba, blknr, ctx->sb->tm_pba);
-
-	//new_tmpage->page = read_block(ctx, ctx->sb->tm_pba, (blknr * NR_SECTORS_IN_BLK));
-	new_tmpage->page = alloc_page(__GFP_ZERO|GFP_KERNEL);
-	if (!new_tmpage->page) {
-		printk(KERN_ERR "\n %s read_block  failed! could not allocate page! \n", __func__);
-		kmem_cache_free(ctx->tm_page_cache, new_tmpage);
-		return NULL;
-	}
-	addr = (unsigned long) page_address(new_tmpage->page);
-	//trace_printk("\n %s 2) Added new! lba: %llu, tm blk: %d, page: %p tm_entries_blk: #TM_ENTRIES_BLK", __func__, lba, blknr, new_tmpage);
-	new_tmpage->blknr = blknr;
-	//printk("\n %s: lba: %llu blknr: %llu  NR_SECTORS_IN_BLK * TM_ENTRIES_BLK: %ld \n", __func__, lba, blknr, NR_SECTORS_IN_BLK * TM_ENTRIES_BLK);
-	/* Add this page to a RB tree based KV store.
-	 * Key is: blknr for this corresponding block
-	 */
-
-	rb_link_node(&new_tmpage->rb, parent, link);
-	/* Balance the tree after node is addded to it */
-	rb_insert_color(&new_tmpage->rb, root);
-	atomic_inc(&ctx->nr_tm_pages);
-    	atomic_inc(&ctx->tm_flush_count);
-	return new_tmpage;
-}
-
+int read_extents_from_block(struct ctx * ctx, struct rev_tm_entry *entry, u64 lba);
 
 /* Make the length in terms of sectors or blocks?
  * 
@@ -4398,7 +4406,7 @@ int add_block_based_translation(struct ctx *ctx, struct page *page, const char *
 			}
 			/* Call this under the kv store lock, else it will race with removal/flush code
 			 */
-			add_translation_entry(ctx, lba, pba, len);
+			add_rev_translation_entry(ctx, lba, pba, len);
 			//printk(KERN_ERR "\n %s Adding TM entry: ptr: %p ptr->extents[j].lba: %llu, ptr->extents[j].pba: %llu, ptr->extents[j].len: %u", __func__, ptr, lba, pba, len);
 		}
 	}
@@ -4518,6 +4526,72 @@ int is_revmap_block_available(struct ctx *ctx, u64 pba)
 	/* else bit is 0 and thus block is available */
 	return 1;
 
+}
+
+struct tm_page *add_rev_tm_page_kv_store(struct ctx *ctx, sector_t pba)
+{
+	struct rb_root *root = &ctx->rev_tm_rb_root;
+	struct rb_node *parent = NULL, **link = &root->rb_node;
+	struct tm_page *new_rev_tmpage, *parent_ent;
+	u64 blknr, pba_blk;
+	/* convert the sector lba to a blknr and then find out the relative
+	 * blknr where we find the translation entry from the first
+	 * translation block.
+	 *
+	 */
+	BUG_ON(pba > ctx->sb->max_pba);
+	pba_blk = pba >> SECTOR_BLK_SHIFT;
+	blknr = pba_blk/REV_TM_ENTRIES_BLK;
+	BUG_ON(blknr > ctx->sb->blk_count_rtm);
+
+	new_rev_tmpage = search_tm_kv_store(ctx, blknr, &parent);
+	if (new_rev_tmpage) {
+		//trace_printk("\n %s 1) lba: %llu, tm blk: %d, page: %p tm_entries_blk: #REV_TM_ENTRIES_BLK", __func__, lba, blknr, new_tmpage);
+		return new_rev_tmpage;
+	}
+
+	if (parent) {
+		parent_ent = rb_entry(parent, struct tm_page, rb);
+		BUG_ON (blknr == parent_ent->blknr);
+		if (blknr < parent_ent->blknr) {
+			/* Attach new node to the left of parent */
+			link = &parent->rb_left;
+		}
+		else { 
+			/* Attach new node to the right of parent */
+			link = &parent->rb_right;
+		}
+	} 
+
+	new_rev_tmpage = kmem_cache_alloc(ctx->tm_page_cache, GFP_KERNEL);
+	if (!new_rev_tmpage) {
+		printk(KERN_ERR "\n %s cannot allocate new_tmpage ", __func__);
+		return NULL;
+	}
+	
+	RB_CLEAR_NODE(&new_rev_tmpage->rb);
+
+	//printk("\n %s lba: %llu blknr: %d tm_pba: %llu \n", __func__, lba, blknr, ctx->sb->rtm_pba);
+
+	//new_tmpage->page = read_block(ctx, ctx->sb->rtm_pba, (blknr * NR_SECTORS_IN_BLK));
+	new_rev_tmpage->page = alloc_page(__GFP_ZERO|GFP_KERNEL);
+	if (!new_rev_tmpage->page) {
+		printk(KERN_ERR "\n %s read_block  failed! could not allocate page! \n", __func__);
+		kmem_cache_free(ctx->tm_page_cache, new_rev_tmpage);
+		return NULL;
+	}
+	new_rev_tmpage->blknr = blknr;
+	//printk("\n %s: lba: %llu blknr: %llu  NR_SECTORS_IN_BLK * REV_TM_ENTRIES_BLK: %ld \n", __func__, lba, blknr, NR_SECTORS_IN_BLK * REV_TM_ENTRIES_BLK);
+	/* Add this page to a RB tree based KV store.
+	 * Key is: blknr for this corresponding block
+	 */
+
+	rb_link_node(&new_rev_tmpage->rb, parent, link);
+	/* Balance the tree after node is addded to it */
+	rb_insert_color(&new_rev_tmpage->rb, root);
+	atomic_inc(&ctx->nr_tm_pages);
+    	atomic_inc(&ctx->tm_flush_count);
+	return new_rev_tmpage;
 }
 
 /* Waits until the value of refcount becomes 1  */
@@ -4828,7 +4902,8 @@ void sub_write_done(struct work_struct * w)
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
 	len = (len >> SECTOR_BLK_SHIFT) << SECTOR_BLK_SHIFT;
-
+	/* Do this before the RB tree is updated, as we need to remove the old translation entries and adjust the valid blks corresponding to the zone in cache if any */
+	find_and_remove_rev_tm(ctx, lba, len);
 	//BUG_ON(pba == 0);
 	//BUG_ON(pba > ctx->sb->max_pba);
 	//BUG_ON(lba > ctx->sb->max_pba);
@@ -4846,7 +4921,7 @@ void sub_write_done(struct work_struct * w)
 	add_revmap_entry(ctx, lba, pba, len);
 	/*-------------------------------*/
 	up_write(&ctx->lsdm_rev_lock);
-	add_translation_entry(ctx, lba, pba, len);
+	add_rev_translation_entry(ctx, lba, pba, len);
 	//printk(KERN_ERR "\n %s Done !! zonenr: %d lba: %llu, pba: %llu, len: %u kref: %d \n", __func__, get_zone_nr(ctx, pba), lba, pba, len, kref_read(&bioctx->ref));
 	kref_put(&bioctx->ref, write_done);
 	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
@@ -5442,10 +5517,10 @@ int mark_zone_occupied(struct ctx *ctx , int zonenr)
  * lba: starting lba corresponding to the pba recorded in this block
  *
  */
-int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
+int read_extents_from_block(struct ctx * ctx, struct rev_tm_entry *entry, u64 pba)
 {
 	int i = 0;
-	int nr_extents = TM_ENTRIES_BLK;
+	int nr_extents = REV_TM_ENTRIES_BLK;
 	int ret = 0;
 
 	while (i < nr_extents) {
@@ -5453,41 +5528,32 @@ int read_extents_from_block(struct ctx * ctx, struct tm_entry *entry, u64 lba)
 		/* If there are no more recorded entries on disk, then
 		 * dont add an entries further
 		 */
-		if (entry->pba == 0) {
-			lba = lba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
+		if (entry->lba > ctx->sb->max_pba) {
 			entry = entry + 1;
-			continue;
-		}
-		if (entry->pba > ctx->sb->max_pba) {
-			printk(KERN_ERR "\n %s i: %d lba: %llu entry->pba: %llu (> max_pba: %llu)", __func__, i, lba, entry->pba, ctx->sb->max_pba);
-			dump_stack();
-			entry->pba = 0;
-			entry = entry + 1;
-			lba = lba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
+			pba = pba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
 			continue;
 		}
 		/* TODO: right now everything should be zeroed out */
-		//panic("Why are there any already mapped extents?");
 		//printk(KERN_ERR "\n %s i: %d lba: %llu entry->pba: %llu", __func__, i, lba, entry->pba);
 		down_write(&ctx->lsdm_rb_lock);
-		lsdm_rb_update_range(ctx, lba, entry->pba, NR_SECTORS_IN_BLK);
+		lsdm_rb_update_range(ctx, entry->lba, pba, NR_SECTORS_IN_BLK);
 		up_write(&ctx->lsdm_rb_lock);
-		lba = lba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
+		pba = pba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
 		entry = entry + 1;
 		ret++;
 	}
 	return ret;
 }
 
-int add_tm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr)
+int add_rtm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr)
 {
-	struct rb_root *root = &ctx->tm_rb_root;
+	struct rb_root *root = &ctx->rev_tm_rb_root;
 	struct rb_node *parent = NULL, **link = &root->rb_node;
 	struct rb_node *node = NULL;
 	struct tm_page *node_ent;
 	struct tm_page *new_tmpage, *parent_ent;
 
-	BUG_ON(blknr > ctx->sb->blk_count_tm);
+	BUG_ON(blknr > ctx->sb->blk_count_rtm);
 
 	parent = NULL;
 	node = root->rb_node;
@@ -5538,34 +5604,6 @@ int add_tm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr)
 
 #define NR_SECTORS_IN_BLK 8
 
-int verify_translation_map(struct ctx *ctx)
-{
-	sector_t pba = 0, lba = 0;
-	struct rev_extent *rev_e = NULL;
-	struct extent *e = NULL;
-
-	pba = ctx->sb->zone0_pba;
-	while(1) {
-		rev_e = lsdm_rb_revmap_find(ctx, pba, 0, ctx->sb->max_pba, __func__);
-		if (!rev_e) {
-			printk(KERN_ERR "\n Could not find lba: %llu pba: %llu", lba, pba);
-			break;
-		}
-		e = rev_e->ptr_to_tm;
-		if (e->len != (32768 * NR_SECTORS_IN_BLK)) {
-			printk(KERN_ERR "\n %s lsdm_rb stores: lba: %llu pba: %llu len: %llu ", __func__, e->lba, e->pba, e->len);
-		}
-		if (e->pba > pba) {
-			pba = e->pba;
-			lba = e->lba;
-		}
-		pba = pba + e->len;
-		lba = lba + e->len;
-	}
-	printk(KERN_ERR "\n %s TM entries checked!", __func__);
-	return 0;
-}
-
 /* 
  * Create a RB tree from the map on
  * disk
@@ -5574,22 +5612,20 @@ int verify_translation_map(struct ctx *ctx)
  * NOT a sector!!
  * TODO
  */
-int read_translation_map(struct ctx *ctx)
+int read_rev_translation_map(struct ctx *ctx)
 {
 	unsigned long blknr, sectornr;
-	/* blk_count_tm is 4096 bytes aligned number */
-	unsigned long nrblks = ctx->sb->blk_count_tm;
+	/* blk_count_rtm is 4096 bytes aligned number */
+	unsigned long nrblks = ctx->sb->blk_count_rtm;
 	struct page *page;
 	int i = 0, ret = 0;
-	struct tm_entry * tm_entry = NULL;
-	u64 lba = 0;
-	int valid=0, nrentries =0, zonenr = 0;
+	struct rev_tm_entry * rtm_entry = NULL;
+	u64 pba = 0;
 
 	printk(KERN_ERR "\n %s Reading TM entries from: %llu, nrblks: %ld", __func__, ctx->sb->tm_pba, nrblks);
 	
 	ctx->n_extents = 0;
 	sectornr = 0;
-	valid = 0;
 	while(i < nrblks) {
 		//printk(KERN_ERR "\n reading block: %llu, sector: %lu", ctx->sb->tm_pba, sectornr);
 		page = read_block(ctx, ctx->sb->tm_pba, sectornr);
@@ -5599,23 +5635,13 @@ int read_translation_map(struct ctx *ctx)
 		 * redundant extents should be unpopulated and so
 		 * we should find 0 and break out */
 		//trace_printk("\n pba: %llu", pba);
-		tm_entry = (struct tm_entry *) page_address(page);
-		ret = read_extents_from_block(ctx, tm_entry, lba);
-		valid = valid + ret;
-		nrentries = nrentries + TM_ENTRIES_BLK;
-		if (nrentries >= 65536) {
-			if (valid != 32768) {
-				//printk(KERN_ERR "\n zonenr: %d has %d valid blks ", zonenr, valid);
-			}
-			valid = 0;
-			nrentries = 0;
-			zonenr++;
-		}
-		add_tm_page_kv_store_by_blknr(ctx, page, sectornr/NR_SECTORS_IN_BLK);
+		rtm_entry = (struct rev_tm_entry *) page_address(page);
+		ret = read_extents_from_block(ctx, rtm_entry, pba);
+		add_rtm_page_kv_store_by_blknr(ctx, page, sectornr/NR_SECTORS_IN_BLK);
 		/* Every 512 byte sector has a LBA in SMR drives, the translation map is recorded for every block
 		 * instead. So every translation entry covers 8 sectors or 8 lbas.
 		 */
-		lba = lba + (TM_ENTRIES_BLK * 8);
+		pba = pba + (REV_TM_ENTRIES_BLK * 8);
 		i = i + 1;
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		// sectornr = sectornr + (ctx->q->limits.physical_block_size/ctx->q->limits.logical_block_size);
@@ -5623,7 +5649,6 @@ int read_translation_map(struct ctx *ctx)
 		blknr = blknr + 1;
 	}
 	printk(KERN_ERR "\n %s TM entries read!", __func__);
-	verify_translation_map(ctx);
 	return 0;
 }
 
@@ -6324,7 +6349,7 @@ int read_metadata(struct ctx * ctx)
 	printk(KERN_ERR "\n before: PBA for first revmap blk: %llu", ctx->sb->revmap_pba/NR_SECTORS_IN_BLK);
 	read_revmap(ctx);
 	printk(KERN_INFO "\n Reverse map Read!");
-	ret = read_translation_map(ctx);
+	ret = read_rev_translation_map(ctx);
 	if (0 > ret) {
 		__free_pages(ctx->sb_page, 0);
 		__free_pages(ctx->ckpt_page, 0);
@@ -6609,7 +6634,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	init_rwsem(&ctx->lsdm_rb_lock);
 	init_rwsem(&ctx->lsdm_rev_lock);
 
-	ctx->tm_rb_root = RB_ROOT;
+	ctx->rev_tm_rb_root = RB_ROOT;
 	ctx->sit_rb_root = RB_ROOT;
 	ctx->gc_cost_root = RB_ROOT;
 	ctx->gc_zone_root = RB_ROOT;

@@ -103,6 +103,7 @@ __u8 valid_map[VBLK_MAP_SIZE];
 
 #define SIT_ENTRIES_BLK 	(BLK_SIZE/sizeof(struct lsdm_seg_entry))
 #define TM_ENTRIES_BLK 		(BLK_SIZE/sizeof(struct tm_entry))
+#define REV_TM_ENTRIES_BLK 		(BLK_SIZE/sizeof(struct tm_entry))
 
 struct lsdm_seg_entry {
 	unsigned int vblocks;  /* maximum vblocks currently are 65536 */
@@ -184,7 +185,7 @@ struct lsdm_sb {
 	__le64 blk_count_revmap;	/* # of blocks for storing reverse mapping */
 	__le64 blk_count_ckpt;		/* # of blocks for checkpoint */
 	__le64 blk_count_revmap_bm;	/* # of blocks for storing the bitmap of revmap blks availabilty */
-	__le64 blk_count_tm;		/* # of segments for Translation map */
+	__le64 blk_count_rtm;		/* # of segments for Translation map */
 	__le64 blk_count_sit;		/* # of segments for SIT */
 	__le64 zone_count_reserved;	/* # CMR zones that are reserved */
 	__le64 zone_count_main;		/* # of segments for main area */
@@ -220,6 +221,11 @@ struct lsdm_sb {
 struct tm_entry {
 	sector_t pba;
 } __attribute__((packed));
+
+struct rev_tm_entry {
+	sector_t lba;
+} __attribute__((packed));
+
 
 
 

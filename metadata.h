@@ -234,7 +234,7 @@ struct ctx {
 
 	struct rb_root	  extent_tbl_root; /* in memory extent map */
 	struct rb_root	  rev_tbl_root; /* in memory reverse extent map */
-	struct rb_root    tm_rb_root;	          /* map RB tree */
+	struct rb_root    rev_tm_rb_root;	          /* map RB tree */
 	struct rb_root	  sit_rb_root;	  /* SIT RB tree */
 	struct rb_root	  gc_cost_root;	  /* GC tree */
 	struct rb_root	  gc_zone_root;
