@@ -61,12 +61,6 @@ struct metadata_read_ctx {
 	refcount_t ref;
 };
 
-struct revmap_bioctx {
-	struct ctx * ctx;
-	struct page *page;
-	struct work_struct process_tm_work;
-};
-
 struct tm_page {
 	struct rb_node rb;
 	sector_t blknr;
@@ -285,13 +279,10 @@ struct ctx {
 	u64	gc_average;
 	int	gc_count;
 	u64	gc_total;
-       	atomic_t revmap_sector_nr;
-       	atomic_t revmap_entry_nr;
 	struct kmem_cache * bioctx_cache;
 	struct kmem_cache * extent_cache;
 	struct kmem_cache * rev_extent_cache;
 	struct kmem_cache * subbio_ctx_cache;
-	struct kmem_cache * revmap_bioctx_cache;
 	struct kmem_cache * sit_page_cache;
 	struct kmem_cache *reflist_cache;
 	struct kmem_cache *tm_page_cache;
@@ -307,27 +298,17 @@ struct ctx {
 	spinlock_t gc_ref_lock;
 	wait_queue_head_t zone_entry_flushq;
 	spinlock_t flush_zone_lock;
-	atomic_t zone_revmap_count;	/* This should always be less than 3, incremented on get_new_zone and decremented
-					 * when one zone worth of entries are written to the disk
-					 */
 	wait_queue_head_t refq;
 	wait_queue_head_t sitq;
 	wait_queue_head_t tmq;
-	struct page * revmap_page;
 	struct mutex gc_lock;
 	struct mutex tm_lock;
 	struct mutex sit_flush_lock;
 	struct mutex sit_kv_store_lock;
 	struct mutex tm_kv_store_lock;
-	/* revmap_bm stores the addresses of sb->blk_count_revmap_bm
-	 * non contiguous pages in memory
-	 */
-	struct page *revmap_bm;		/* Stores the bitmap for the reverse map blocks flush status (65536 * 2) */
-	u8	revmap_bm_order;
 	atomic_t tm_flush_count;
 	atomic_t sit_flush_count;
 	sector_t ckpt_pba;
-	sector_t revmap_pba;
 	atomic_t nr_pending_writes;
 	atomic_t nr_tm_writes;
 	atomic_t nr_sit_pages;
