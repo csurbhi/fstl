@@ -131,16 +131,17 @@ char * read_block(int fd, sector_t pba)
 }
 
 /* Each zone has NR_BLKS_IN_ZONE ie 65536 entries */
-void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
+void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 {
-	sector_t tm_pba, data_pba, lba = 0;
+	sector_t tm_pba, data_lba = 0;
 	unsigned int nr_blks, freed=0, entries=0;
-	struct tm_entry *entry;
+	struct rev_tm_entry *entry;
 	char buffer[BLK_SZ];
 	u64 offset;
 	u32 boffset;
 	unsigned remaining_entries;
 	int i, j, ret;
+	int zonenr = 0;
 
 	u64 nr_tm_entries = (nr_zones * 65536);
 	u32 nr_tm_entries_per_blk = BLK_SZ/ sizeof(struct tm_entry);
@@ -173,32 +174,27 @@ void write_tm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 	printf("\n remaining entries: %llu #entries per blk: %llu nr_tm_blks: %llu", remaining_entries, nr_tm_entries_per_blk, nr_tm_blks);
 	entries = 0;
 	freed = 0;
-	int zonenr = 0;
-	lba = 0;
-	data_pba = sb->zone0_pba;
+	data_lba = 0;
 	for(i=0; i<nr_tm_blks; i++) {
 		memset(buffer, 0, BLK_SZ);
-		memset(entry, 0, sizeof(struct tm_entry));
+		entry->lba = sb->max_pba + 1;
 		boffset = 0;
 		for(j=0; j<nr_tm_entries_per_blk; j++) {
 			if (freed < freeblks) {
 				/* as if trim is run on these blks */
 				freed++;
-				entry->pba = 0;
+				entry->lba = sb->max_pba + 1;
 			} else {
-				entry->pba = data_pba;
+				entry->lba = data_lba;
 			}
+			data_lba = data_lba + NR_SECTORS_IN_BLK;
 			memcpy(buffer + boffset, entry, sizeof(struct tm_entry));
 			boffset = boffset + sizeof(struct tm_entry);
-			data_pba = data_pba + NR_SECTORS_IN_BLK;
-			lba = lba + NR_SECTORS_IN_BLK;
-			assert(data_pba < sb->max_pba);
+			assert(data_lba < sb->max_pba);
 			remaining_entries--;
 			entries++;
 			if (entries == 65536) {
 				entries = 0;
-				if (freed != 327678)
-					printf("\n %d Freed: %d ", zonenr, freed);
 				freed = 0;
 				zonenr++;
 			}
@@ -328,9 +324,6 @@ int read_seg_entries_from_block(struct lsdm_sb *sb, struct lsdm_ckpt *ckpt, stru
                 if (entry->vblocks == 0) {
 			free++;
                 }
-		if (entry->vblocks != 58983) {
-			printf("\n vblocks! does not match!!!! : %d", entry->vblocks);
-		}
                 entry = entry + 1;
                 *zonenr= *zonenr + 1;
                 i++;
@@ -536,7 +529,7 @@ int main(int argc, char * argv[])
 		printf("\n");
 		return 0;
 	}
-	write_tm(fd, sb,  nr_zones, free_blks);
+	write_rtm(fd, sb,  nr_zones, free_blks);
 	write_sit(fd, sb, nr_zones, free_blks);
 	write_ckpt(fd, sb, nr_zones);
 	printf("\n Populated %d zones ", nr_zones);
