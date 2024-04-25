@@ -1107,7 +1107,7 @@ static inline void * lsdm_malloc(size_t size, gfp_t flags)
 void flush_translation_blocks(struct ctx *ctx);
 void flush_sit(struct ctx *ctx);
 
-#define DEF_FLUSH_TIME 10000 /* (milliseconds) */
+#define DEF_FLUSH_TIME 30000 /* (milliseconds) */
 #define DEF_GC_TIME	10000000 /*1000 seconds */
 
 void do_checkpoint(struct ctx *ctx);

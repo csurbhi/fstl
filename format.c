@@ -62,7 +62,7 @@ int write_to_disk(int fd, char *buf, unsigned long sectornr)
 
 	//printf("\n %s writing at sectornr: %d", __func__, sectornr);
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
 		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, sectornr, ret);
 		exit(errno);
@@ -162,31 +162,6 @@ __le64 get_nr_blks(struct lsdm_sb *sb)
 	return nr_blks;
 }
 
-/*
- * 131072 reverse map entries are stored as a part of the reverse map
- * irrespective of the size of the disk. These are entries for two zones
- * of data. 
- * sizeof(lsdm_revmap_extent): 20 
- * number of revmap extents in a sector: 25 
- * number of revmap extents in a block: 200 
- * number of blocks needed to store 65536 entries: 327 
- * number of blocks needed to store 131072 entries: 654 
- * blocks needed to represent bitmap for 654 blocks: 1
- */
-__le32 get_revmap_blk_count(struct lsdm_sb *sb)
-{
-	/* The 2 indicates 2 zones */
-	unsigned nr_rm_entries = 2 << (sb->log_zone_size - sb->log_block_size);
-	unsigned nr_rm_entries_per_blk = NR_EXT_ENTRIES_PER_SEC * NR_SECTORS_IN_BLK;
-	unsigned nr_rm_blks = nr_rm_entries / nr_rm_entries_per_blk;
-
-
-	printf("\n nr_rm_entries: %d", nr_rm_entries);
-	if (nr_rm_entries % nr_rm_entries_per_blk)
-		nr_rm_blks++;
-	return nr_rm_blks;
-}
-
 /* We store a tm entry for every 4096 block
  *
  * This accounts for the blks in the main area and excludes the blocks
@@ -207,23 +182,6 @@ __le32 get_tm_blk_count(struct lsdm_sb *sb)
 	printf("\n %s nr_tm_count: %llu", __func__, nr_tm_blks);
 	return nr_tm_blks;
 }
-
-
-__le32 get_revmap_bm_blk_count(struct lsdm_sb *sb)
-{
-	unsigned nr_revmap_blks = sb->blk_count_revmap;
-	unsigned nr_bytes = nr_revmap_blks / BITS_IN_BYTE;
-	if (nr_revmap_blks % BITS_IN_BYTE)
-		nr_bytes++;
-	unsigned nr_blks = nr_bytes / BLK_SZ;
-	if (nr_bytes % BLK_SZ)
-		nr_blks++;
-	printf("\n nr_revmap_blks: %d", nr_revmap_blks);
-	printf("\n revmap_bm_blk_count: %d", nr_blks);
-	return nr_blks;
-
-}
-
 
 __le32 get_nr_zones(struct lsdm_sb *sb)
 {
@@ -248,7 +206,7 @@ __le32 get_sit_blk_count(struct lsdm_sb *sb)
 __le32 get_metadata_zone_count(struct lsdm_sb *sb)
 {
 	/* we add the 2 for the superblock */
-	unsigned long metadata_blk_count = NR_BLKS_SB + sb->blk_count_revmap + sb->blk_count_ckpt + sb->blk_count_revmap_bm + sb->blk_count_rtm + sb->blk_count_sit;
+	unsigned long metadata_blk_count = NR_BLKS_SB + sb->blk_count_ckpt + sb->blk_count_rtm + sb->blk_count_sit;
 	unsigned long nr_blks_in_zone = (1 << sb->log_zone_size - sb->log_block_size);
 	unsigned long metadata_zone_count = metadata_blk_count / nr_blks_in_zone;
 	if (metadata_blk_count % nr_blks_in_zone)
@@ -256,12 +214,9 @@ __le32 get_metadata_zone_count(struct lsdm_sb *sb)
 	
 	printf("\n\n");
 	printf("\n ********************************************\n");
-	printf("\n sb->blk_count_revmap: %llu ", sb->blk_count_revmap);
-	printf("\n sb->blk_count_ckpt: %llu", sb->blk_count_ckpt);
-	printf("\n sb->blk_count_revmap_bm: %llu", sb->blk_count_revmap_bm);
 	printf("\n sb->blk_count_rtm: %llu", sb->blk_count_rtm);
 	printf("\n sb->blk_count_sit: %llu", sb->blk_count_sit);
-
+	printf("\n sb->blk_count_ckpt: %llu", sb->blk_count_ckpt);
 	printf("\n metadata_blk_count: %llu", metadata_blk_count);
 
 	printf("\n metadata_zone_count: %llu", metadata_zone_count);
@@ -303,34 +258,20 @@ __le32 get_reserved_zone_count()
  * LBA as ZONE_SZ/BLK_SZ
  * The blk adderss is 256MB;
  */
-__le64 get_revmap_bm_pba()
+__le64 get_tm_pba()
 {
 	return (NR_BLKS_SB * NR_SECTORS_IN_BLK);
 }
 
-__le64 get_revmap_pba(struct lsdm_sb *sb)
-{
-	u64 revmap_pba = sb->revmap_bm_pba + (sb->blk_count_revmap_bm * NR_SECTORS_IN_BLK);
-	//sb->tm_pba + (sb->blk_count_rtm * NR_SECTORS_IN_BLK);
-	return revmap_pba;
-}
-
 __le64 get_ckpt1_pba(struct lsdm_sb *sb)
 {
-	u64 cp1_pba  = sb->revmap_pba + ( sb->blk_count_revmap * NR_SECTORS_IN_BLK);
+	u64 cp1_pba  = sb->sit_pba + ( sb->blk_count_sit * NR_SECTORS_IN_BLK);
 	return cp1_pba;
 }
 
-
 __le64 get_sit_pba(struct lsdm_sb *sb)
 {
-	return sb->ckpt2_pba + NR_SECTORS_IN_BLK;
-}
-
-__le64 get_tm_pba(struct lsdm_sb *sb)
-{
-	u64 tm_pba = sb->sit_pba + (sb->blk_count_sit * NR_SECTORS_IN_BLK);
-	return tm_pba;
+	return sb->tm_pba + (sb->blk_count_rtm * NR_SECTORS_IN_BLK);
 }
 
 void read_sb(int fd, unsigned long sectornr)
@@ -394,9 +335,9 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 	printf("\n Writing %d zeroed blks, from pba: %llu", nr_blks, pba);
 	
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, pba, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, pba, ret);
 		printf("\n");
 		exit(errno);
 	}
@@ -423,7 +364,7 @@ void read_block(int fd, sector_t pba, unsigned nr_blks)
 	
 	/* lseek64 offset is in  bytes not sectors, pba is in sectors */
 	ret = lseek64(fd, (pba * SECTOR_SIZE), SEEK_SET);
-	if (ret < 0) {
+	if (ret == -1) {
 		perror(">>>> (before read) Error in lseek64: \n");
 		printf("\n");
 		exit(errno);
@@ -441,16 +382,6 @@ void read_block(int fd, sector_t pba, unsigned nr_blks)
 			}
 		}
 	}
-
-
-}
-
-/*
- * Initially the reverse map should be all zero.
- */
-void write_revmap(int fd, sector_t revmap_pba, unsigned nr_blks)
-{
-	write_zeroed_blks(fd, revmap_pba, nr_blks);
 }
 
 void write_rtm(int fd, struct lsdm_sb *sb, sector_t tm_pba, unsigned nr_blks)
@@ -462,7 +393,7 @@ void write_rtm(int fd, struct lsdm_sb *sb, sector_t tm_pba, unsigned nr_blks)
 	printf("\n ** %s Writing rtm blocks at pba: %llu, nrblks: %u", __func__, tm_pba, nr_blks);
 
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
 		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, tm_pba, ret);
 		exit(errno);
@@ -483,15 +414,7 @@ void write_rtm(int fd, struct lsdm_sb *sb, sector_t tm_pba, unsigned nr_blks)
 	}
 }
 
-
-/* Revmap bitmap: 0 indicates blk is available for writing
- */
-void write_revmap_bitmap(int fd, sector_t revmap_bm_pba, unsigned nr_blks)
-{
-	write_zeroed_blks(fd, revmap_bm_pba, nr_blks);
-}
-
-unsigned long long get_current_frontier(struct lsdm_sb *sb)
+unsigned long long get_current_frontier_tmp(struct lsdm_sb *sb)
 {
 	unsigned long tm_end_pba = sb->tm_pba + sb->blk_count_rtm * NR_SECTORS_IN_BLK;
 	unsigned long tm_end_blk_nr = tm_end_pba / NR_SECTORS_IN_BLK;
@@ -505,6 +428,42 @@ unsigned long long get_current_frontier(struct lsdm_sb *sb)
 	printf("\n tm_end_blk_nr: %ld", tm_end_blk_nr);
 	printf("\n Current Write frontier: tm_end_zone_nr: %d", tm_end_zone_nr + 1);
 	return (tm_end_zone_nr + 1) << (sb->log_zone_size - sb->log_sector_size);
+}
+
+unsigned long long get_current_frontier(struct lsdm_sb *sb)
+{
+	unsigned long ckpt2_pba = sb->ckpt2_pba;
+	unsigned int nr_sectors_per_zone = 1 << (sb->log_zone_size- sb->log_sector_size);
+	unsigned int metadata_end_zone_nr = (ckpt2_pba + 1) / nr_sectors_per_zone;
+
+	if ((ckpt2_pba + 1) % nr_sectors_per_zone) {
+		metadata_end_zone_nr = metadata_end_zone_nr + 1;
+	}
+	
+	/* The data zones start in the next zone of that of the last
+	 * metadata zone
+	 */
+	printf("\n Current frontier zonenr: %d ", metadata_end_zone_nr + 1);
+	return (metadata_end_zone_nr + 1);
+}
+
+unsigned long long get_zone0_pba(struct lsdm_sb *sb)
+{
+	unsigned long ckpt2_pba = sb->ckpt2_pba;
+	unsigned int nr_sectors_per_zone = 1 << (sb->log_zone_size- sb->log_sector_size);
+	unsigned int metadata_end_zone_nr = (ckpt2_pba + 1) / nr_sectors_per_zone;
+
+	if ((ckpt2_pba + 1) % nr_sectors_per_zone) {
+		metadata_end_zone_nr = metadata_end_zone_nr + 1;
+	}
+
+	/* The data zones start in the next zone of that of the last
+	 * metadata zone
+	 */
+	printf("\n ckpt2_pba: %ld", ckpt2_pba);
+	printf("\n metadata_end_zone_nr: %d ", metadata_end_zone_nr);
+	printf("\n data zone begins at pba: %llu ", metadata_end_zone_nr << (sb->log_zone_size - sb->log_sector_size));
+	return (metadata_end_zone_nr << (sb->log_zone_size - sb->log_sector_size));
 }
 
 unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
@@ -572,35 +531,27 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	printf("\n sb->zone_count: %d", sb->zone_count);
     	sb->zone_count_reserved = get_reserved_zone_count(sb);
 	printf("\n sb->zone_count_reserved: %d", sb->zone_count_reserved);
-	sb->blk_count_revmap = get_revmap_blk_count(sb);
-	printf("\n sb->blk_count_revmap: %d", sb->blk_count_revmap);
 	sb->max_pba = get_max_pba(sb);
 	printf("\n ******* sb->max_pba: %llu", sb->max_pba);
 	sb->blk_count_rtm = get_tm_blk_count(sb);
 	printf("\n sb->blk_count_rtm: %d", sb->blk_count_rtm);
-	sb->blk_count_revmap_bm = get_revmap_bm_blk_count(sb);
-	printf("\n sb->blk_count_revmap_bm: %d", sb->blk_count_revmap_bm);
 	sb->blk_count_ckpt = NR_CKPT_COPIES;
 	printf("\n sb->blk_count_ckpt: %d", sb->blk_count_ckpt);
 	sb->blk_count_sit = get_sit_blk_count(sb);
 	printf("\n sb->blk_count_sit: %d", sb->blk_count_sit);
-	sb->revmap_bm_pba = get_revmap_bm_pba(sb);
-	printf("\n sb->revmap_bm_pba: %u", sb->revmap_bm_pba);
-	sb->revmap_pba = get_revmap_pba(sb);
-	printf("\n sb->revmap_pba: %u", sb->revmap_pba);
+	sb->tm_pba = get_tm_pba(sb);
+	printf("\n sb->tm_pba: %u", sb->tm_pba);
+	sb->sit_pba = get_sit_pba(sb);
+	printf("\n sb->sit_pba: %u", sb->sit_pba);
 	sb->ckpt1_pba = get_ckpt1_pba(sb);
 	printf("\n sb->ckpt1_pba: %u", sb->ckpt1_pba);
 	sb->ckpt2_pba = sb->ckpt1_pba + NR_SECTORS_IN_BLK;
 	printf("\n sb->ckpt2_pba: %u", sb->ckpt2_pba);
-	sb->sit_pba = get_sit_pba(sb);
-	printf("\n sb->sit_pba: %u", sb->sit_pba);
-	sb->tm_pba = get_tm_pba(sb);
-	printf("\n sb->tm_pba: %u", sb->tm_pba);
 	sb->nr_lbas_in_zone = (1 << (sb->log_zone_size - sb->log_sector_size));
 	printf("\n nr_lbas_in_zone: %llu ", sb->nr_lbas_in_zone);
 	sb->nr_cmr_zones = cmr;
 	printf("\n sb->nr_cmr_zones: %llu", sb->nr_cmr_zones);
-	sb->zone0_pba = get_current_frontier(sb);
+	sb->zone0_pba = get_zone0_pba(sb);
 	printf("\n sb->zone0_pba: %d", sb->zone0_pba);
 	sb->zone_count_main = get_main_zone_count(sb);
 	printf("\n sb->zone_count_main: %d", sb->zone_count_main);
@@ -718,9 +669,9 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	u64 offset = sb->ckpt1_pba * SECTOR_SIZE;
 
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		printf("\n");
 		exit(errno);
 	}
@@ -735,9 +686,9 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 
 	offset = sb->ckpt2_pba * SECTOR_SIZE;
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		printf("\n");
 		exit(errno);
 	}
@@ -760,9 +711,9 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 		exit(-1);
 
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		printf("\n");
 		exit(errno);
 	}
@@ -952,12 +903,10 @@ int main(int argc, char * argv[])
 	read_sb(fd, 0);
 	read_sb(fd, 8);
 	printf("\n Superblock written at pba: %d", pba + NR_SECTORS_IN_BLK);
-	write_revmap_bitmap(fd, sb1->revmap_bm_pba, sb1->blk_count_revmap_bm);
-	write_revmap(fd, sb1->revmap_pba, sb1->blk_count_revmap);
-	write_ckpt(fd, sb1, sb1->ckpt1_pba);
+	write_rtm(fd, sb1, sb1->tm_pba, sb1->blk_count_rtm);
 	write_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
 	read_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
-	write_rtm(fd, sb1, sb1->tm_pba, sb1->blk_count_rtm);
+	write_ckpt(fd, sb1, sb1->ckpt1_pba);
 	nrblks = get_nr_blks(sb1);
 	printf("\n nrblks: %lu", nrblks);
 	//write_zeroed_blks(fd, 0, nrblks);
