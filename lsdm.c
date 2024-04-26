@@ -4387,8 +4387,6 @@ void sub_write_done(struct work_struct * w)
 	pba = subbioctx->extent.pba;
 	len = subbioctx->extent.len;
 	len = (len >> SECTOR_BLK_SHIFT) << SECTOR_BLK_SHIFT;
-	kref_put(&bioctx->ref, write_done);
-	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 	/* Do this before the RB tree is updated, as we need to remove the old translation entries and adjust the valid blks corresponding to the zone in cache if any */
 	down_write(&ctx->lsdm_rb_lock);
 	/**************************************/
@@ -4396,6 +4394,8 @@ void sub_write_done(struct work_struct * w)
 	lsdm_rb_update_range(ctx, lba, pba, len);
 	/**************************************/
 	up_write(&ctx->lsdm_rb_lock);
+	kref_put(&bioctx->ref, write_done);
+	kmem_cache_free(ctx->subbio_ctx_cache, subbioctx);
 	/* Now reads will work! so we can complete the bio */
 	add_rev_translation_entry(ctx, lba, pba, len);
 	return;
