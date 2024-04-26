@@ -139,7 +139,7 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 {
 	sector_t tm_pba, data_lba = 0;
 	unsigned int nr_blks, freed=0, entries=0;
-	struct rev_tm_entry *entry, *dentry;
+	struct rev_tm_entry *entry;
 	char buffer[BLK_SZ];
 	u64 offset;
 	char boffset;
@@ -157,14 +157,6 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 		nr_tm_blks++;
 
 	sector_t pba = sb->tm_pba + (nr_free_tm_blks * NR_SECTORS_IN_BLK);
-
-	entry = (struct tm_entry *) malloc(sizeof(struct tm_entry));
-	if (!entry) {
-		perror("\n Cannot malloc: ");
-		printf("\n");
-		exit(-1);
-	}
-
 	printf("\n ** %s nr_zones: %d, Writing tm blocks at pba: %llu, nrblks: %u nr_free_tm_blks: %d ", __func__, nr_zones, sb->tm_pba, nr_blks, nr_free_tm_blks);
 	printf("\n lseeking at offset: %llu ", pba);
 
@@ -182,22 +174,24 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 	data_lba = 0;
 
 	for(i=0; i<nr_tm_blks; i++) {
-		memset(buffer, 0, BLK_SZ);
-		entry->lba = sb->max_pba + 1;
-		dentry = buffer;
+		entry = buffer;
+		for(j=0; j<TM_ENTRIES_BLK; j++) {
+			entry->lba = sb->max_pba + 1;
+			entry = entry + 1;
+		}
+		/* Now we overwrite the buffer when required */
+		entry = buffer;
 		assert((data_lba % 512) == 0);
-		for(j=0; j<nr_tm_entries_per_blk; j++) {
+		for(j=0; j<TM_ENTRIES_BLK; j++) {
 			if (freed < freeblks) {
 				/* as if trim is run on these blks */
 				freed++;
-				entry->lba = sb->max_pba + 1;
 			} else {
 				entry->lba = data_lba;
 				remaining_entries--;
 			}
 			data_lba = data_lba + NR_SECTORS_IN_BLK;
-			memcpy(dentry, entry, sizeof(struct tm_entry));
-			dentry = dentry + 1;
+			entry = entry + 1;
 			assert(data_lba < sb->max_pba);
 			entries++;
 			if (entries == 65536) {
@@ -215,8 +209,6 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 			exit(errno);
 		}
 	}
-	free(entry);
-
 	/*
 	offset = sb->tm_pba * SECTOR_SIZE;
 	int vblks = 0;
@@ -253,22 +245,16 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int 
 {
 	unsigned entries_in_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
 	unsigned int nr_sit_blks = (nr_zones)/entries_in_blk;
-	struct lsdm_seg_entry *entry, *dentry;
+	struct lsdm_seg_entry *entry;
 	int i, j, remaining_entries = 0, mtime, ret, rem_free_entries = 0;
 	char buffer[BLK_SZ];
-	u64 offset;
+	sector_t offset;
 	int freezones = sb->zone_count_main - nr_zones;
 	unsigned int nr_free_sit_blks = (freezones)/entries_in_blk;
 
 	if (nr_zones % entries_in_blk > 0)
 		nr_sit_blks = nr_sit_blks + 1;
 
-	entry = (struct lsdm_seg_entry *) malloc(sizeof(struct lsdm_seg_entry));
-	if (!entry) {
-		perror("\n Cannot allocate: ");
-		printf("\n");
-		exit(-1);
-	}
 	printf("\n writing seg info tables at pba: %llu", sb->sit_pba);
 	printf("\n zone_count: %d ", nr_zones);
 	printf("\n nr of sit blks: %d", nr_sit_blks);
@@ -290,20 +276,17 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int 
 	assert(rem_free_entries < entries_in_blk);
 	for(i=0; i<nr_sit_blks; i++) {
 		memset(buffer, 0, BLK_SZ);
-		dentry = buffer;
+		entry = buffer;
 		for(j=0; j<entries_in_blk; j++) {
 			if (rem_free_entries > 0) {
 				rem_free_entries--;
-				entry->vblocks = 0;
-				entry->mtime = 0;
 			} else {
 				entry->vblocks = NR_BLKS_IN_ZONE - freeblks;
 				entry->mtime = mtime;
 				remaining_entries--;
 			}
 			mtime = mtime + 10;
-			memcpy(dentry, entry, sizeof(struct lsdm_seg_entry));
-			dentry = dentry + 1;
+			entry = entry + 1;
 			if (!remaining_entries)
 				break;
 		}
@@ -313,7 +296,6 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int 
 			exit(errno);
 		}
 	}
-	free(entry);
 }
 
 unsigned long get_zone_nr(struct lsdm_sb * sb, unsigned long pba)
