@@ -138,7 +138,7 @@ char * read_block(int fd, sector_t pba)
 void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 {
 	sector_t tm_pba, data_lba = 0;
-	unsigned int nr_blks, freed=0, entries=0;
+	unsigned int freed=0, entries=0;
 	struct rev_tm_entry *entry;
 	char buffer[BLK_SZ];
 	u64 offset;
@@ -157,7 +157,7 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 		nr_tm_blks++;
 
 	sector_t pba = sb->tm_pba + (nr_free_tm_blks * NR_SECTORS_IN_BLK);
-	printf("\n ** %s nr_zones: %d, Writing tm blocks at pba: %llu, nrblks: %u nr_free_tm_blks: %d ", __func__, nr_zones, sb->tm_pba, nr_blks, nr_free_tm_blks);
+	printf("\n ** %s nr_zones: %d, Writing tm blocks at pba: %llu, nrblks: %u nr_free_tm_blks: %d ", __func__, nr_zones, sb->tm_pba, nr_tm_blks, nr_free_tm_blks);
 	printf("\n lseeking at offset: %llu ", pba);
 
 	ret = lseek64(fd, pba * 512, SEEK_SET);
@@ -244,13 +244,12 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int freeblks)
 {
 	unsigned entries_in_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
-	unsigned int nr_sit_blks = (nr_zones)/entries_in_blk;
 	struct lsdm_seg_entry *entry;
 	int i, j, remaining_entries = 0, mtime, ret, rem_free_entries = 0;
 	char buffer[BLK_SZ];
 	sector_t offset;
 	int freezones = sb->zone_count_main - nr_zones;
-	unsigned int nr_free_sit_blks = (freezones)/entries_in_blk;
+	unsigned int nr_sit_blks = (nr_zones + freezones)/entries_in_blk;
 
 	if (nr_zones % entries_in_blk > 0)
 		nr_sit_blks = nr_sit_blks + 1;
@@ -358,7 +357,7 @@ int read_seg_info_table(struct lsdm_sb *sb, struct lsdm_ckpt *ckpt, int fd)
 	printf("\n %s Read seginfo from pba: %llu sectornr: %d zone0_pba: %llu \n", __func__, sb->sit_pba, sectornr, sb->zone0_pba);
 	while (nr_data_zones > 0) {
 		//trace_printk("\n zonenr: %u", zonenr);
-		if (sectornr + sb->sit_pba > sb->zone0_pba) {
+		if (sectornr > sb->zone0_pba) {
 			printf("\n Seg entry blknr cannot be bigger than the data blknr");
 			return -1;
 		}
@@ -491,7 +490,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 		printf("\n");
 		exit(-1);
 	}
-	//read_seg_info_table(sb, ckpt1, fd);
+	read_seg_info_table(sb, ckpt1, fd);
 	free(ckpt);
 	free(ckpt1);
 	printf("\n checkpoint written to disk ");
