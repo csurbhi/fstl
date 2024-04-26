@@ -62,9 +62,9 @@ int write_to_disk(int fd, char *buf, unsigned long sectornr)
 
 	//printf("\n %s writing at sectornr: %d", __func__, sectornr);
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, sectornr, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, sectornr, ret);
 		exit(errno);
 	}
 	ret = write(fd, buf, BLK_SZ);
@@ -88,7 +88,7 @@ void read_sb(int fd, unsigned long sectornr, struct lsdm_sb **sb)
 	printf("\n *********************\n");
 
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
+	if (ret == -1) {
 		perror("\n Could not lseek64: ");
 		exit(errno);
 	}
@@ -99,6 +99,10 @@ void read_sb(int fd, unsigned long sectornr, struct lsdm_sb **sb)
 		exit(errno);
 	}
 	if ((*sb)->magic != STL_SB_MAGIC) {
+		printf("\n wrong superblock!");
+		exit(-1);
+	}
+	if ((*sb)->zone0_pba % 524288) {
 		printf("\n wrong superblock!");
 		exit(-1);
 	}
@@ -118,7 +122,7 @@ char * read_block(int fd, sector_t pba)
 	
 	/* lseek64 offset is in  bytes not sectors, pba is in sectors */
 	ret = lseek64(fd, (pba * 512), SEEK_SET);
-	if (ret < 0) {
+	if (ret == -1) {
 		perror(">>>> (before read) Error in lseek64: \n");
 		exit(errno);
 	}
@@ -135,19 +139,24 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 {
 	sector_t tm_pba, data_lba = 0;
 	unsigned int nr_blks, freed=0, entries=0;
-	struct rev_tm_entry *entry;
+	struct rev_tm_entry *entry, *dentry;
 	char buffer[BLK_SZ];
 	u64 offset;
-	u32 boffset;
+	char boffset;
 	unsigned remaining_entries;
 	int i, j, ret;
 	int zonenr = 0;
+	int freezones = sb->zone_count_main - nr_zones;
 
 	u64 nr_tm_entries = (nr_zones * 65536);
 	u32 nr_tm_entries_per_blk = BLK_SZ/ sizeof(struct tm_entry);
         u64 nr_tm_blks = nr_tm_entries / nr_tm_entries_per_blk;
+	u64 nr_free_tm_entries = (freezones * 65536);
+	u64 nr_free_tm_blks = nr_free_tm_entries / nr_tm_entries_per_blk;
 	if (nr_tm_entries % nr_tm_entries_per_blk)
 		nr_tm_blks++;
+
+	sector_t pba = sb->tm_pba + (nr_free_tm_blks * NR_SECTORS_IN_BLK);
 
 	entry = (struct tm_entry *) malloc(sizeof(struct tm_entry));
 	if (!entry) {
@@ -156,29 +165,27 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 		exit(-1);
 	}
 
-	printf("\n ** %s nr_zones: %d, Writing tm blocks at pba: %llu, nrblks: %u", __func__, nr_zones, tm_pba, nr_blks);
+	printf("\n ** %s nr_zones: %d, Writing tm blocks at pba: %llu, nrblks: %u nr_free_tm_blks: %d ", __func__, nr_zones, sb->tm_pba, nr_blks, nr_free_tm_blks);
+	printf("\n lseeking at offset: %llu ", pba);
 
-	ret = lseek(fd, 0, SEEK_SET);
-	for (i = 0; i< sb->tm_pba; i++) {
-		ret = lseek(fd, SECTOR_SIZE, SEEK_CUR);
-		if (ret < 0) {
-			printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, tm_pba, ret);
-			perror("!! (before write) Error in lseek64: \n");
-			exit(errno);
-		}
+	ret = lseek64(fd, pba * 512, SEEK_SET);
+	if (ret == -1) {
+		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, pba, ret);
+		exit(errno);
 	}
-	offset = sb->tm_pba * SECTOR_SIZE;
-
 
 	remaining_entries = nr_tm_entries;
-	printf("\n remaining entries: %llu #entries per blk: %llu nr_tm_blks: %llu", remaining_entries, nr_tm_entries_per_blk, nr_tm_blks);
+	printf("\n remaining entries: %llu #entries per blk: %llu nr_tm_blks: %llu \n", remaining_entries, nr_tm_entries_per_blk, nr_tm_blks);
 	entries = 0;
 	freed = 0;
 	data_lba = 0;
+
 	for(i=0; i<nr_tm_blks; i++) {
 		memset(buffer, 0, BLK_SZ);
 		entry->lba = sb->max_pba + 1;
-		boffset = 0;
+		dentry = buffer;
+		assert((data_lba % 512) == 0);
 		for(j=0; j<nr_tm_entries_per_blk; j++) {
 			if (freed < freeblks) {
 				/* as if trim is run on these blks */
@@ -186,17 +193,18 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 				entry->lba = sb->max_pba + 1;
 			} else {
 				entry->lba = data_lba;
+				remaining_entries--;
 			}
 			data_lba = data_lba + NR_SECTORS_IN_BLK;
-			memcpy(buffer + boffset, entry, sizeof(struct tm_entry));
-			boffset = boffset + sizeof(struct tm_entry);
+			memcpy(dentry, entry, sizeof(struct tm_entry));
+			dentry = dentry + 1;
 			assert(data_lba < sb->max_pba);
-			remaining_entries--;
 			entries++;
 			if (entries == 65536) {
 				entries = 0;
 				freed = 0;
 				zonenr++;
+				assert((data_lba % 524288) == 0);
 			}
 			if (!remaining_entries)
 				break;
@@ -210,6 +218,7 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 	free(entry);
 
 	/*
+	offset = sb->tm_pba * SECTOR_SIZE;
 	int vblks = 0;
 	entries = 0;
 	char * ptr;
@@ -244,10 +253,12 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int 
 {
 	unsigned entries_in_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
 	unsigned int nr_sit_blks = (nr_zones)/entries_in_blk;
-	struct lsdm_seg_entry *entry;
-	int i, j, remaining_entries = 0, mtime, ret;
+	struct lsdm_seg_entry *entry, *dentry;
+	int i, j, remaining_entries = 0, mtime, ret, rem_free_entries = 0;
 	char buffer[BLK_SZ];
 	u64 offset;
+	int freezones = sb->zone_count_main - nr_zones;
+	unsigned int nr_free_sit_blks = (freezones)/entries_in_blk;
 
 	if (nr_zones % entries_in_blk > 0)
 		nr_sit_blks = nr_sit_blks + 1;
@@ -264,25 +275,35 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int 
 	printf("\n");
 
 	offset = sb->sit_pba * SECTOR_SIZE;
+	printf("\n sit_pba: %llu  offset: %llu", sb->sit_pba, offset);
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, sb->sit_pba, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, sb->sit_pba, ret);
 		exit(errno);
 	}
 
 	mtime = 10;
 	remaining_entries = nr_zones;
+	rem_free_entries = freezones;
+	printf("\n total_zone_count: %d remaining_entries: %d remaining free entries: %d, entries per blk: %d ", sb->zone_count_main, remaining_entries, rem_free_entries, entries_in_blk);
+	assert(rem_free_entries < entries_in_blk);
 	for(i=0; i<nr_sit_blks; i++) {
 		memset(buffer, 0, BLK_SZ);
-		offset = 0;
+		dentry = buffer;
 		for(j=0; j<entries_in_blk; j++) {
-			entry->vblocks = NR_BLKS_IN_ZONE - freeblks;
-			entry->mtime = mtime;
+			if (rem_free_entries > 0) {
+				rem_free_entries--;
+				entry->vblocks = 0;
+				entry->mtime = 0;
+			} else {
+				entry->vblocks = NR_BLKS_IN_ZONE - freeblks;
+				entry->mtime = mtime;
+				remaining_entries--;
+			}
 			mtime = mtime + 10;
-			memcpy(buffer + offset, entry, sizeof(struct lsdm_seg_entry));
-			offset = offset + sizeof(struct lsdm_seg_entry);
-			remaining_entries--;
+			memcpy(dentry, entry, sizeof(struct lsdm_seg_entry));
+			dentry = dentry + 1;
 			if (!remaining_entries)
 				break;
 		}
@@ -292,6 +313,7 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int 
 			exit(errno);
 		}
 	}
+	free(entry);
 }
 
 unsigned long get_zone_nr(struct lsdm_sb * sb, unsigned long pba)
@@ -354,7 +376,7 @@ int read_seg_info_table(struct lsdm_sb *sb, struct lsdm_ckpt *ckpt, int fd)
 	printf("\n %s Read seginfo from pba: %llu sectornr: %d zone0_pba: %llu \n", __func__, sb->sit_pba, sectornr, sb->zone0_pba);
 	while (nr_data_zones > 0) {
 		//trace_printk("\n zonenr: %u", zonenr);
-		if ((sectornr + sb->sit_pba) > sb->zone0_pba) {
+		if (sectornr + sb->sit_pba > sb->zone0_pba) {
 			printf("\n Seg entry blknr cannot be bigger than the data blknr");
 			return -1;
 		}
@@ -384,6 +406,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 	int ret;
 	unsigned long ckpt_pba = sb->ckpt1_pba;
 	char buffer[BLK_SZ];
+	int freezones = sb->zone_count_main - nr_zones - 2;
 
 	ckpt = (struct lsdm_ckpt *)malloc(BLK_SZ);
 	if(!ckpt)
@@ -394,7 +417,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 	ckpt->version = 0;
 	ckpt->user_block_count = sb->zone_count_main << (sb->log_zone_size - sb->log_block_size);
 	ckpt->nr_invalid_zones = 0;
-	ckpt->hot_frontier_pba = sb->zone0_pba + ((__le64) nr_zones << (sb->log_zone_size - sb->log_sector_size));
+	ckpt->hot_frontier_pba = sb->zone0_pba;
 	printf("\n <3 <3 <3 <3 <3 <3 <3...................     ckpt->hot_frontier_pba = %llu ", ckpt->hot_frontier_pba);
 	/* Next zone is gc frontier */
 	ckpt->warm_gc_frontier_pba = ckpt->hot_frontier_pba + (1 << (sb->log_zone_size - sb->log_sector_size));
@@ -412,9 +435,9 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 	u64 offset = sb->ckpt1_pba * SECTOR_SIZE;
 
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		exit(errno);
 	}
 
@@ -428,9 +451,9 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 
 	offset = sb->ckpt2_pba * 512;
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		exit(errno);
 	}
 	ret = write(fd, ckpt, BLK_SZ);
@@ -451,9 +474,9 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 		exit(-1);
 
 	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret < 0) {
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
+		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
 		exit(errno);
 	}
 	ret = read(fd, ckpt1, BLK_SZ);
@@ -486,7 +509,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 		printf("\n");
 		exit(-1);
 	}
-	read_seg_info_table(sb, ckpt1, fd);
+	//read_seg_info_table(sb, ckpt1, fd);
 	free(ckpt);
 	free(ckpt1);
 	printf("\n checkpoint written to disk ");
@@ -524,6 +547,7 @@ int main(int argc, char * argv[])
 	}
 	free_blks = atoi(argv[3]);
 	read_sb(fd, 0, &sb);
+	read_sb(fd, 8, &sb);
 	if (nr_zones > (sb->zone_count_main - 2)) {
 		printf("\n Device has %llu zones, cannot populate more!", sb->zone_count_main);
 		printf("\n");
@@ -532,6 +556,8 @@ int main(int argc, char * argv[])
 	write_rtm(fd, sb,  nr_zones, free_blks);
 	write_sit(fd, sb, nr_zones, free_blks);
 	write_ckpt(fd, sb, nr_zones);
+	read_sb(fd, 0, &sb);
+	read_sb(fd, 8, &sb);
 	printf("\n Populated %d zones ", nr_zones);
 	printf("\n \n");
 	return(0);
