@@ -1438,7 +1438,6 @@ static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 	//printk(KERN_ERR "\n %s About to remove: lba: %llu len: %llu " , __func__, gc_extent->e.lba, gc_extent->e.len);
 	find_and_remove_rev_tm(ctx, gc_extent->e.lba, gc_extent->e.len);
 	add_rev_translation_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
-	ret = 0;
 	ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	//printk(KERN_ERR "\n %s Added rb entry ! lba: %llu pba: %llu , len: %llu e.len: %u" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	return 0;
@@ -3812,7 +3811,6 @@ int add_rev_translation_entry(struct ctx * ctx, sector_t lba, sector_t pba, size
 	blknr = ((pba - ctx->sb->zone0_pba) >> SECTOR_BLK_SHIFT);
 	index = blknr %  REV_TM_ENTRIES_BLK;
 	ptr = ptr + index;
-	BUG_ON(ctx->sb->max_pba == 0);
 	for(i=0; i<nrblks; i++) {
 		if (lba > ctx->sb->max_pba) {
 			printk(KERN_ERR "\n %s lba: %llu pba: %llu max_pba: %llu len: %zu i: %d", __func__, lba, pba, ctx->sb->max_pba, len, i);
@@ -5846,7 +5844,6 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	/* 13 comes from 9 + 3, where 2^9 is the number of bytes in a sector
 	 * and 2^3 is the number of sectors in a block.
 	 */
-	target->max_io_len = BIO_MAX_PAGES >> 1;
 	target->flush_supported = true;
 	target->discards_supported = true;
 	/* target->per_io_data_size - set this to get per_io_data_size allocated before every standard structure that holds a bio. */
