@@ -129,7 +129,6 @@ void __exit ls_dm_exit(void);
 int read_rev_translation_map(struct ctx *);
 void mark_disk_full(struct ctx *ctx);
 void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8);
-static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent);
 int remove_rev_translation_entry(struct ctx * ctx, sector_t pba, unsigned int len);
 int add_rev_translation_entry(struct ctx * ctx, sector_t lba, sector_t pba, size_t len);
 struct tm_page *add_rev_tm_page_kv_store(struct ctx *ctx, sector_t pba);
@@ -1416,7 +1415,6 @@ static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 		printk(KERN_ERR "\n waiting on refcount \n");
 		wait_on_refcount(ctx, &gc_extent->ref, &ctx->gc_ref_lock);
 	}*/
-	setup_extent_bio_write(ctx, gc_extent);
 	bio = gc_extent->bio;
 	s8 = bio_sectors(bio);
 
@@ -1446,57 +1444,6 @@ static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 static void mark_zone_free(struct ctx *ctx , int zonenr, int resetZone);
 
 
-
-static int setup_extent_bio_write(struct ctx *ctx, struct gc_extents *gc_extent)
-{
-	int i=0, s8;
-	struct bio_vec *bv = NULL;
-	struct page *page;
-	struct bio *bio;
-	struct bvec_iter_all iter_all;
-	int bio_pages;
-
-	s8 = gc_extent->e.len;
-	BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_BLK_SHIFT));
-	//printk(KERN_ERR "\n %s gc_extent->e.len = %d ", __func__, s8);
-	bio_pages = (s8 >> SECTOR_BLK_SHIFT);
-	BUG_ON(bio_pages != gc_extent->nrpages);
-	//printk(KERN_ERR "\n 1) %s gc_extent->e.len (in sectors): %ld s8: %d bio_pages:%d", __func__, gc_extent->e.len, s8, bio_pages);
-
-	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
-	 * individually to the bio vectors
-	 */
-	bio = bio_alloc_bioset(ctx->dev->bdev, bio_pages, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
-	if (!bio) {
-		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
-		return -ENOMEM;
-	}
-
-	/* bio_add_page sets the bi_size for the bio */
-	for(i=0; i<bio_pages; i++) {
-		page = gc_extent->bio_pages[i];
-		if (!page) {
-			printk(KERN_ERR "\n %s i: %d ", __func__, i);
-			BUG_ON(!page);
-		}
-		if (!bio_add_page(bio, page, PAGE_SIZE, 0)) {
-			printk(KERN_ERR "\n %s Could not add page to the bio ", __func__);
-			printk(KERN_ERR "bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d \n", bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs);
-			bio_for_each_segment_all(bv, bio, iter_all) {
-				mempool_free(bv->bv_page, ctx->gc_page_pool);
-			}
-			bio_put(bio);
-			return -ENOMEM;
-		}
-	}
-	//printk(KERN_ERR "\n %s bio_sectors(bio): %llu nr_pages: %d", __func__,  bio_sectors(bio), bio_pages);
-	bio_set_dev(bio, ctx->dev->bdev);
-	bio->bi_opf = REQ_OP_WRITE;
-	//bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
-	gc_extent->bio = bio;
-	return 0;
-}
-
 void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent)
 {
 	unsigned int pagecount = 0;
@@ -1516,9 +1463,6 @@ void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent)
 	}
 	gc_extent->nrpages = 0;
 	gcextent_init(gc_extent, 0, 0 , 0);
-	if (gc_extent->bio) {
-		bio_put(gc_extent->bio);
-	}
 	kmem_cache_free(ctx->gc_extents_cache, gc_extent);
 }
 
@@ -1541,6 +1485,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	int i, j, total_vblks = 0;
 	u64 last_pba_read;
 	u64 gc_writes = 0;
+	int rem_sectors;
 	//int total = 0;
 
 	
@@ -1549,20 +1494,17 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	gc_writes = 0;
 	s8 = 0;
 	last_pba_read = get_last_pba_for_zone(ctx, zonenr);
+	rem_sectors = ctx->free_sectors_in_gc_wf;
+	/* SORT THIS LIST BEFORE ADJUSTING THE GC EXTENTS - see if this improves any performance */
+	down_write(&ctx->lsdm_rb_lock);
 	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
-		/* Reverse map stores PBA as e->lba and LBA as e->pba
-		 * This was done for code reuse between map and revmap
-		 * Thus e->lba is actually the PBA
-		 */
 		gc_extent->bio = NULL;
 		//printk(KERN_ERR "\n %s gc_extent::(lba: %llu, pba: %llu, len: %d) last_pba_read: %llu", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, last_pba_read);
-		down_write(&ctx->lsdm_rb_lock);
 		/* You cannot use rb_next here as pba ie the key, changes when we write to a new frontier,
 		 * so the node is removed and rewritten at a different place, so the next is the new next 
 		 */
 		rev_e = lsdm_rb_revmap_find(ctx, gc_extent->e.pba, gc_extent->e.len, last_pba_read, __func__);
 		if (!rev_e) {
-			up_write(&ctx->lsdm_rb_lock);
 			/* snip all the gc_extents from this onwards */
 			list_for_each_entry_safe_from(gc_extent, temp_ptr, &ctx->gc_extents->list, list) {
 				gc_extent->bio = NULL;
@@ -1574,7 +1516,6 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		/* entire extent is lost by interim overwrites */
 		if (e->pba >= (gc_extent->e.pba + gc_extent->e.len)) {
 			//printk(KERN_ERR "\n %s:%d entire extent is lost! \n", __func__, __LINE__);
-			up_write(&ctx->lsdm_rb_lock);
 			gc_extent->bio = NULL;
 			free_gc_extent(ctx, gc_extent);
 			continue;
@@ -1620,7 +1561,6 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 			//printk(KERN_ERR "\n %s nr_sectors: %llu, ctx->free_sectors_in_gc_wf: %llu gc_extent->nrpages: %d", __func__, nr_sectors, ctx->free_sectors_in_gc_wf, gc_extent->nrpages);
 			newgc_extent = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 			if(!newgc_extent) {
-				up_write(&ctx->lsdm_rb_lock);
 				printk(KERN_ERR "\n Could not allocate memory to new gc_extent! ");
 				BUG();
 				return -1;
@@ -1638,7 +1578,6 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 			newgc_extent->nrpages = pagecount;
 			newgc_extent->bio_pages = kmalloc(pagecount * sizeof(void *), GFP_KERNEL);
 			if (!newgc_extent->bio_pages) {
-				up_write(&ctx->lsdm_rb_lock);
 				printk(KERN_ERR "\n %s could not allocate memory for newgc_extent->bio_pages", __func__);
 				BUG();
 				return -ENOMEM;
@@ -1654,32 +1593,75 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 			next_ptr = newgc_extent;
 			//printk(KERN_ERR "\n %s gc_extent::len: %llu newgc_extent::len: %llu ", __func__, gc_extent->e.len, newgc_extent->e.len);
 		}
-
-		/* Now you verify all this after holding a lock */
-		write_metadata_extent(ctx, gc_extent);
-		up_write(&ctx->lsdm_rb_lock);
-		//total += gc_extent->e.len;
-		/* We do not want to do disk I/O with a lock held. So we write the metadata
-		 * and then submit_bio. Now we can have a read on this, before the write completes.
-		 * We need to take care of that - such a read will have to wait.
-		 * TODO: fix this - read the same block that is about to be written by GC problem.
-		 * Mark such a read.
-		 */
-		submit_bio_wait(gc_extent->bio);
+		gc_extent->e.pba = ctx->warm_gc_wf_pba;
+		move_gc_write_frontier(ctx, gc_extent->e.len);
 		ctx->nr_gc_writes += gc_extent->e.len;
 		gc_writes += gc_extent->e.len;
-		//flush_workqueue(ctx->tm_wq);
-		free_gc_extent(ctx, gc_extent);
 		count++;
-		/*
-#ifdef LSDM_DEBUG
-		int vblks;
-		vblks = get_sit_ent_vblocks(ctx, zonenr);
-		BUG_ON(vblks > (total_vblks - (gc_extent->e.len >> SECTOR_BLK_SHIFT)));
-		printk(KERN_ERR "\n %s validblks: %d ", __func__, vblks);
-#endif
-		*/
 	}
+	int bio_pages;
+	struct page * page;
+	bio_pages = (BIO_MAX_PAGES << SECTOR_BLK_SHIFT);
+	struct bio * bio = bio_alloc_bioset(ctx->dev->bdev, bio_pages, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
+	if (!bio) {
+		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
+		return -ENOMEM;
+	}
+	bio_set_dev(bio, ctx->dev->bdev);
+	bio->bi_opf = REQ_OP_WRITE;
+	bio->bi_status = BLK_STS_OK;
+	bio->bi_iter.bi_sector = gc_extent->e.pba;
+	len = 0;
+	/* now all the gc extents are set, we do not need to adjust it 
+	 * We also know that every gc extent will fit in the current warm frontier.
+	 */
+	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
+	/* bio_add_page sets the bi_size for the bio */
+		s8 = gc_extent->e.len;
+		BUG_ON(!s8);
+		BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_BLK_SHIFT));
+		//printk(KERN_ERR "\n %s gc_extent->e.len = %d ", __func__, s8);
+		for(i=0; i<bio_pages; i++) {
+			page = gc_extent->bio_pages[i];
+			BUG_ON(!page);
+			if (len + NR_SECTORS_IN_BLK <= (BIO_MAX_PAGES << SECTOR_BLK_SHIFT)) {
+				len = len + NR_SECTORS_IN_BLK;
+				if (!bio_add_page(bio, page, PAGE_SIZE, 0)) {
+					printk(KERN_ERR "\n %s Could not add page to the bio ", __func__);
+					printk(KERN_ERR "bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d \n", bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs);
+					bio_put(bio);
+					return -ENOMEM;
+				}
+			}
+			rem_sectors = rem_sectors - NR_SECTORS_IN_BLK;
+			if ((len == (BIO_MAX_PAGES << SECTOR_BLK_SHIFT)) || (0 == rem_sectors)) {
+				submit_bio_wait(bio);
+				/* To release all the associations of pages with this bio */
+				bio_put(bio);
+				bio = bio_alloc_bioset(ctx->dev->bdev, bio_pages, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
+				if (!bio) {
+					printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
+					return -ENOMEM;
+				}
+				bio_set_dev(bio, ctx->dev->bdev);
+				bio->bi_opf = REQ_OP_WRITE;
+				bio->bi_status = BLK_STS_OK;
+				bio->bi_iter.bi_sector = gc_extent->e.pba;
+				len = 0;
+				rem_sectors = ctx->nr_lbas_in_zone;
+			}
+		}
+	}
+	if (len > 0) {
+		submit_bio_wait(bio);
+		/* To release all the associations of pages with this bio */
+		bio_put(bio);
+	}
+	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
+		write_metadata_extent(ctx, gc_extent);
+		free_gc_extent(ctx, gc_extent);
+	}
+	up_write(&ctx->lsdm_rb_lock);
 	/*
 #ifdef LSDM_DEBUG
 	printk(KERN_ERR "\n %s All %d extents written, total: %d , flushing workqueue now! Segment cleaned! \n", __func__, count, total);
