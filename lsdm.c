@@ -1405,39 +1405,11 @@ static int cmp_list_nodes(void *priv, struct list_head *lha, struct list_head *l
  */
 static int write_metadata_extent(struct ctx *ctx, struct gc_extents *gc_extent)
 {
-	struct bio *bio;
-	sector_t s8;
 	int ret;
 
-	/*
-	ret = refcount_read(&gc_extent->ref);
-	if (ret > 1) {
-		printk(KERN_ERR "\n waiting on refcount \n");
-		wait_on_refcount(ctx, &gc_extent->ref, &ctx->gc_ref_lock);
-	}*/
-	bio = gc_extent->bio;
-	s8 = bio_sectors(bio);
-
-	//down_write(&ctx->wf_lock);
-	bio->bi_iter.bi_sector = ctx->warm_gc_wf_pba;
-	gc_extent->e.pba = ctx->warm_gc_wf_pba;
-	move_gc_write_frontier(ctx, gc_extent->e.len);
-	//up_write(&ctx->wf_lock);
-
-	//printk(KERN_ERR "\n %s gc_extent: (lba: %llu pba: %llu len: %llu), s8: %llu max_pba: %llu", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len, s8, ctx->sb->max_pba);
-#ifdef LSDM_DEBUG
-	BUG_ON(gc_extent->e.len != s8);
-	BUG_ON(gc_extent->e.pba == 0 );
-	BUG_ON(gc_extent->e.pba >= ctx->sb->max_pba);
-	BUG_ON(gc_extent->e.lba >= ctx->sb->max_pba);
-#endif
-	bio->bi_status = BLK_STS_OK;
-	
-	//printk(KERN_ERR "\n %s About to remove: lba: %llu len: %llu " , __func__, gc_extent->e.lba, gc_extent->e.len);
 	find_and_remove_rev_tm(ctx, gc_extent->e.lba, gc_extent->e.len);
 	add_rev_translation_entry(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 	ret = lsdm_rb_update_range(ctx, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
-	//printk(KERN_ERR "\n %s Added rb entry ! lba: %llu pba: %llu , len: %llu e.len: %u" , __func__, gc_extent->e.lba, gc_extent->e.pba, s8, gc_extent->e.len);
 	return 0;
 }
 
@@ -1599,10 +1571,11 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		gc_writes += gc_extent->e.len;
 		count++;
 	}
+	//printk(KERN_ERR "\n About to write pages of %d extents of len: %llu \n", count, gc_writes);
 	int bio_pages;
 	struct page * page;
-	bio_pages = (BIO_MAX_PAGES << SECTOR_BLK_SHIFT);
-	struct bio * bio = bio_alloc_bioset(ctx->dev->bdev, bio_pages, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
+	bio_pages = 256;
+	struct bio * bio = bio_alloc_bioset(ctx->dev->bdev, 256, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
 	if (!bio) {
 		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
 		return -ENOMEM;
@@ -1619,26 +1592,26 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	/* bio_add_page sets the bi_size for the bio */
 		s8 = gc_extent->e.len;
 		BUG_ON(!s8);
-		BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_BLK_SHIFT));
+		BUG_ON(s8 > (bio_pages << SECTOR_BLK_SHIFT));
+		nrpages = s8 / NR_SECTORS_IN_BLK;
 		//printk(KERN_ERR "\n %s gc_extent->e.len = %d ", __func__, s8);
-		for(i=0; i<bio_pages; i++) {
+		for(i=0; i<nrpages; i++) {
 			page = gc_extent->bio_pages[i];
 			BUG_ON(!page);
-			if (len + NR_SECTORS_IN_BLK <= (BIO_MAX_PAGES << SECTOR_BLK_SHIFT)) {
-				len = len + NR_SECTORS_IN_BLK;
-				if (!bio_add_page(bio, page, PAGE_SIZE, 0)) {
-					printk(KERN_ERR "\n %s Could not add page to the bio ", __func__);
-					printk(KERN_ERR "bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d \n", bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs);
-					bio_put(bio);
-					return -ENOMEM;
-				}
+			if (!bio_add_page(bio, page, PAGE_SIZE, 0)) {
+				printk(KERN_ERR "\n %s Could not add page to the bio ", __func__);
+				printk(KERN_ERR "bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d \n", bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs);
+				bio_put(bio);
+				return -ENOMEM;
 			}
+			len = len + 1;
 			rem_sectors = rem_sectors - NR_SECTORS_IN_BLK;
-			if ((len == (BIO_MAX_PAGES << SECTOR_BLK_SHIFT)) || (0 == rem_sectors)) {
+			if ((len == 256) || (0 == rem_sectors)) {
 				submit_bio_wait(bio);
 				/* To release all the associations of pages with this bio */
 				bio_put(bio);
-				bio = bio_alloc_bioset(ctx->dev->bdev, bio_pages, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
+				//printk(KERN_ERR "\n Allocating a new bio \n ");
+				bio = bio_alloc_bioset(ctx->dev->bdev, 256, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
 				if (!bio) {
 					printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
 					return -ENOMEM;
@@ -1662,7 +1635,6 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		free_gc_extent(ctx, gc_extent);
 	}
 	up_write(&ctx->lsdm_rb_lock);
-	/*
 #ifdef LSDM_DEBUG
 	printk(KERN_ERR "\n %s All %d extents written, total: %d , flushing workqueue now! Segment cleaned! \n", __func__, count, total);
 	vblks = get_sit_ent_vblocks(ctx, zonenr);
@@ -1672,6 +1644,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		BUG_ON(1);
 	}
 #endif
+	/*
 	flush_workqueue(ctx->tm_wq);
 	*/
 	/* last revmap blk may not be full, we write the partial revmap blk */
