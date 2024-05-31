@@ -1,10 +1,5 @@
 #include <stdio.h>
 
-#define _LARGEFILE64_SOURCE
-#define _FILE_OFFSET_BITS 64
-#include <sys/types.h>
-#include <unistd.h>
-
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <stddef.h>
@@ -20,7 +15,10 @@
 #include <linux/blkzoned.h>
 #include <string.h>
 
-
+#define _LARGEFILE64_SOURCE
+#define _FILE_OFFSET_BITS 64
+#include <sys/types.h>
+#include <unistd.h>
 
 #define BLK_SZ 4096
 #define NR_CKPT_COPIES 2 
@@ -64,7 +62,7 @@ int write_to_disk(int fd, char *buf, unsigned long sectornr)
 	ret = lseek64(fd, offset, SEEK_SET);
 	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, sectornr, ret);
+		printf("\n write to disk offset: %llu, sectornr: %ld ret: %d", offset, sectornr, ret);
 		exit(errno);
 	}
 	ret = write(fd, buf, BLK_SZ);
@@ -96,7 +94,7 @@ __le32 get_zone_count(int fd)
 		perror(str);
 		exit(errno);
 	}
-	printf("\n ZONE size: %llu", zonesz);
+	printf("\n ZONE size: %u", zonesz);
 	/* zonesz is number of addressable lbas */
 	zonesz = zonesz << 9;
 
@@ -106,17 +104,17 @@ __le32 get_zone_count(int fd)
 		exit(errno);
 	}
 
-	printf("\n Nr of zones reported by disk :%llu", zone_count);
+	printf("\n Nr of zones reported by disk :%u", zone_count);
 	/* Use zone queries and find this eventually
 	 * Doing this manually for now for a 20GB 
 	 * harddisk and 256MB zone size.
 	 */
 	if (zone_count >= (capacity/zonesz)) {
 		printf("\n Number of zones: %d ", zone_count);
-		printf("\n capacity/ZONE_SZ: %d ", capacity/zonesz);
+		printf("\n capacity/ZONE_SZ: %lld ", capacity/zonesz);
 		return capacity/zonesz;
 	}
-	printf("\n Actual zone count calculated: %d ", (capacity/zonesz));
+	printf("\n Actual zone count calculated: %lld ", (capacity/zonesz));
 	return zone_count;
 	//return 16500;
 	//return 28200;
@@ -166,7 +164,7 @@ __le64 get_nr_blks(struct lsdm_sb *sb)
  * This accounts for the blks in the main area and excludes the blocks
  * for the metadata. Hence we do NOT call get_nr_blks()
  */
-__le32 get_tm_blk_count(struct lsdm_sb *sb)
+unsigned long get_tm_blk_count(struct lsdm_sb *sb)
 {
 	u64 nr_tm_entries = (sb->max_pba / NR_SECTORS_IN_BLK);
 	u32 nr_tm_entries_per_blk = BLK_SZ/ sizeof(struct tm_entry);
@@ -174,7 +172,7 @@ __le32 get_tm_blk_count(struct lsdm_sb *sb)
 	if (nr_tm_entries % nr_tm_entries_per_blk)
 		nr_tm_blks++;
 
-	printf("\n %s blocksize: %d sizeof(struct tm_entry): %d ", __func__, BLK_SZ, sizeof(struct tm_entry));
+	printf("\n %s blocksize: %d sizeof(struct tm_entry): %ld ", __func__, BLK_SZ, sizeof(struct tm_entry));
 	printf("\n %s nr_tm_entries: %llu ", __func__, nr_tm_entries);
 	printf("\n %s nr_tm_entries_per_blk: %d ", __func__, nr_tm_entries_per_blk);
 	printf("\n %s nr_tm_blks: %llu",  __func__, nr_tm_entries / nr_tm_entries_per_blk);	
@@ -187,38 +185,27 @@ __le32 get_nr_zones(struct lsdm_sb *sb)
 	return sb->zone_count;
 }
 
-__le32 get_sit_blk_count(struct lsdm_sb *sb)
-{
-	unsigned int one_sit_sz = 80; /* in bytes */
-	unsigned int nr_sits_in_blk = BLK_SZ / one_sit_sz;
-	__le32 nr_sits = get_nr_zones(sb);
-	unsigned int blks_for_sit = nr_sits / nr_sits_in_blk;
-	if (nr_sits % nr_sits_in_blk > 0)
-		blks_for_sit = blks_for_sit + 1;
-
-	return blks_for_sit;
-}
-
 /* We write all the metadata blks sequentially in the CMR zones
  * that can be rewritten in place
  */
-__le32 get_metadata_zone_count(struct lsdm_sb *sb)
+unsigned int get_metadata_zone_count(struct lsdm_sb *sb)
 {
 	/* we add the 2 for the superblock */
-	unsigned long metadata_blk_count = NR_BLKS_SB + sb->blk_count_ckpt + sb->blk_count_rtm + sb->blk_count_sit;
+	unsigned long tm_blk_count = get_tm_blk_count(sb);
 	unsigned long nr_blks_in_zone = (1 << sb->log_zone_size - sb->log_block_size);
-	unsigned long metadata_zone_count = metadata_blk_count / nr_blks_in_zone;
-	if (metadata_blk_count % nr_blks_in_zone)
-		metadata_zone_count = metadata_zone_count + 1;
+	unsigned int tm_zone_count = tm_blk_count / nr_blks_in_zone;
+	unsigned int metadata_zone_count = STATIC_MD_ZONE_COUNT +  tm_zone_count;
+	if (tm_blk_count % nr_blks_in_zone)
+		tm_zone_count = tm_zone_count + 1;
+
+	metadata_zone_count = metadata_zone_count + tm_zone_count;
 	
 	printf("\n\n");
 	printf("\n ********************************************\n");
-	printf("\n sb->blk_count_rtm: %llu", sb->blk_count_rtm);
-	printf("\n sb->blk_count_sit: %llu", sb->blk_count_sit);
-	printf("\n sb->blk_count_ckpt: %llu", sb->blk_count_ckpt);
-	printf("\n metadata_blk_count: %llu", metadata_blk_count);
+	printf("\n tm_blk_count: %lu ", tm_blk_count);
+	printf("\n tm_zone_count: %u", tm_zone_count);
 
-	printf("\n metadata_zone_count: %llu", metadata_zone_count);
+	printf("\n metadata_zone_count: %u", metadata_zone_count);
 	printf("\n ********************************************\n");
 	printf("\n\n");
 	return metadata_zone_count;
@@ -246,31 +233,6 @@ __le32 get_reserved_zone_count()
 	reserved_zone_count = RESERVED_ZONES;
 	//return reserved_zone_count;
 	return 0;
-}
-
-
-/* We write one raw ckpt in one block
- * If the first LBA is 0, then the first
- * zone has (zone_size/blk_size) - 1 LBAs
- * the first block in the second zone is 
- * the CP and that just takes the next
- * LBA as ZONE_SZ/BLK_SZ
- * The blk adderss is 256MB;
- */
-__le64 get_tm_pba()
-{
-	return (NR_BLKS_SB * NR_SECTORS_IN_BLK);
-}
-
-__le64 get_ckpt1_pba(struct lsdm_sb *sb)
-{
-	u64 cp1_pba  = sb->sit_pba + ( sb->blk_count_sit * NR_SECTORS_IN_BLK);
-	return cp1_pba;
-}
-
-__le64 get_sit_pba(struct lsdm_sb *sb)
-{
-	return sb->tm_pba + (sb->blk_count_rtm * NR_SECTORS_IN_BLK);
 }
 
 void read_sb(int fd, unsigned long sectornr)
@@ -309,8 +271,7 @@ void read_sb(int fd, unsigned long sectornr)
 	printf("\n sb->log_sector_size %d", sb->log_sector_size);
 	printf("\n sb->log_block_size %d", sb->log_block_size);
 	printf("\n sb->log_zone_size: %d", sb->log_zone_size);
-	printf("\n sb->blk_count_ckpt %lu", sb->blk_count_ckpt);
-	printf("\n sb->max_pba: %lu ", sb->max_pba);
+	printf("\n sb->max_pba: %llu ", sb->max_pba);
 	//printf("\n sb-> %d", sb->);
 	printf("\n sb->zone_count: %d", sb->zone_count);
 	printf("\n Read verified!!!");
@@ -336,7 +297,7 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 	ret = lseek64(fd, offset, SEEK_SET);
 	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
-		printf("\n write to disk offset: %u, sectornr: %lld ret: %d", offset, pba, ret);
+		printf("\n write to disk offset: %llu, sectornr: %lld ret: %d", offset, pba, ret);
 		printf("\n");
 		exit(errno);
 	}
@@ -352,117 +313,10 @@ void write_zeroed_blks(int fd, sector_t pba, unsigned nr_blks)
 	}
 }
 
-
-void read_block(int fd, sector_t pba, unsigned nr_blks)
+unsigned int get_zone0()
 {
-
-	char buffer[4096];
-	int i, ret, j;
-
-	printf("\n Reading %d zeroed blks, from pba: %llu", nr_blks, pba);
-	
-	/* lseek64 offset is in  bytes not sectors, pba is in sectors */
-	ret = lseek64(fd, (pba * SECTOR_SIZE), SEEK_SET);
-	if (ret == -1) {
-		perror(">>>> (before read) Error in lseek64: \n");
-		printf("\n");
-		exit(errno);
-	}
-	for (i=0; i<nr_blks; i++) {
-		ret = read(fd, buffer, 4096);
-		if (ret < 4096) {
-			perror("Error while reading: ");
-			printf("\n");
-			exit(errno);
-		}
-		for(j=0; j<ret; j++) {
-			if(buffer[i] != 0) {
-				assert(1);
-			}
-		}
-	}
-}
-
-void write_rtm(int fd, struct lsdm_sb *sb, sector_t tm_pba, unsigned nr_blks)
-{
-	int i, j, ret;
-	char buff[4096];
-	struct rev_tm_entry *entry;
-	sector_t offset = tm_pba * SECTOR_SIZE;
-	printf("\n ** %s Writing rtm blocks at pba: %llu, nrblks: %u", __func__, tm_pba, nr_blks);
-
-	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret == -1) {
-		perror("!! (before write) Error in lseek64: \n");
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, tm_pba, ret);
-		exit(errno);
-	}
-	
-	entry = (struct rev_tm_entry *) buff;
-	for (j=0; j<TM_ENTRIES_BLK; j++) {
-		entry->lba = sb->max_pba + 1;
-		entry = entry + 1;
-	}
-	for (i=0; i<nr_blks; i++) {
-		/* This is an invalid LBA, and it indicates an empty entry */
-		ret = write(fd, buff, BLK_SZ);
-		if (ret < 0) {
-			perror("Error while writing: ");
-			exit(errno);
-		}
-	}
-}
-
-unsigned long long get_current_frontier_tmp(struct lsdm_sb *sb)
-{
-	unsigned long tm_end_pba = sb->tm_pba + sb->blk_count_rtm * NR_SECTORS_IN_BLK;
-	unsigned long tm_end_blk_nr = tm_end_pba / NR_SECTORS_IN_BLK;
-	unsigned int nr_blks_per_zone = 1 << (sb->log_zone_size- sb->log_block_size);
-	unsigned int tm_end_zone_nr = tm_end_blk_nr / nr_blks_per_zone;
-	
-	/* The data zones start in the next zone of that of the last
-	 * metadata zone
-	 */
-	printf("\n tm_end_pba: %ld", tm_end_pba);
-	printf("\n tm_end_blk_nr: %ld", tm_end_blk_nr);
-	printf("\n Current Write frontier: tm_end_zone_nr: %d", tm_end_zone_nr + 1);
-	return (tm_end_zone_nr + 1) << (sb->log_zone_size - sb->log_sector_size);
-}
-
-unsigned long long get_current_frontier(struct lsdm_sb *sb)
-{
-	unsigned long ckpt2_pba = sb->ckpt2_pba;
-	unsigned int nr_sectors_per_zone = 1 << (sb->log_zone_size- sb->log_sector_size);
-	unsigned int metadata_end_zone_nr = (ckpt2_pba + 1) / nr_sectors_per_zone;
-
-	if ((ckpt2_pba + 1) % nr_sectors_per_zone) {
-		metadata_end_zone_nr = metadata_end_zone_nr + 1;
-	}
-	
-	/* The data zones start in the next zone of that of the last
-	 * metadata zone
-	 */
-	printf("\n Current frontier zonenr: %d ", metadata_end_zone_nr + 1);
-	return (metadata_end_zone_nr + 1);
-}
-
-unsigned long long get_zone0_pba(struct lsdm_sb *sb)
-{
-	unsigned long ckpt2_pba = sb->ckpt2_pba;
-	unsigned int nr_sectors_per_zone = 1 << (sb->log_zone_size- sb->log_sector_size);
-	unsigned int metadata_end_zone_nr = (ckpt2_pba + 1) / nr_sectors_per_zone;
-
-	if ((ckpt2_pba + 1) % nr_sectors_per_zone) {
-		metadata_end_zone_nr = metadata_end_zone_nr + 1;
-	}
-
-	/* The data zones start in the next zone of that of the last
-	 * metadata zone
-	 */
-	printf("\n ckpt2_pba: %ld", ckpt2_pba);
-	printf("\n metadata_end_zone_nr: %d ", metadata_end_zone_nr);
-	printf("\n data zone begins at pba: %llu ", metadata_end_zone_nr << (sb->log_zone_size - sb->log_sector_size));
-	return (metadata_end_zone_nr << (sb->log_zone_size - sb->log_sector_size));
+	int zonenr = STATIC_MD_ZONE_COUNT + 1; /* 1 for TM */
+	return zonenr;
 }
 
 unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
@@ -470,8 +324,7 @@ unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
 	int zonenr = get_zone_count(fd);
 
 	//zonenr = zonenr - 20000;
-	//zonenr = zonenr - 10;
-	zonenr = get_current_frontier(sb) + 10;
+	zonenr = get_zone0() + 10;
 	return (zonenr) * (1 << (sb->log_zone_size - sb->log_sector_size));
 }
 
@@ -495,7 +348,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 		printf("\n");
 		exit(errno);
 	}
-	printf("\n ZONE size: %llu", zonesz);
+	printf("\n ZONE size: %u", zonesz);
 	
 	logzonesz = 0;
 	while(1){
@@ -514,7 +367,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 		exit(errno);
 	}
 
-	printf("\n Nr of zones reported by disk :%llu", zone_count);
+	printf("\n Nr of zones reported by disk :%u", zone_count);
 
 	sb->magic = STL_SB_MAGIC;
 	sb->version = 1;
@@ -532,28 +385,14 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	printf("\n sb->zone_count_reserved: %d", sb->zone_count_reserved);
 	sb->max_pba = get_max_pba(sb);
 	printf("\n ******* sb->max_pba: %llu", sb->max_pba);
-	sb->blk_count_rtm = get_tm_blk_count(sb);
-	printf("\n sb->blk_count_rtm: %d", sb->blk_count_rtm);
-	sb->blk_count_ckpt = NR_CKPT_COPIES;
-	printf("\n sb->blk_count_ckpt: %d", sb->blk_count_ckpt);
-	sb->blk_count_sit = get_sit_blk_count(sb);
-	printf("\n sb->blk_count_sit: %d", sb->blk_count_sit);
-	sb->tm_pba = get_tm_pba(sb);
-	printf("\n sb->tm_pba: %u", sb->tm_pba);
-	sb->sit_pba = get_sit_pba(sb);
-	printf("\n sb->sit_pba: %u", sb->sit_pba);
-	sb->ckpt1_pba = get_ckpt1_pba(sb);
-	printf("\n sb->ckpt1_pba: %u", sb->ckpt1_pba);
-	sb->ckpt2_pba = sb->ckpt1_pba + NR_SECTORS_IN_BLK;
-	printf("\n sb->ckpt2_pba: %u", sb->ckpt2_pba);
 	sb->nr_lbas_in_zone = (1 << (sb->log_zone_size - sb->log_sector_size));
-	printf("\n nr_lbas_in_zone: %llu ", sb->nr_lbas_in_zone);
+	printf("\n nr_lbas_in_zone: %u ", sb->nr_lbas_in_zone);
 	sb->nr_cmr_zones = cmr;
-	printf("\n sb->nr_cmr_zones: %llu", sb->nr_cmr_zones);
-	sb->zone0_pba = get_zone0_pba(sb);
-	printf("\n sb->zone0_pba: %d", sb->zone0_pba);
+	printf("\n sb->nr_cmr_zones: %u", sb->nr_cmr_zones);
 	sb->zone_count_main = get_main_zone_count(sb);
 	printf("\n sb->zone_count_main: %d", sb->zone_count_main);
+	int zonenr = get_zone0();
+	sb->zone0_pba = (zonenr) * (1 << (sb->log_zone_size - sb->log_sector_size));
 	sb->crc = 0;
 	//sb->crc = crc32(-1, (unsigned char *)sb, STL_SB_SIZE);
 	ret = write_to_disk(fd, (char *)sb, 0); 
@@ -578,30 +417,6 @@ void set_bitmap(char *bitmap, unsigned int nrzones, char ch)
 }
 
 
-
-unsigned long long get_user_block_count(struct lsdm_sb *sb)
-{
-	unsigned long sit_end_pba = sb->sit_pba + sb->blk_count_sit * NR_SECTORS_IN_BLK;
-	unsigned long sit_zone_nr = sit_end_pba >> sb->log_zone_size;
-	unsigned int nr_blks_per_zone = 1 << (sb->log_zone_size - sb->log_block_size);
-	return ((sb->zone_count - sit_zone_nr) * (nr_blks_per_zone));
-
-}
-
-void prepare_cur_seg_entry(struct lsdm_seg_entry *entry)
-{
-	/* Initially no block has any valid data */
-	entry->vblocks = 0;
-	entry->mtime = 0;
-}
-
-
-void prepare_prev_seg_entry(struct lsdm_seg_entry *entry)
-{
-	entry->vblocks = 0;
-	entry->mtime = 0;
-}
-
 struct lsdm_ckpt * read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 {
 	struct lsdm_ckpt *ckpt;
@@ -625,7 +440,7 @@ struct lsdm_ckpt * read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba
 
 	ret = read(fd, ckpt, BLK_SZ);
 	if (ret < 0) {
-		printf("\n read from disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+		printf("\n read from disk offset: %llu, sectornr: %ld ret: %d", offset, ckpt_pba, ret);
 		perror("\n Could not read from disk because: ");
 		printf("\n");
 		exit(errno);
@@ -641,10 +456,10 @@ struct lsdm_ckpt * read_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba
 	return ckpt;
 }
 
-void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
+void write_ckpt(int fd, struct lsdm_sb *sb)
 {
+	unsigned long ckpt_pba = 1 << (sb->log_zone_size - sb->log_sector_size);
 	struct lsdm_ckpt *ckpt, *ckpt1;
-	char buffer[BLK_SZ];
 	int ret;
 
 	ckpt = (struct lsdm_ckpt *)malloc(BLK_SZ);
@@ -658,61 +473,31 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	ckpt->nr_invalid_zones = 0;
 	ckpt->hot_frontier_pba = sb->zone0_pba;
 	ckpt->warm_gc_frontier_pba = get_current_gc_frontier(sb, fd);
-	ckpt->nr_free_zones = sb->zone_count_main - 2; //1 for the current frontier and gc frontier
+	ckpt->tt_first_zone = 0;
+	ckpt->tt_curr_zone = 0;
+	ckpt->tt_curr_offset = 0;
+	ckpt->nr_free_zones = sb->zone_count_main - 2; /* 1 for the current frontier and gc frontier */
+	ckpt->blk_count_tm = 0;
 	ckpt->elapsed_time = 0;
-	ckpt->clean = 1;  /* 1 indicates clean datastructures */
 	ckpt->crc = 0;
 	printf("\n-----------------------------------------------------------\n");
-	printf("\n checkpoint written at: %llu cur_frontier_pba: %lld", ckpt_pba, ckpt->hot_frontier_pba);
+	printf("\n checkpoint written at: %lu cur_frontier_pba: %lld", ckpt_pba, ckpt->hot_frontier_pba);
 
-	u64 offset = sb->ckpt1_pba * SECTOR_SIZE;
+	write_to_disk(fd, (char *)ckpt, ckpt_pba);
 
-	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret == -1) {
-		perror("!! (before write) Error in lseek64: \n");
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
-		printf("\n");
-		exit(errno);
-	}
-	memset(buffer, 0, BLK_SZ);
-	memcpy(buffer, ckpt, sizeof(struct lsdm_ckpt));
-	ret = write(fd, buffer, BLK_SZ);
-	if (ret < 0) {
-		perror("Error while writing ckpt1: ");
-		printf("\n");
-		exit(errno);
-	}
-
-	offset = sb->ckpt2_pba * SECTOR_SIZE;
-	ret = lseek64(fd, offset, SEEK_SET);
-	if (ret == -1) {
-		perror("!! (before write) Error in lseek64: \n");
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
-		printf("\n");
-		exit(errno);
-	}
-	ret = write(fd, ckpt, BLK_SZ);
-	if (ret < 0) {
-		perror("Error while writing ckpt2: ");
-		printf("\n");
-		exit(errno);
-	}
-
-	printf("\n 1) ckpt->nr_free_zones: %llu", ckpt->nr_free_zones);
-	printf("\n Checkpoint written at pba: %llu", ckpt_pba);
+	printf("\n Checkpoint written at pba: %lu", ckpt_pba);
 	printf("\n ckpt->magic: %d ckpt->hot_frontier_pba: %lld", ckpt->magic, ckpt->hot_frontier_pba);
 	printf("\n sb->zone0_pba: %llu", sb->zone0_pba);
 	printf("\n warm_gc_frontier_pba: %llu" , ckpt->warm_gc_frontier_pba);
-
 
 	ckpt1 = (struct lsdm_ckpt *)malloc(BLK_SZ);
 	if(!ckpt1)
 		exit(-1);
 
-	ret = lseek64(fd, offset, SEEK_SET);
+	ret = lseek64(fd, (ckpt_pba * SECTOR_SIZE), SEEK_SET);
 	if (ret == -1) {
 		perror("!! (before write) Error in lseek64: \n");
-		printf("\n write to disk offset: %u, sectornr: %d ret: %d", offset, ckpt_pba, ret);
+		printf("\n write to disk offset: %lu, sectornr: %ld ret: %d", (ckpt_pba * SECTOR_SIZE) , ckpt_pba, ret);
 		printf("\n");
 		exit(errno);
 	}
@@ -726,7 +511,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	printf("\n Read ckpt, ckpt->magic: %d", ckpt1->magic);
 	printf("\n hot_frontier_pba: %llu" , ckpt1->hot_frontier_pba);
 	printf("\n warm_gc_frontier_pba: %llu" , ckpt1->warm_gc_frontier_pba);
-	printf("\n ckpt->nr_free_zones: %llu", ckpt1->nr_free_zones);
+	printf("\n ckpt->nr_free_zones: %u", ckpt1->nr_free_zones);
 	printf("\n-----------------------------------------------------------\n");
 
 	if (memcmp(ckpt, ckpt1, sizeof(struct lsdm_ckpt))) {
@@ -751,34 +536,21 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned long ckpt_pba)
 	free(ckpt1);
 }
 
-void write_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_pba)
+int write_ttzone_map(int fd, struct lsdm_sb *sb)
 {
-	unsigned entries_in_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
-	unsigned int nr_sit_blks = (nr_seg_entries)/entries_in_blk;
+	struct tt_zone_map *tt_zone_map;
+	unsigned int pba = (SBZN_COUNT + CKPTZN_COUNT) << (sb->log_zone_size - sb->log_sector_size);
 
-	if (nr_seg_entries % entries_in_blk > 0)
-		nr_sit_blks = nr_sit_blks + 1;
-
-	printf("\n writing seg info tables at pba: %llu", seg_entries_pba);
-	printf("\n zone_count: %d ", nr_seg_entries);
-	printf("\n nr of sit blks: %d", nr_sit_blks);
-	printf("\n");
-
-	write_zeroed_blks(fd, seg_entries_pba, nr_sit_blks);
+	tt_zone_map = malloc(BLK_SZ);
+	if (!tt_zone_map) {
+		perror("Could not allocate tt_zone_map, error: ");
+		return -ENOMEM;
+	}
+	memset(tt_zone_map, 0, BLK_SZ);
+	tt_zone_map->lzonenr = 0;
+	tt_zone_map->pzonenr = STATIC_MD_ZONE_COUNT;
+	write_to_disk(fd, (char *)tt_zone_map, pba);
 }
-
-
-void read_seg_info_table(int fd, u64 nr_seg_entries, unsigned long seg_entries_pba)
-{
-	unsigned entries_in_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
-	unsigned int nr_sit_blks = (nr_seg_entries)/entries_in_blk;
-
-	if (nr_seg_entries % entries_in_blk > 0)
-		nr_sit_blks = nr_sit_blks + 1;
-
-	read_block(fd, seg_entries_pba, nr_sit_blks);
-}
-
 
 void report_zone(unsigned int fd, unsigned long zonenr, struct blk_zone * bzone)
 {
@@ -795,14 +567,14 @@ void report_zone(unsigned int fd, unsigned long zonenr, struct blk_zone * bzone)
 
 	ret = ioctl(fd, BLKREPORTZONE, bzr);
 	if (ret) {
-		fprintf(stderr, "\n blkreportzone for zonenr: %d ioctl failed, ret: %d ", zonenr, ret);
+		fprintf(stderr, "\n blkreportzone for zonenr: %ld ioctl failed, ret: %d ", zonenr, ret);
 		perror("\n blkreportzone failed because: ");
 		printf("\n");
 		return;
 	}
 	assert(bzr->nr_zones == 1);
-	printf("\n start: %ld ", bzr->zones[0].start);
-	printf("\n len: %ld ", bzr->zones[0].len);
+	printf("\n start: %lld ", bzr->zones[0].start);
+	printf("\n len: %lld ", bzr->zones[0].len);
 	printf("\n state: %d ", bzr->zones[0].cond);
 	printf("\n reset recommendation: %d ", bzr->zones[0].reset);
 	assert(bzr->zones[0].reset == 0);
@@ -825,7 +597,7 @@ long reset_shingled_zones(int fd)
 
 	zone_count = get_zone_count(fd);
 
-	printf("\n Nr of zones: %d ", zone_count);
+	printf("\n Nr of zones: %ld ", zone_count);
 
 	bzr = malloc(sizeof(struct blk_zone_report) + sizeof(struct blk_zone) * zone_count);
 
@@ -837,7 +609,7 @@ long reset_shingled_zones(int fd)
 		fprintf(stdout, "\n blkreportzone for zonenr: %d ioctl failed, ret: %d ", 0, ret);
 		perror("\n blkreportzone failed because: ");
 		printf("\n");
-		return;
+		return -EINVAL;
 	}
 
 	printf("\n nr of zones reported: %d", bzr->nr_zones);
@@ -857,13 +629,13 @@ long reset_shingled_zones(int fd)
 			bz_range.nr_sectors = bzr->zones[i].len;
 			ret = ioctl(fd, BLKRESETZONE, &bz_range); 
 			if (ret) {
-				fprintf(stdout, "\n Could not reset zonenr with sector: %ld", bz_range.sector);
+				fprintf(stdout, "\n Could not reset zonenr with sector: %lld", bz_range.sector);
 				perror("\n blkresetzone failed because: ");
 				printf("\n");
 			}
 			//report_zone(fd, i, &bzr->zones[i]);
 		} else {
-			printf("\n zonenr: %d is a non shingled zone! ", i);
+			printf("\n zonenr: %ld is a non shingled zone! ", i);
 			cmr++;
 		}
 	}
@@ -895,26 +667,20 @@ int main(int argc, char * argv[])
 	blkdev = argv[1];
 	fd = open_disk(blkdev);
 	cmr = reset_shingled_zones(fd);
-	printf("\n Number of cmr zones: %d ", cmr);
+	printf("\n Number of cmr zones: %ld ", cmr);
 	sb1 = write_sb(fd, 0, cmr);
 	printf("\n Superblock written at pba: %d", pba);
 	printf("\n sizeof sb: %ld", sizeof(struct lsdm_sb));
 	read_sb(fd, 0);
 	read_sb(fd, 8);
 	printf("\n Superblock written at pba: %d", pba + NR_SECTORS_IN_BLK);
-	write_rtm(fd, sb1, sb1->tm_pba, sb1->blk_count_rtm);
-	write_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
-	read_seg_info_table(fd, sb1->zone_count, sb1->sit_pba);
-	write_ckpt(fd, sb1, sb1->ckpt1_pba);
+	write_ckpt(fd, sb1);
+	write_ttzone_map(fd, sb1);
 	nrblks = get_nr_blks(sb1);
 	printf("\n nrblks: %lu", nrblks);
 	//write_zeroed_blks(fd, 0, nrblks);
 	printf("\n nrblks: %lu", nrblks);
-	printf("\n Checkpoint written at offset: %d", sb1->ckpt1_pba);
-	printf("\n Second Checkpoint written at offset: %d", sb1->ckpt2_pba);
-	printf("\n Extent map written");
 	printf("\n sb1->zone_count: %d", sb1->zone_count);
-	printf("\n Segment Information Table written");
 	pba = 0;
 	free(sb1);
 	/* 0 volume_size: 39321600  lsdm  blkdev: /dev/vdb tgtname: TL1 zone_lbas: 524288 data_end: 41418752 */
@@ -930,10 +696,10 @@ int main(int argc, char * argv[])
 	}*/
 
 	zone_lbas = 524288;
-	printf("\n # lbas in ZONE: %llu", zone_lbas);
+	printf("\n # lbas in ZONE: %lu", zone_lbas);
 	close(fd);
 	unsigned long data_zones = sb1->zone_count_main;
-	printf("\n sb1->zone_count_main: %d ", data_zones);
+	printf("\n sb1->zone_count_main: %ld ", data_zones);
 	char * tgtname = "TL1";
 	//volume_size = data_zones * zone_lbas;
 	unsigned long volume_size = data_zones * zone_lbas;
