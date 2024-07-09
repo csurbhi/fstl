@@ -4848,43 +4848,35 @@ int do_recovery(struct ctx *ctx)
  */
 struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 {
-	struct lsdm_sb * sb = ctx->sb;
-	struct lsdm_ckpt *ckpt1, *ckpt2, *ckpt;
+	sector_t ckpt_pba = 0, last_ckpt_pba = 0;
+	struct lsdm_ckpt *ckpt, *old_ckpt;
 	struct page *page1;
 
-	printk(KERN_INFO "\n !Reading checkpoint 1 from pba: %llu", sb->ckpt1_pba);
-	ckpt1 = read_checkpoint(ctx, sb->ckpt1_pba);
-	if (!ckpt1)
-		return NULL;
+	ckpt_pba = 1 << (sb->log_zone_size - sb->log_sector_size);
+	last_ckpt_pba = 3 << (sb->log_zone_size - sb->log_sector_size) - 1;
+
+	printk(KERN_INFO "\n !Reading checkpoint from pba: %llu", sb->ckpt_pba);
+	while (ckpt_pba <= last_ckpt_pba) {
+		ckpt = read_checkpoint(ctx, ckpt_pba);
+		if (!ckpt1)
+			return NULL;
+		if (!old_ckpt) {
+			if (ckpt->elapsed_time == 0) {
+				break;
+			}
+		}
+		else {
+			if (old_ckpt->elapsed_time > ckpt->elapsed_time) {
+				ckpt = old_ckpt;
+				break;
+			}
+		}
+		old_ckpt = ckpt;
+		ckpt_pba = ckpt_pba + NR_SECTORS_IN_BLK;
+	}
+
 	page1 = ctx->ckpt_page;
-	/* ctx->ckpt_page will be overwritten by the next
-	 * call to read_ckpt
-	 */
-	printk(KERN_INFO "\n !!Reading checkpoint 2 from pba: %llu", sb->ckpt2_pba);
-	ckpt2 = read_checkpoint(ctx, sb->ckpt2_pba);
-	if (!ckpt2) {
-		__free_pages(page1, 0);
-		return NULL;
-	}
-	printk(KERN_INFO "\n %s ckpt versions: %llu %llu", __func__, ckpt1->version, ckpt2->version);
-	if (ckpt1->version >= ckpt2->version) {
-		ckpt = ckpt1;
-		__free_pages(ctx->ckpt_page, 0);
-		nrpages--;
-		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
-		ctx->ckpt_page = page1;
-		ctx->ckpt_pba = ctx->sb->ckpt2_pba;
-		printk(KERN_ERR "\n Setting ckpt 1 version: %llu ckpt2 version: %llu \n", ckpt1->version, ckpt2->version);
-	}
-	else {
-		ckpt = ckpt2;
-		ctx->ckpt_pba = ctx->sb->ckpt1_pba;
-		//page2 is rightly set by read_ckpt();
-		__free_pages(page1, 0);
-		nrpages--;
-		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
-		printk(KERN_ERR "\n Setting ckpt 1 version: %llu ckpt2 version: %llu \n", ckpt1->version, ckpt2->version);
-	}
+	ctx->ckpt_pba = ckpt_pba;
 	ctx->user_block_count = ckpt->user_block_count;
 	printk(KERN_ERR "\n %s Nr of free blocks: %d \n",  __func__, ctx->user_block_count);
 	ctx->nr_invalid_zones = ckpt->nr_invalid_zones;
@@ -5041,6 +5033,17 @@ int read_rev_translation_map(struct ctx *ctx)
 	int i=0, ret = 0;
 	struct rev_tm_entry * rtm_entry = NULL;
 	u64 pba = ctx->sb->zone0_pba;
+
+	int lzonenr0 = ctx->ckpt->tt_first_zone;
+	int lzonenr_last = ctx->ckpt->tt_curr_zone;
+	int last_offset = ctx->ckpt->tt_curr_offset;
+
+	/* First read the dzonenr into one block and then search the ttzonenrs
+	 * as necessary from the one block.
+	 * For the translation blocks of 29808 data zones, 58 TT zones are required
+	 * Thus there are 58 entries. A block can have 512 entries as each entry is 8 bytes.
+	 */
+
 
 	printk(KERN_ERR "\n %s Reading TM entries from: %llu, nrblks: %ld 0th pba: %llu", __func__, ctx->sb->tm_pba, nrblks, pba);
 	
