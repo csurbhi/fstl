@@ -153,7 +153,7 @@ static inline void mykref_get(struct mykref *kref)
 {
         refcount_inc(&kref->refcount);
 }
-
+	
 /* At the end we call refcount_dec */
 static inline int mykref_put(struct mykref *kref, void (*callback)(struct mykref *kref))
 {
@@ -2028,7 +2028,6 @@ again:
 	//print_memory_usage(ctx, "After write");
 
 	ckpt = (struct lsdm_ckpt *)page_address(ctx->ckpt_page);
-	ckpt->clean = 0;
 	do_checkpoint(ctx);
 	end_t = ktime_get_ns();	
 	interval += (end_t - start_t)/1000000;
@@ -3147,14 +3146,7 @@ void flush_checkpoint(struct ctx *ctx)
 	}
 	//printk("\n %s ckpt1_pba: %llu, ckpt2_pba: %llu", __func__, ctx->sb->ckpt1_pba, ctx->sb->ckpt2_pba);
 	/* Record the pba for the next ckpt */
-	if (ctx->ckpt_pba == ctx->sb->ckpt1_pba) {
-		ctx->ckpt_pba = ctx->sb->ckpt2_pba;
-		//printk(KERN_ERR "\n Updating the second checkpoint! pba: %lld", ctx->ckpt_pba);
-	}
-	else {
-		ctx->ckpt_pba = ctx->sb->ckpt1_pba;
-		//printk(KERN_ERR "\n Updating the first checkpoint! pba: %lld", ctx->ckpt_pba);
-	}
+	/*TODO: Identify the correct ckpt_pba */
 	pba = ctx->ckpt_pba;
 	bio->bi_opf = REQ_OP_WRITE;
 	//bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
@@ -3315,10 +3307,6 @@ void update_checkpoint(struct ctx *ctx)
 	}
 	ckpt = (struct lsdm_ckpt *) page_address(page);
 	//trace_printk("\n Inside %s ckpt: %p", __func__, ckpt);
-	if (ckpt->clean == 1) {
-		//trace_printk("\n ckpt has not changed since last flush!");
-		return;
-	}
 	ckpt->user_block_count = ctx->user_block_count;
 	ckpt->version += 1;
 	//printk(KERN_ERR "\n %s ckpt->user_block_count = %lld version: %d ", __func__, ctx->user_block_count, ckpt->version);
@@ -4041,6 +4029,112 @@ void free_sit_pages(struct ctx *ctx)
 	printk(KERN_ERR "\n %s Removed all SIT Pages!", __func__);
 }
 
+/*
+ * Algorithm:
+ * Read the entire zone.
+ * take a block - read the first pair of translation entries and find out the logical block number
+ * identify the page in the RB tree of translation pages (WE are ASSUMING that all the pages are in memory)
+ * Find out the actual blk number maintained in this tmpage metadata.
+ * If it matches with this blknr, then consider this block valid and rewrite it to the new zone.
+ * If not, then discard this block during this GC.
+ * continue this till all the blocks are checked.
+ *
+ * For any GC process we need three things:
+ * a) Trigger - when will the GC be triggered? 
+ * b) Heuristics - how will a victim be selected?
+ * c) What is the algorithm? This is the algorithm portion.
+ */
+void gc_tm_blocks(struct ctx * ctx, uint pzonenr)
+{
+	struct page * pages;
+	int order = (ctx->sb->log_zone_size - ctx->sb->log_block_size); /* 2 ^ 16 = 65536 pages */
+	sector_t pba = pzonenr * ctx->nr_lbas_in_zone;
+	struct bio * bio;
+	u32 nr_pages = 1 << (ctx->sb->log_zone_size - ctx->sb->log_block_size);
+	u32 size = 1 << ctx->sb->log_zone_size;
+	int i = 0;
+	int blknr = 0, pblknr = pba / NR_SECTORS_IN_BLK;
+
+	pages = alloc_pages(GFP_IO | GFP_ZERO, order);
+	if (!pages) {
+	}
+	bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_READ, GFP_KERNEL);
+	if (!bio) {
+		__free_pages(page, 0);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %ld", __func__, nrpages);
+		return NULL;
+	}
+	
+	/* bio_add_page sets the bi_size for the bio */
+	if( PAGE_SIZE > bio_add_page(bio, page, size, 0)) {
+		__free_pages(page, 0);
+		bio_put(bio);
+		nrpages--;
+		printk(KERN_ERR "\n %s nrpages: %ld", __func__, nrpages);
+		return NULL;
+	}
+	bio->bi_opf = REQ_OP_READ;
+	//bio_set_op_attrs(bio, REQ_OP_READ, 0);
+	bio->bi_iter.bi_sector = pba;
+	bio_set_dev(bio, ctx->dev->bdev);
+	submit_bio_wait(bio);
+	//printk(KERN_ERR "\n read a block from pba: %llu", pba);
+	if (bio->bi_status != BLK_STS_OK) {
+		printk(KERN_ERR "\n %s Could not read the block, status: %d ", __func__, bio->bi_status);
+		bio_free_pages(bio);
+		bio_put(bio);
+		return NULL;
+	}
+	bio_put();
+	i  =  0;
+	/* Now you have to identify each block*/
+	while (i < nr_pages) {
+		i++;
+		j = 0;
+		blk_nr = -1;
+		while (j < nr_extents) {
+			j++;
+			/* If there are no more recorded entries on disk, then
+			 * dont add an entries further
+			 */
+			if (entry->lba > ctx->sb->max_pba) {
+				entry = entry + 1;
+				continue;
+			}
+			/* TODO: right now everything should be zeroed out */
+			//printk(KERN_ERR "\n %s i: %d lba: %llu entry->pba: %llu", __func__, i, lba, entry->pba);
+			
+			blk_nr = entry->pba / NR_SECTORS_IN_BLK;
+			blk_nr = blk_nr / RTM_ENTRIES_BLK;
+			break;
+		}
+		BUG_ON(-1 == blk_nr);
+		/* search this blknr in the TM tree */
+		rev_tmpage = search_tm_kv_store(ctx, blknr, &parent);
+		if (rev_tmpage->pblknr != pblknr) {
+			/* Invalid page, ignore */
+			continue;
+		}
+		bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_READ, GFP_KERNEL);
+		if (!bio) {
+			__free_pages(page, 0);
+			nrpages--;
+			printk(KERN_ERR "\n %s nrpages: %ld", __func__, nrpages);
+			return NULL;
+		}
+		bio->bi_opf = REQ_OP_WRITE;
+		//bio_set_op_attrs(bio, REQ_OP_READ, 0);
+		bio->bi_iter.bi_sector = pba;
+		bio_set_dev(bio, ctx->dev->bdev);
+		//bio->bi_endio = tm_gc_endio;
+		submit_bio_wait(bio);
+		/* TODO: We are assuming that the write will go through, what happens if we cannot */
+		rev_tmpage->pblknr = pblknr;
+	}
+	/* Now update the zone map - put the new pzonenr against this logical zone nr */
+}
+
 /* We don't wait for the bios to complete 
  * flushing. We only initiate the flushing
  */
@@ -4076,8 +4170,21 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	/* blknr is the relative blknr within the translation blocks.
 	 * We convert it to sector number as bio_submit expects that.
 	 */
-	pba = (tm_page->blknr * NR_SECTORS_IN_BLK) + ctx->sb->tm_pba;
-	BUG_ON(pba > (ctx->sb->tm_pba + (ctx->sb->blk_count_rtm << NR_SECTORS_IN_BLK)));
+	pba = ctx->tm_pba;
+	tm_page->pblknr = pba;
+	write_tm_metadata = 0;
+	if ((pba + NR_SECTORS_IN_BLK) == zone_end(ctx, pba)) {
+		zone_nr = get_next_freezone_nr(ctx);
+		if (zone_nr < 0) {
+			printk(KERN_ERR "\n Could not find a clean zone for writing. Calling lsdm_gc \n");
+			printk(KERN_INFO "No more disk space available for writing!");
+			BUG_ON(1);
+		}
+		ctx->tm_pba = get_first_pba_for_zone(ctx, zone_nr);
+		write_tm_metadata = 1;
+	} else {
+		ctx->tm_pba += NR_SECTORS_IN_BLK;
+	}
 
 	//printk(KERN_ERR "\n %s Flushing TM page: %p at pba: %llu blknr:%llu max_tm_blks:%u", __func__,  page_address(page), pba,  tm_page->blknr, ctx->sb->blk_count_rtm);
 
@@ -4089,6 +4196,45 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	BUG_ON(pba > ctx->sb->max_pba);
 	tm_page->flag = NEEDS_NO_FLUSH;
 	submit_bio(bio);
+
+	if (write_tm_metadata) {
+		/* Write the TM Metadata block that allows zone chaining */
+		page = alloc_page(__GFP_ZERO | GFP_KERNEL);
+		if (!page) {
+			printk(KERN_ERR "\n could not allocate page in %s \n ", __func__);
+			/*TODO: handle low memory */
+			BUG_ON(1);
+		}
+		ptr = (struct tm_metadata *) page_address(page);
+		// now = ktime_get_real_seconds()
+		ptr->magic_nr = TM_METADATA_MAGIC;
+		ptr->elapsed_time = ctx->elapsed_time + ktime_get_real_seconds() - ctx->mounted_time;
+		ptr->next_zone = zone_nr;
+		nrpages++;
+		bio = bio_alloc(ctx->dev->bdev, 1, REQ_OP_WRITE, GFP_KERNEL);
+		if (!bio) {
+			__free_pages(page, 0);
+			nrpages--;
+			printk(KERN_ERR "\n %s nrpages: %ld", __func__, nrpages);
+			return;
+		}
+		/* bio_add_page sets the bi_size for the bio */
+		if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
+			__free_pages(page, 0);
+			nrpages--;
+			printk(KERN_ERR "\n %s nrpages: %ld", __func__, nrpages);
+			bio_put(bio);
+			printk(KERN_ERR "\n Inside %s 2 - Going.. Bye!! \n", __func__);
+			return;
+		}
+		bio->bi_opf = REQ_OP_WRITE;
+		bio_set_dev(bio, ctx->dev->bdev);
+		bio->bi_iter.bi_sector = pba + NR_SECTORS_IN_BLK;
+		bio->bi_end_io = tm_metadata_endio;
+		BUG_ON(pba > ctx->sb->max_pba);
+		submit_bio(bio);
+	}
+
 	//printk(KERN_INFO "\n 2. Leaving %s! flushed dirty page! \n", __func__);
 	return;
 }
@@ -4196,7 +4342,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 	bio->bi_opf = REQ_OP_WRITE;
 	//bio_set_op_attrs(bio, REQ_OP_WRITE, 0);
 	/* Sector addressing */
-	pba = (pba * NR_SECTORS_IN_BLK) + ctx->sb->sit_pba;
+	pba = (pba * NR_SECTORS_IN_BLK) + ctx->sit_pba;
 	bio->bi_iter.bi_sector = pba;
 	//printk("\n %s sit page address: %p pba: %llu count: %d ", __func__, page_address(page), pba, count);
 	bio->bi_private = sit_ctx;
@@ -4770,7 +4916,7 @@ struct lsdm_ckpt * read_checkpoint(struct ctx *ctx, unsigned long pba)
 
        	ckpt = (struct lsdm_ckpt *) page_address(page);
 	printk(KERN_INFO "\n ** sector_nr: %lu, ckpt->magic: %u, ckpt->hot_frontier_pba: %llu", pba, ckpt->magic, ckpt->hot_frontier_pba);
-	if (ckpt->magic == 0) {
+	if (ckpt->magic != STL_CKPT_MAGIC) {
 		__free_pages(page, 0);
 		nrpages--;
 		printk(KERN_ERR "\n %s nrpages: %ld", __func__, nrpages);
@@ -4858,8 +5004,11 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	printk(KERN_INFO "\n !Reading checkpoint from pba: %llu", sb->ckpt_pba);
 	while (ckpt_pba <= last_ckpt_pba) {
 		ckpt = read_checkpoint(ctx, ckpt_pba);
-		if (!ckpt1)
-			return NULL;
+		if (!ckpt) {
+			ckpt = old_ckpt;
+			BUG_ON(NULL == old_ckpt);
+			break;
+		}
 		if (!old_ckpt) {
 			if (ckpt->elapsed_time == 0) {
 				break;
@@ -4876,7 +5025,8 @@ struct lsdm_ckpt * get_cur_checkpoint(struct ctx *ctx)
 	}
 
 	page1 = ctx->ckpt_page;
-	ctx->ckpt_pba = ckpt_pba;
+	/* This is where we write the next CKPT */
+	ctx->ckpt_pba = ckpt_pba + NR_SECTORS_IN_BLK;
 	ctx->user_block_count = ckpt->user_block_count;
 	printk(KERN_ERR "\n %s Nr of free blocks: %d \n",  __func__, ctx->user_block_count);
 	ctx->nr_invalid_zones = ckpt->nr_invalid_zones;
@@ -4929,7 +5079,7 @@ int mark_zone_occupied(struct ctx *ctx , int zonenr)
  * lba: starting lba corresponding to the pba recorded in this block
  *
  */
-int read_extents_from_block(struct ctx * ctx, struct rev_tm_entry *entry, u64 pba)
+int read_extents_from_block(struct ctx * ctx, struct rev_tm_entry *entry)
 {
 	int i = 0;
 	int nr_extents = REV_TM_ENTRIES_BLK;
@@ -4942,28 +5092,36 @@ int read_extents_from_block(struct ctx * ctx, struct rev_tm_entry *entry, u64 pb
 		 */
 		if (entry->lba > ctx->sb->max_pba) {
 			entry = entry + 1;
-			pba = pba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
 			continue;
 		}
 		/* TODO: right now everything should be zeroed out */
 		//printk(KERN_ERR "\n %s i: %d lba: %llu entry->pba: %llu", __func__, i, lba, entry->pba);
 		down_write(&ctx->lsdm_rb_lock);
-		lsdm_rb_update_range(ctx, entry->lba, pba, NR_SECTORS_IN_BLK);
+		lsdm_rb_update_range(ctx, entry->lba, entry->pba, NR_SECTORS_IN_BLK);
 		up_write(&ctx->lsdm_rb_lock);
-		pba = pba + NR_SECTORS_IN_BLK; /* Every 512 bytes sector has an LBA in a SMR drive */
 		entry = entry + 1;
-		ret++;
+		ret = entry->pba;
 	}
 	return ret;
 }
 
-int add_rtm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr)
+int add_rtm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, sector_t pba)
 {
 	struct rb_root *root = &ctx->rev_tm_rb_root;
 	struct rb_node *parent = NULL, **link = &root->rb_node;
 	struct rb_node *node = NULL;
 	struct tm_page *node_ent;
 	struct tm_page *new_tmpage, *parent_ent;
+	struct rev_tm_entry * rtm_entry = NULL;
+
+	int blknr = 0;
+
+	rtm_entry = (struct rev_tm_entry *) page_address(page);
+	/* pba can be for every sector, but TM entry is for every 4K block
+	 * Adjust for that.
+	 */
+	blk_nr = pba / NR_SECTORS_IN_BLK;
+	blk_nr = blk_nr / RTM_ENTRIES_BLK;
 
 	BUG_ON(blknr > ctx->sb->blk_count_rtm);
 
@@ -5022,50 +5180,90 @@ int add_rtm_page_kv_store_by_blknr(struct ctx *ctx, struct page *page, int blknr
  *
  * Each extent covers one 4096 sized block
  * NOT a sector!!
- * TODO
+ *
+ * Algorithm:
+ * The TT is maintained in zones in a log structured manner.
+ * So as the TT entries get modified, the entire block with TT entries gets
+ * rewritten at the end of the TT zones. Thus TT zones will have to be cleaned
+ * as empty blocks are created. 
+ *
+ * a) First read the TT zone map and get the physical zone nrs.
+ * b) For the PZONE-n:
+ * 	1) Read the blocks in the PZone-n and update the translation entries
+ * 	   in a TT tree
+ * c) Read the last block of PZONE-n - find the chained zoned nr (this is logical zonenr)
+ * d) Read the corresponding TZone map and find out hte corresponding physical
+ * zone nr
+ * e) Repeat the exercise from b. Do this till all the TT zones are read.
+ * f) In the end - the last block wont be updated. This will be indicated by the write pointer
+ * of that zone - as indicated by the checkpoint.
+ *
  */
 int read_rev_translation_map(struct ctx *ctx)
 {
 	unsigned long blknr, sectornr;
 	/* blk_count_rtm is 4096 bytes aligned number */
-	unsigned long nrblks = ctx->sb->blk_count_rtm;
+	unsigned long nrblks = (1 << (ctx->sb->log_zone_size ctx->sb->log_block_size));
 	struct page *page;
 	int i=0, ret = 0;
 	struct rev_tm_entry * rtm_entry = NULL;
 	u64 pba = ctx->sb->zone0_pba;
 
 	int lzonenr0 = ctx->ckpt->tt_first_zone;
-	int lzonenr_last = ctx->ckpt->tt_curr_zone;
-	int last_offset = ctx->ckpt->tt_curr_offset;
+	int lzonenr_last = ctx->ckpt->tt_last_zone;
+	int last_blk = ctx->ckpt->tt_last_blk;
 
 	/* First read the dzonenr into one block and then search the ttzonenrs
 	 * as necessary from the one block.
 	 * For the translation blocks of 29808 data zones, 58 TT zones are required
 	 * Thus there are 58 entries. A block can have 512 entries as each entry is 8 bytes.
 	 */
-
+	ctx->tm_pba = get_tm_pba(ctx, lzonenr0);
 
 	printk(KERN_ERR "\n %s Reading TM entries from: %llu, nrblks: %ld 0th pba: %llu", __func__, ctx->sb->tm_pba, nrblks, pba);
 	
 	ctx->n_extents = 0;
 	sectornr = 0;
+	next_lzone = lzonenr0;
+	elapsed_time = 0;
 	while(i < nrblks) {
 		i++;
+		last_blk = 0;
+	
 		//printk(KERN_ERR "\n reading block: %llu, sector: %llu data_pba: %llu", ctx->sb->tm_pba, sectornr, pba);
-		page = read_block(ctx, ctx->sb->tm_pba, sectornr);
+		page = read_block(ctx, ctx->tm_pba, sectornr);
 		if (!page)
 			return -1;
-		/* We read the extents in the entire block. the
-		 * redundant extents should be unpopulated and so
-		 * we should find 0 and break out */
-		//trace_printk("\n pba: %llu", pba);
+		if (i == nrblks-1) {
+			if (next_lzone == lzonenr_last) {
+				break;
+			}
+			tm_metadata = (struct tm_metadata *) page_address(page);
+			BUG_ON(tm_metadata->magic_nr != TM_METADATA_MAGIC);
+			next_lzone = tm_metadata->next_zone;
+			BUG_ON(elapsed_time > tm_metadata->elapsed_time);
+			elapsed_time = tm_metadata->elapsed_time;
+			ctx->tm_pba = get_tm_pba(ctx, next_lzone);
+			/* Else, we want the last entry to be a translation entry */
+			i = 0;
+			sector_nr = 0;
+			if (next_lzone == lzonenr_last) {
+				nrblks = last_blk;
+			}
+			__free_pages(page, 0);
+			continue;
+		}
+		
 		rtm_entry = (struct rev_tm_entry *) page_address(page);
-		ret = read_extents_from_block(ctx, rtm_entry, pba);
-		add_rtm_page_kv_store_by_blknr(ctx, page, sectornr/NR_SECTORS_IN_BLK);
+		ret = read_extents_from_block(ctx, rtm_entry);
+		if (! ret) {
+			__free_pages(page, 0);
+		} else {
+			add_rtm_page_kv_store_by_blknr(ctx, page, ret);
+		}
 		/* Every 512 byte sector has a LBA in SMR drives, the translation map is recorded for every block
 		 * instead. So every translation entry covers 8 sectors or 8 lbas.
 		 */
-		pba = pba + (REV_TM_ENTRIES_BLK * 8);
 		//printk(KERN_ERR "\n %s nrpages: %llu", __func__, nrpages);
 		// sectornr = sectornr + (ctx->q->limits.physical_block_size/ctx->q->limits.logical_block_size);
 		sectornr = sectornr + NR_SECTORS_IN_BLK;
@@ -5466,7 +5664,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
  */
 int read_seg_info_table(struct ctx *ctx)
 {
-	unsigned int nrblks = 0, sectornr = 0;
+	//unsigned int nrblks = 0, sectornr = 0;
 	struct block_device *bdev;
 	int nr_seg_entries_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
 	int ret=0;
@@ -5495,12 +5693,11 @@ int read_seg_info_table(struct ctx *ctx)
 
 	ctx->min_mtime = ULLONG_MAX;
 	ctx->max_mtime = get_elapsed_time(ctx);
-	nrblks = sb->blk_count_sit;
 	sectornr = 0;
 	printk(KERN_ERR "\n ctx->ckpt->hot_frontier_pba: %llu", ctx->ckpt->hot_frontier_pba);
 	printk(KERN_ERR "\n ctx->ckpt->warm_gc_frontier_pba: %llu", ctx->ckpt->warm_gc_frontier_pba);
 	printk(KERN_ERR "\n get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba): %u", get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
-	printk(KERN_ERR "\n %s Read seginfo from pba: %llu sectornr: %d zone0_pba: %llu \n", __func__, sb->sit_pba, sectornr, ctx->sb->zone0_pba);
+	//printk(KERN_ERR "\n %s Read seginfo from pba: %llu sectornr: %d zone0_pba: %llu \n", __func__, sb->sit_pba, sectornr, ctx->sb->zone0_pba);
 	printk("\n ctx->hot_frontier_pba: %llu, ckpt->frontier zone: %u", ctx->ckpt->hot_frontier_pba, get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba));
 	while (nr_data_zones > 0) {
 		//trace_printk("\n zonenr: %u", zonenr);
@@ -5508,9 +5705,9 @@ int read_seg_info_table(struct ctx *ctx)
 			printk(KERN_ERR "\n Seg entry blknr cannot be bigger than the data blknr");
 			return -1;
 		}
-		sit_page = read_block(ctx, sb->sit_pba, sectornr);
+		//sit_page = read_block(ctx, sb->sit_pba, sectornr);
 		if (!sit_page) {
-			printk(KERN_ERR "\n %s Could not read sit pba: %lld ", __func__, sb->sit_pba);
+			//printk(KERN_ERR "\n %s Could not read sit pba: %lld ", __func__, sb->sit_pba);
 			kfree(ctx->freezone_bitmap);
 			return -1;
 		}
@@ -5617,14 +5814,7 @@ int read_metadata(struct ctx * ctx)
 		return -1;
 	}	
 	ctx->ckpt = ckpt;
-	printk(KERN_INFO "\n checkpoint read!, ckpt->clean: %d", ckpt->clean);
-	/*
-	if (!ckpt->clean) {
-		printk("\n Scrubbing metadata after an unclean shutdown...");
-		ret = do_recovery(ctx);
-		return ret;
-	} */
-	ctx->hot_wf_pba = ctx->ckpt->hot_frontier_pba;
+	ctx->hot_wf_pba = ckpt->hot_frontier_pba;
 	printk(KERN_ERR "\n %s %d ctx->hot_wf_pba: %llu\n", __func__, __LINE__, ctx->hot_wf_pba);
 	ctx->hot_wf_end = zone_end(ctx, ctx->hot_wf_pba);
 	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->hot_wf_end);
@@ -5632,7 +5822,7 @@ int read_metadata(struct ctx * ctx)
 	ctx->free_sectors_in_wf = ctx->hot_wf_end - ctx->hot_wf_pba + 1;
 	printk(KERN_ERR "\n ctx->free_sectors_in_wf: %lld", ctx->free_sectors_in_wf);
 	
-	ctx->warm_gc_wf_pba = ctx->ckpt->warm_gc_frontier_pba;
+	ctx->warm_gc_wf_pba = ckpt->warm_gc_frontier_pba;
 	printk(KERN_ERR "\n %s %d ctx->hot_wf_pba: %llu\n", __func__, __LINE__, ctx->hot_wf_pba);
 	ctx->warm_gc_wf_end = zone_end(ctx, ctx->warm_gc_wf_pba);
 	printk(KERN_ERR "\n %s %d kernel wf end: %llu\n", __func__, __LINE__, ctx->hot_wf_end);
@@ -5653,7 +5843,7 @@ int read_metadata(struct ctx * ctx)
 		ctx->bitmap_bytes = ctx->bitmap_bytes + 1;
 		ctx->bitmap_bit = (sb2->zone_count_main % BITS_IN_BYTE);
 	}
-	printk(KERN_ERR "\n %s Nr of zones in main are: %llu, bitmap_bytes: %d, bitmap_bit: %d ", __func__, sb2->zone_count_main, ctx->bitmap_bytes, ctx->bitmap_bit);
+	//printk(KERN_ERR "\n %s Nr of zones in main are: %llu, bitmap_bytes: %d, bitmap_bit: %d ", __func__, sb2->zone_count_main, ctx->bitmap_bytes, ctx->bitmap_bit);
 	if (sb2->zone_count_main % BITS_IN_BYTE > 0)
 		ctx->bitmap_bytes += 1;
 	read_seg_info_table(ctx);
@@ -5944,7 +6134,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	//ctx->higher_watermark = 10;
 	ctx->middle_watermark = 2;
 	ctx->higher_watermark = 3;
-	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
+	//printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
 	//ctx->higher_watermark = ctx->lower_watermark >> 2; 
 	/*
 	if (ctx->sb->zone_count > SMALL_NR_ZONES) {
