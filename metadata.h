@@ -64,6 +64,7 @@ struct metadata_read_ctx {
 struct tm_page {
 	struct rb_node rb;
 	sector_t blknr;
+	sector_t pblknr;
 	struct page *page;
 	int flag;
 };

@@ -9,6 +9,8 @@
  * Zone3: CKPT log
  * Zone4: DZONE map
  * Zone5: DZONE map
+ * Zone6: SIT
+ * Zone7: SIT
  *
  * The dzone map contains the dzones used for translation map. Since we are zone chaining, the last
  * block points to the next zone. However, this zone can get GCed. For this reason we use dzone map,
@@ -29,9 +31,12 @@
  * Every TM block holds two things: 1) the checksum of that block 2) the age of that block
  * If you do this, there is no need to store the SIT separately as it can be calculated based on this.
  * It can be an in-memory thing and fewer data needs to go to the device.
+ *
+ * However, for now we are maintaining SIT on device. Zone 6 or 7 has the latest SIT. We write the elapsed
+ * time in the beginning of a zone - to find out if zone 6 or 7 is the current SIT zone.
  */
 
-typedef __le64 u64;
+typedef sector_t u64;
 typedef __le32 u32;
 typedef __le16 u16;
 typedef u64 uint64_t;
@@ -48,9 +53,11 @@ typedef u64 sector_t;
 #define BLK_SZ 4096
 #define STL_SB_MAGIC 0x7853544c
 #define STL_CKPT_MAGIC 0x1A2B3C4D
+#define TM_METADATA_MAGIC 0x1A2B4C5D
 
 #define SIT_ENTRIES_BLK 	(BLK_SIZE/sizeof(struct lsdm_seg_entry))
 #define TM_ENTRIES_BLK 		(BLK_SIZE/sizeof(struct tm_entry))
+#define RTM_ENTRIES_BLK 	(BLK_SIZE/sizeof(struct tm_entry))
 #define SBZN_COUNT 1
 #define CKPTZN_COUNT 2
 #define TZONE_MAP_COUNT 2
@@ -77,8 +84,8 @@ struct lsdm_ckpt {
 	u64 hot_frontier_pba;
 	u64 warm_gc_frontier_pba;
 	u64 tt_first_zone;	/* logical zone number */
-	u64 tt_curr_zone;	/* logical zone number */
-	unsigned int tt_curr_offset;  /* offset within the current zone */
+	u64 tt_last_zone;	/* logical zone number */
+	unsigned int tt_last_blk;  /* # blks in the last tt zone */
 	u64 blk_count_tm;	/* Nr of valid TM blks */
 	u32 nr_free_zones;
 	u64 elapsed_time;		/* records the time elapsed since all the mounts */
@@ -121,3 +128,9 @@ struct tt_zone_map {
 	unsigned int lzonenr;
 	unsigned int pzonenr;
 } __attribute__((packed));
+
+struct tm_metadata {
+	unsigned int magic_nr;
+	sector_t elapsed_time;
+	sector_t next_zone;
+};
