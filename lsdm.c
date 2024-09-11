@@ -1346,16 +1346,24 @@ static void free_gc_list(struct ctx *ctx)
 
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref, spinlock_t *lock);
 
+int read_gc_victim_zone(struct ctx *ctx, int zonenr)
+{
+	pba = get_first_pba_for_zone(ctx, zonenr);
+	last_pba = get_last_pba_for_zone(ctx, zonenr);
+}
+
 /*
  * TODO: Do  not chain the bios as we do not get notification
  * of what extent reading did not work! We can retry and if
  * the block did not work, we can do something more meaningful.
  */
-static int read_gc_extents(struct ctx *ctx)
+static int read_gc_extents(struct ctx *ctx, int zonenr)
 {
 	struct list_head *pos;
 	struct gc_extents *gc_extent;
 	int count = 0;
+
+	read_gc_victim_zone(ctx, zonenr)
 	
 	/* If list is empty we have nothing to do */
 	BUG_ON(list_empty(&ctx->gc_extents->list));
@@ -1960,16 +1968,14 @@ again:
 	}
 
 	create_gc_extents(ctx, zonenr);
-
 	//print_memory_usage(ctx, "After extents");
 	if (list_empty(&ctx->gc_extents->list)) {
 		/* Nothing to do, sit_ent_vblocks_decr() is playing catch up with gc cost tree */
 		remove_zone_from_gc_tree(ctx, zonenr);	
 		goto again;
 	}
-
 	//printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
-	ret = read_gc_extents(ctx);
+	ret = read_gc_extents(ctx, zonenr);
 	if (ret)
 		goto failed;
 
