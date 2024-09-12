@@ -1273,6 +1273,7 @@ void read_gcextent_done(struct bio * bio)
 	gc_extent->bio = NULL;
 }
 
+#if 0
 static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 {
 	struct bio_vec *bv = NULL;
@@ -1327,8 +1328,9 @@ static int read_extent_bio(struct ctx *ctx, struct gc_extents *gc_extent)
 	bio_put(bio);
 	return 0;
 }
+#endif 
 
-
+#if 0
 
 static void free_gc_list(struct ctx *ctx)
 {
@@ -1343,13 +1345,66 @@ static void free_gc_list(struct ctx *ctx)
 	list_del(&ctx->gc_extents->list);
 	printk(KERN_ERR "\n %s done! \n ", __func__);
 }
+#endif
 
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref, spinlock_t *lock);
 
-int read_gc_victim_zone(struct ctx *ctx, int zonenr)
+struct page * gc_pages[64];
+
+int read_one_zone(struct ctx *ctx, sector_t pba, struct page *pages[])
 {
-	pba = get_first_pba_for_zone(ctx, zonenr);
-	last_pba = get_last_pba_for_zone(ctx, zonenr);
+	struct bio * bio;
+	int i, j;
+	int nrvecs = 64;
+	int tt_nrpages_order = 10; /* This is the max permissible order */
+	int tt_nrpages = 2 ^ 10;
+	int len = tt_nrpages * PAGE_SIZE; /* Number of bytes */
+
+	if (pba > ctx->max_pba) {
+		dump_stack();
+		return -1;
+	}
+
+	bio = bio_alloc(ctx->dev->bdev, nrvecs, REQ_OP_READ, GFP_KERNEL);
+	if (!bio) {
+		printk(KERN_ERR "\n %s nrpages: %ld", __func__, nrpages);
+		return -1;
+	}
+		
+
+	for(i=0; i<nrvecs; i++) {
+		pages[i] = alloc_pages(__GFP_ZERO|GFP_KERNEL, tt_nrpages_order);
+		if (!pages[i] ) {
+			printk(KERN_ERR "\n Could not alloc bulk pages to read a zone ");
+			return -1; 
+		}
+		printk(KERN_ERR "\n Allocated 256 pages \n");
+
+		/* bio_add_page sets the bi_size for the bio */
+		if(len > bio_add_page(bio, pages[i], len, 0)) {
+			for (j=i; j>0; j--) {
+				__free_pages(pages[j], tt_nrpages_order);
+			}
+			printk(KERN_ERR "\n Could not add pages to the bio ");
+			bio_put(bio);
+			return -1;
+		}
+		printk(KERN_ERR "\n Added 65536 pages.\n ");
+	}
+	bio->bi_opf = REQ_OP_READ;
+	//bio_set_op_attrs(bio, REQ_OP_READ, 0);
+	bio->bi_iter.bi_sector = pba;
+	bio_set_dev(bio, ctx->dev->bdev);
+	submit_bio_wait(bio);
+	if (bio->bi_status != BLK_STS_OK) {
+		printk(KERN_ERR "\n %s Could not read the block, status: %d ", __func__, bio->bi_status);
+		bio_free_pages(bio);
+		bio_put(bio);
+		return -1;
+	}
+	/* bio_alloc() hence bio_put() */
+	bio_put(bio);
+	return 0;
 }
 
 /*
@@ -1361,9 +1416,13 @@ static int read_gc_extents(struct ctx *ctx, int zonenr)
 {
 	struct list_head *pos;
 	struct gc_extents *gc_extent;
-	int count = 0;
+	int diff = 0, vecnr = 0, pagecount=0;
+	int i, pagenr, s8;
+	struct page * page;
+	sector_t first_pba;
 
-	read_gc_victim_zone(ctx, zonenr)
+	first_pba = get_first_pba_for_zone(ctx, zonenr);
+	read_one_zone(ctx, first_pba, gc_pages);
 	
 	/* If list is empty we have nothing to do */
 	BUG_ON(list_empty(&ctx->gc_extents->list));
@@ -1375,12 +1434,24 @@ static int read_gc_extents(struct ctx *ctx, int zonenr)
 			printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %llu ", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 			BUG();
 		}
-		if (read_extent_bio(ctx, gc_extent)) {
-			free_gc_list(ctx);
-			printk(KERN_ERR "Low memory! TODO: Write code to free memory from translation tables etc ");
-			BUG();
+		diff = gc_extent->e.pba - first_pba;
+		vecnr = diff/1024;
+		pagenr = diff % 1024;
+		page = gc_pages[vecnr] + pagenr;
+		s8 = gc_extent->e.len;
+		pagecount = (s8 >> SECTOR_BLK_SHIFT);
+		for(i=0; i<pagecount; i++) {
+			gc_extent->bio_pages[i] = page;
+			pagenr = pagenr + 1;
+			if (pagenr == 1024) {
+				vecnr = vecnr + 1;
+				BUG_ON(vecnr > 64);
+				page = gc_pages[vecnr];
+				pagenr = 0;
+			} else {
+				page = page + 1;
+			}
 		}
-		count = count + 1;
 	}
 	//printk(KERN_ERR "\n GC extents submitted for read: %d ", count);
 	return 0;
@@ -1434,7 +1505,6 @@ void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent)
 	if (gc_extent->bio_pages) {
 		for (i=0; i<pagecount; i++) {
 			if(gc_extent->bio_pages[i]) {
-				mempool_free(gc_extent->bio_pages[i], ctx->gc_page_pool);
 				gc_extent->bio_pages[i] = NULL;
 			}
 		}
@@ -1592,6 +1662,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	bio->bi_opf = REQ_OP_WRITE;
 	bio->bi_status = BLK_STS_OK;
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
+	/* length indicates the nrvecs in bio */
 	len = 0;
 	/* now all the gc extents are set, we do not need to adjust it 
 	 * We also know that every gc extent will fit in the current warm frontier.
@@ -1604,16 +1675,6 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		nrpages = s8 / NR_SECTORS_IN_BLK;
 		//printk(KERN_ERR "\n %s gc_extent->e.len = %d ", __func__, s8);
 		for(i=0; i<nrpages; i++) {
-			page = gc_extent->bio_pages[i];
-			BUG_ON(!page);
-			if (!bio_add_page(bio, page, PAGE_SIZE, 0)) {
-				printk(KERN_ERR "\n %s Could not add page to the bio ", __func__);
-				printk(KERN_ERR "bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d \n", bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs);
-				bio_put(bio);
-				return -ENOMEM;
-			}
-			len = len + 1;
-			rem_sectors = rem_sectors - NR_SECTORS_IN_BLK;
 			if ((len == 256) || (0 == rem_sectors)) {
 				submit_bio_wait(bio);
 				/* To release all the associations of pages with this bio */
@@ -1628,10 +1689,21 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 				bio->bi_opf = REQ_OP_WRITE;
 				bio->bi_status = BLK_STS_OK;
 				bio->bi_iter.bi_sector = gc_extent->e.pba;
-				len = 0;
 				rem_sectors = ctx->nr_lbas_in_zone;
+				len = 0;
 			}
+			page = gc_extent->bio_pages[i];
+			BUG_ON(!page);
+			if (!bio_add_page(bio, page, PAGE_SIZE, 0)) {
+				printk(KERN_ERR "\n %s Could not add page to the bio ", __func__);
+				printk(KERN_ERR "bio->bi_vcnt: %d bio->bi_iter.bi_size: %d bi_max_vecs: %d \n", bio->bi_vcnt, bio->bi_iter.bi_size, bio->bi_max_vecs);
+				bio_put(bio);
+				return -ENOMEM;
+			}
+			rem_sectors = rem_sectors - NR_SECTORS_IN_BLK;
+
 		}
+		len = len + 1;
 	}
 	if (len > 0) {
 		submit_bio_wait(bio);
@@ -1641,6 +1713,9 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	list_for_each_entry_safe(gc_extent, next_ptr, &ctx->gc_extents->list, list) {
 		write_metadata_extent(ctx, gc_extent);
 		free_gc_extent(ctx, gc_extent);
+	}
+	for(i=0; i<64; i++) {
+		__free_pages(gc_pages[i], 10);
 	}
 	up_write(&ctx->lsdm_rb_lock);
 #ifdef LSDM_DEBUG
