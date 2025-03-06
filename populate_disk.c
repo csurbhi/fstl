@@ -271,7 +271,7 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int 
 	mtime = 10;
 	remaining_entries = nr_zones;
 	rem_free_entries = freezones;
-	printf("\n total_zone_count: %d remaining_entries: %d remaining free entries: %d, entries per blk: %d ", sb->zone_count_main, remaining_entries, rem_free_entries, entries_in_blk);
+	printf("\n total_zone_count: %d remaining_entries: %d remaining free entries: %d, entries per blk: %d \n", sb->zone_count_main, remaining_entries, rem_free_entries, entries_in_blk);
 	assert(rem_free_entries < entries_in_blk);
 	for(i=0; i<nr_sit_blks; i++) {
 		memset(buffer, 0, BLK_SZ);

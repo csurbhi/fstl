@@ -620,7 +620,7 @@ struct rev_extent * lsdm_rb_revmap_find(struct ctx *ctx, u64 pba, size_t len, u6
 				/* We find an overlapping pba when the gc_extent was split due to space
 				 * requirements in the gc frontier
 				 */
-				BUG_ON((rev_e->pba + e->len) < (pba + len));
+				//BUG_ON((rev_e->pba + e->len) < (pba + len));
 				return rev_e;
 			}
 			link = &(parent->rb_right);
@@ -2590,7 +2590,8 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 	while(split != clone) {
 		nr_sectors = bio_sectors(clone);
 		origlba = clone->bi_iter.bi_sector;
-		lba = round_down(origlba, NR_SECTORS_IN_BLK);
+		//lba = round_down(origlba, NR_SECTORS_IN_BLK);
+		lba  = origlba;
 		e = lsdm_rb_geq(ctx, lba, print);
 
 		/* case of no overlap */
@@ -2605,7 +2606,10 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 *	[---------bio------] 
 		 */
 			zerolen = e->lba - lba;
-			BUG_ON(zerolen != nr_sectors);
+			//BUG_ON(zerolen != nr_sectors);
+			//if (zerolen != nr_sectors) {
+			//	printk(KERN_ERR "\n 1) BUG INFO: nr_sectors: %u, zerolen: %u e->lba: %llu, lba: %llu origlba: %llu", nr_sectors, zerolen, e->lba, lba, origlba);
+			//}
 			ret = zero_fill_inital_bio(ctx, bio, clone, zerolen, read_ctx);
 			if (!ret)
 				return ret;
@@ -2614,6 +2618,9 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			 */
 			lba = lba + zerolen;
 			nr_sectors = bio_sectors(clone);
+			//if (zerolen != nr_sectors) {
+			//	printk(KERN_ERR "\n 1.1) BUG INFO: nr_sectors: %u, zerolen: %u e->lba: %llu, lba: %llu origlba: %llu e->len: %llu", nr_sectors, zerolen, e->lba, lba, origlba, e->len);
+			//}
 			BUG_ON(lba != e->lba);
 			/* we fall through as e->lba == lba now */
 		} 
@@ -2630,7 +2637,7 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 		 * splitting is required. Previous splits if any, are chained
 		 * to the last one as 'clone' is their parent.
 		 */
-			ret = handle_full_overlap(ctx, bio, clone, nr_sectors, pba, read_ctx, (origlba >= 15597042700) ? 1: 0);
+			ret = handle_full_overlap(ctx, bio, clone, nr_sectors, pba, read_ctx, 0);
 			//printk(KERN_ERR "\n 1) ret: %d \n", ret);
 			if (ret)
 				return ret;
