@@ -2329,10 +2329,13 @@ void complete_small_reads(struct bio *clone)
 	struct bvec_iter iter;
 	char * todata = NULL, *fromdata = NULL;
 	struct app_read_ctx *readctx = clone->bi_private;
+	/* we are not doing this next rounding before reading, we cannot do it after reading, diff will be 0 */
 	sector_t lba = round_down(readctx->lba, NR_SECTORS_IN_BLK);
 	sector_t nrsectors = readctx->nrsectors;
 	unsigned long diff = 0;
 
+	//diff = (readctx->lba - lba) << LOG_SECTOR_SIZE;
+	//printk(KERN_ERR "\n %s 1. diff: %lu nrsectors: %llu \n", __func__, diff, nrsectors);
 	if (clone->bi_status != BLK_STS_OK) {
 		readctx->clone->bi_status = clone->bi_status;
 		goto free;
@@ -2344,8 +2347,6 @@ void complete_small_reads(struct bio *clone)
 		goto free;
 		//BUG();
 	}
-	diff = (readctx->lba - lba) << LOG_SECTOR_SIZE;
-	//printk(KERN_ERR "\n %s 1. diff: %llu nrsectors: %d \n", __func__, diff, nrsectors);
 	bio_for_each_segment(bv, readctx->clone, iter) {
 		todata = page_address(bv.bv_page);
 		todata = todata + bv.bv_offset;
@@ -2353,7 +2354,7 @@ void complete_small_reads(struct bio *clone)
 	}
 	fromdata = readctx->data;
 	memcpy(todata, fromdata + diff, (nrsectors << LOG_SECTOR_SIZE));
-	//printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %d  bytes: %d \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
+	//printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %lu  bytes: %lluconstruct_smaller_bios \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
 free:
 	readctx->clone->bi_end_io = lsdm_subread_done;
 	bio_endio(readctx->clone);
@@ -2382,7 +2383,7 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 		return NULL;
 	}
 
-	printk(KERN_ERR "\n %s smaller bio's address: %p larger bio address: %p", __func__, bio, readctx->clone);
+	//printk(KERN_ERR "\n %s smaller bio's address: %p larger bio address: %p", __func__, bio, readctx->clone);
 	
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
@@ -2397,9 +2398,10 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 		page = bv.bv_page;
 		data = page_address(page);
 		data = data + bv.bv_offset;
-		//printk(KERN_ERR "\n %s (new small bio) data: %p ", __func__, data);
 		readctx->data = data;
+		break;
 	}
+	//printk(KERN_ERR "\n %s (new small bio) data: %p bv.bv_offset: %d page: %p readctx->data: %p", __func__, data, bv.bv_offset, page_address(page), readctx->data);
 	bio->bi_opf = REQ_OP_READ;
 	//bio_set_op_attrs(bio, REQ_OP_READ, 0);
 	bio_set_dev(bio, ctx->dev->bdev);
@@ -2616,12 +2618,12 @@ static int lsdm_read_io(struct ctx *ctx, struct bio *bio)
 			/* bio is front filled with zeroes, but we need to compare 'clone' now with
 			 * the same e
 			 */
-			lba = lba + zerolen;
+			lba = e->lba; 		// i.e lba + zerolen;
 			nr_sectors = bio_sectors(clone);
 			//if (zerolen != nr_sectors) {
 			//	printk(KERN_ERR "\n 1.1) BUG INFO: nr_sectors: %u, zerolen: %u e->lba: %llu, lba: %llu origlba: %llu e->len: %llu", nr_sectors, zerolen, e->lba, lba, origlba, e->len);
 			//}
-			BUG_ON(lba != e->lba);
+			//BUG_ON(lba != e->lba);
 			/* we fall through as e->lba == lba now */
 		} 
 		//(e->lba <= lba) 
@@ -4618,7 +4620,7 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 			}
 			submit_bio(clone);
 			/* Move write frontier only after a successful submit */
-			//printk(KERN_ERR "\n %s 1. zonenr: %d Submitting lba: {%llu, pba: %llu, len: %d}", __func__, get_zone_nr(ctx, wf), lba, wf, s8);
+			//printk(KERN_ERR "\n %s 1. zonenr: %d Submitting lba: {%llu, pba: %llu, len: %llu}", __func__, get_zone_nr(ctx, wf), lba, wf, s8);
 			move_write_frontier(ctx, s8);
 			up_write(&ctx->wf_lock);
 			break;
@@ -5927,8 +5929,10 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 
 	unsigned int gc_pool_pages = 1 << (ctx->sb->log_zone_size - ctx->sb->log_block_size);
 	ctx->gc_page_pool = mempool_create_page_pool(gc_pool_pages, 0);
-	if (!ctx->gc_page_pool)
+	if (!ctx->gc_page_pool) {
+		printk(KERN_ERR "\n Could not create gc page pool at %d ", __LINE__);
 		goto free_metadata_pages;
+	}
 
 	max_pba = (ctx->dev->bdev->bd_inode->i_size) / 512;
 	sprintf(ctx->nodename, "lsdm/%s", argv[1]);

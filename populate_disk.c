@@ -30,6 +30,8 @@
 #define BITS_IN_BYTE 8
 #define NR_BLKS_IN_ZONE 65536
 
+#define NR_FREE_ZONES 120 /* for 1 MB tests, 28.5 GB on-disk STL cache, middle wm: 6 - GC starts here. 28.5GB - 114 + 6 = 120 */
+
 unsigned int crc32(int d, unsigned char *buf, unsigned int size)
 {
 	return 0;
@@ -135,7 +137,7 @@ char * read_block(int fd, sector_t pba)
 }
 
 /* Each zone has NR_BLKS_IN_ZONE ie 65536 entries */
-void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
+void write_rtm(int fd, struct lsdm_sb *sb, int freeblks)
 {
 	sector_t tm_pba, data_lba = 0;
 	unsigned int freed=0, entries=0;
@@ -146,7 +148,9 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 	unsigned remaining_entries;
 	int i, j, ret;
 	int zonenr = 0;
-	int freezones = sb->zone_count_main - nr_zones;
+	//int freezones = sb->zone_count_main - nr_zones - 2;
+	int freezones = NR_FREE_ZONES;
+	int nr_zones = sb->zone_count_main - freezones - 2;
 
 	u64 nr_tm_entries = (nr_zones * 65536);
 	u32 nr_tm_entries_per_blk = BLK_SZ/ sizeof(struct tm_entry);
@@ -241,15 +245,17 @@ void write_rtm(int fd, struct lsdm_sb *sb, int nr_zones, int freeblks)
 	*/
 }
 
-void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int freeblks)
+void write_sit(int fd, struct lsdm_sb *sb,  unsigned int freeblks)
 {
 	unsigned entries_in_blk = BLK_SZ / sizeof(struct lsdm_seg_entry);
 	struct lsdm_seg_entry *entry;
 	int i, j, remaining_entries = 0, mtime, ret, rem_free_entries = 0;
 	char buffer[BLK_SZ];
 	sector_t offset;
-	int freezones = sb->zone_count_main - nr_zones;
-	unsigned int nr_sit_blks = (nr_zones + freezones)/entries_in_blk;
+	int freezones = NR_FREE_ZONES;
+	int nr_zones = sb->zone_count_main - freezones - 2;
+
+	unsigned int nr_sit_blks = sb->zone_count_main/entries_in_blk;
 
 	if (nr_zones % entries_in_blk > 0)
 		nr_sit_blks = nr_sit_blks + 1;
@@ -272,7 +278,7 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int nr_zones, unsigned int 
 	remaining_entries = nr_zones;
 	rem_free_entries = freezones;
 	printf("\n total_zone_count: %d remaining_entries: %d remaining free entries: %d, entries per blk: %d \n", sb->zone_count_main, remaining_entries, rem_free_entries, entries_in_blk);
-	assert(rem_free_entries < entries_in_blk);
+	//assert(rem_free_entries < entries_in_blk);
 	for(i=0; i<nr_sit_blks; i++) {
 		memset(buffer, 0, BLK_SZ);
 		entry = buffer;
@@ -381,13 +387,13 @@ int read_seg_info_table(struct lsdm_sb *sb, struct lsdm_ckpt *ckpt, int fd)
 	return 0;
 }
 
-void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
+void write_ckpt(int fd, struct lsdm_sb * sb)
 {
 	struct lsdm_ckpt *ckpt, *ckpt1;
 	int ret;
 	unsigned long ckpt_pba = sb->ckpt1_pba;
 	char buffer[BLK_SZ];
-	int freezones = sb->zone_count_main - nr_zones - 2;
+	int freezones = NR_FREE_ZONES;
 
 	ckpt = (struct lsdm_ckpt *)malloc(BLK_SZ);
 	if(!ckpt)
@@ -406,7 +412,7 @@ void write_ckpt(int fd, struct lsdm_sb * sb, unsigned nr_zones)
 	printf("\n");
 	printf("\n last_gc_pba: %llu , max_pba: %llu \n", ckpt->warm_gc_frontier_pba +  (1 << (sb->log_zone_size - sb->log_sector_size)), sb->max_pba);
 	assert(ckpt->warm_gc_frontier_pba  <= sb->max_pba);
-	ckpt->nr_free_zones = sb->zone_count_main - 2 - nr_zones; //1 for the current frontier and gc frontier
+	ckpt->nr_free_zones = freezones - 2; //1 for the current frontier and gc frontier
 	ckpt->elapsed_time = 0;
 	ckpt->clean = 1;  /* 1 indicates clean datastructures */
 	ckpt->crc = 0;
@@ -514,29 +520,19 @@ int main(int argc, char * argv[])
 	int fd;
 
 	printf("\n %s argc: %d \n ", __func__, argc);
-	if (argc != 4) {
-		fprintf(stderr, "\n Usage: %s device-name seq-data-zones(# zones filled with seq data) freeblks (#blks in every zone freed)  \n", argv[0]);
+	if (argc != 3) {
+		fprintf(stderr, "\n Usage: %s device-name freeblks (#blks in every zone freed)  \n", argv[0]);
 		exit(EXIT_FAILURE);
 	}
 	blkdev = argv[1];
 	fd = open_disk(blkdev);
 	/* size in GB */
-	nr_zones = atoi(argv[2]);
-	if (nr_zones == 0) {
-		printf("\n");
-		return 0;
-	}
-	free_blks = atoi(argv[3]);
+	free_blks = atoi(argv[2]);
 	read_sb(fd, 0, &sb);
 	read_sb(fd, 8, &sb);
-	if (nr_zones > (sb->zone_count_main - 2)) {
-		printf("\n Device has %llu zones, cannot populate more!", sb->zone_count_main);
-		printf("\n");
-		return 0;
-	}
-	write_rtm(fd, sb,  nr_zones, free_blks);
-	write_sit(fd, sb, nr_zones, free_blks);
-	write_ckpt(fd, sb, nr_zones);
+	write_rtm(fd, sb,  free_blks);
+	write_sit(fd, sb, free_blks);
+	write_ckpt(fd, sb);
 	read_sb(fd, 0, &sb);
 	read_sb(fd, 8, &sb);
 	printf("\n Populated %d zones ", nr_zones);

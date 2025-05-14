@@ -114,9 +114,11 @@ __le32 get_zone_count(int fd)
 	if (zone_count >= (capacity/zonesz)) {
 		printf("\n Number of zones: %d ", zone_count);
 		printf("\n capacity/ZONE_SZ: %d ", capacity/zonesz);
+		//return 41;
 		return capacity/zonesz;
 	}
 	printf("\n Actual zone count calculated: %d ", (capacity/zonesz));
+	//return 41;
 	return zone_count;
 	//return 16500;
 	//return 28200;
