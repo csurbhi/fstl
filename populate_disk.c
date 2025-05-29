@@ -31,6 +31,7 @@
 #define NR_BLKS_IN_ZONE 65536
 
 #define NR_FREE_ZONES 120 /* for 1 MB tests, 28.5 GB on-disk STL cache, middle wm: 6 - GC starts here. 28.5GB - 114 + 6 = 120 */
+//#define NR_FREE_ZONES 121 /* for 1 MB tests, 28.5 GB on-disk STL cache, higher wm: 7 - GC starts here. 28.5GB - 114 + 7 = 121 */
 
 unsigned int crc32(int d, unsigned char *buf, unsigned int size)
 {
@@ -140,28 +141,28 @@ char * read_block(int fd, sector_t pba)
 void write_rtm(int fd, struct lsdm_sb *sb, int freeblks)
 {
 	sector_t tm_pba, data_lba = 0;
-	unsigned int freed=0, entries=0;
+	unsigned int freed=0;
 	struct rev_tm_entry *entry;
-	char buffer[BLK_SZ];
+	char * buffer;
 	u64 offset;
 	char boffset;
 	unsigned remaining_entries;
-	int i, j, ret;
-	int zonenr = 0;
-	//int freezones = sb->zone_count_main - nr_zones - 2;
+	int i, j, k, ret;
 	int freezones = NR_FREE_ZONES;
-	int nr_zones = sb->zone_count_main - freezones - 2;
+	int nr_zones = sb->zone_count_main - freezones;
 
-	u64 nr_tm_entries = (nr_zones * 65536);
+	printf("\n---------------------- sb->zone_count_main: %llu ", sb->zone_count_main);
+
+	u32 nr_tm_entries_per_zone = 65536;
+	u64 nr_tm_entries = (nr_zones * nr_tm_entries_per_zone);
 	u32 nr_tm_entries_per_blk = BLK_SZ/ sizeof(struct tm_entry);
-        u64 nr_tm_blks = nr_tm_entries / nr_tm_entries_per_blk;
-	u64 nr_free_tm_entries = (freezones * 65536);
+	u64 nr_free_tm_entries = (freezones * nr_tm_entries_per_zone);
 	u64 nr_free_tm_blks = nr_free_tm_entries / nr_tm_entries_per_blk;
-	if (nr_tm_entries % nr_tm_entries_per_blk)
-		nr_tm_blks++;
+
+	u32 nr_tm_blks_per_zone = nr_tm_entries_per_zone / TM_ENTRIES_BLK;
 
 	sector_t pba = sb->tm_pba + (nr_free_tm_blks * NR_SECTORS_IN_BLK);
-	printf("\n ** %s nr_zones: %d, Writing tm blocks at pba: %llu, nrblks: %u nr_free_tm_blks: %d ", __func__, nr_zones, sb->tm_pba, nr_tm_blks, nr_free_tm_blks);
+	printf("\n ** %s nr_zones: %d, Writing tm blocks at pba: %llu, nr_free_tm_blks: %d ", __func__, nr_zones, sb->tm_pba, nr_free_tm_blks);
 	printf("\n lseeking at offset: %llu ", pba);
 
 	ret = lseek64(fd, pba * 512, SEEK_SET);
@@ -172,77 +173,62 @@ void write_rtm(int fd, struct lsdm_sb *sb, int freeblks)
 	}
 
 	remaining_entries = nr_tm_entries;
-	printf("\n remaining entries: %llu #entries per blk: %llu nr_tm_blks: %llu \n", remaining_entries, nr_tm_entries_per_blk, nr_tm_blks);
-	entries = 0;
+	printf("\n remaining entries: %llu #entries per blk: %llu \n", remaining_entries, nr_tm_entries_per_blk);
 	freed = 0;
 	data_lba = 0;
 
-	for(i=0; i<nr_tm_blks; i++) {
-		entry = buffer;
-		for(j=0; j<TM_ENTRIES_BLK; j++) {
-			entry->lba = sb->max_pba + 1;
-			entry = entry + 1;
-		}
-		/* Now we overwrite the buffer when required */
-		entry = buffer;
-		assert((data_lba % 512) == 0);
-		for(j=0; j<TM_ENTRIES_BLK; j++) {
-			if (freed < freeblks) {
-				/* as if trim is run on these blks */
-				freed++;
-			} else {
-				entry->lba = data_lba;
-				remaining_entries--;
+	/* Now we tackle the free entries within a zone, we say the first few entries are free */
+
+	printf("\n nr_zones: %d , nr_tm_blks_per_zone: %d, TM_ENTRIES_BLK: %d ", nr_zones, nr_tm_blks_per_zone, TM_ENTRIES_BLK);
+	printf("\n");
+
+	printf("\n sizeof(struct tm_entry): %d \n", sizeof(struct rev_tm_entry));
+
+	buffer = (char *)malloc(TM_ENTRIES_BLK * sizeof(struct rev_tm_entry));
+	if (!buffer) {
+		perror("\n Couldn't malloc: ");
+		return -1;
+	}
+	printf("\n buffer: %p ", buffer);
+
+	for(i=0; i<nr_zones; i++) {
+		freed = 0;
+		for(j=0; j<nr_tm_blks_per_zone; j=j+1) {
+			entry = (struct rev_tm_entry *) buffer;
+			for(k=0; k<TM_ENTRIES_BLK; k++) {
+				entry->lba = sb->max_pba + 1;
+				entry = entry + 1;
 			}
-			data_lba = data_lba + NR_SECTORS_IN_BLK;
-			entry = entry + 1;
-			assert(data_lba < sb->max_pba);
-			entries++;
-			if (entries == 65536) {
-				entries = 0;
-				freed = 0;
-				zonenr++;
-				assert((data_lba % 524288) == 0);
+			entry = buffer;
+			for(k=0; k<TM_ENTRIES_BLK; k++) {
+				// Now we overwrite the buffer when required 
+				if (freed < freeblks) {
+					// as if trim is run on these blks 
+					freed++;
+				} else {
+					entry->lba = data_lba;
+				}
+				remaining_entries--;
+				if (!remaining_entries)
+					break;
+				data_lba = data_lba + NR_SECTORS_IN_BLK;
+				entry = entry + 1;
+				assert(data_lba < sb->max_pba);
+			}
+			ret = write(fd, buffer, BLK_SZ);
+			if (ret < 0) {
+				perror("Error while writing: ");
+				exit(errno);
 			}
 			if (!remaining_entries)
 				break;
 		}
-		ret = write(fd, buffer, BLK_SZ);
-		if (ret < 0) {
-			perror("Error while writing: ");
-			exit(errno);
-		}
+		if (!remaining_entries)
+			break;
+		assert((data_lba % 524288) == 0);
 	}
-	/*
-	offset = sb->tm_pba * SECTOR_SIZE;
-	int vblks = 0;
-	entries = 0;
-	char * ptr;
-	zonenr = 0;
-	tm_pba = sb->tm_pba;
-	for(i=0; i<nr_tm_blks; i++) {
-		offset = 0;
-		ptr = read_block(fd, tm_pba);
-		entry = ptr;
-		for(j=0; j<nr_tm_entries_per_blk; j++) {
-			if (entry->pba !=0 ) {
-				vblks = vblks + 1;
-			}
-			entries++;
-			if (entries == 65536) {
-				if (vblks != 0)
-					printf("\n Zone %d has %d valid blks ", zonenr, vblks);
-				vblks = 0;
-				zonenr++;
-				entries = 0;
-			}
-			entry++;
-		}
-		tm_pba = tm_pba + 8;
-		free(ptr);
-	}
-	printf("\n %s ... end .... zonenr: %d ", __func__, zonenr);
-	*/
+	free(buffer);
+	printf("\n %s ... end .... zonenr: %d ", __func__, i);
 }
 
 void write_sit(int fd, struct lsdm_sb *sb,  unsigned int freeblks)
@@ -253,7 +239,7 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int freeblks)
 	char buffer[BLK_SZ];
 	sector_t offset;
 	int freezones = NR_FREE_ZONES;
-	int nr_zones = sb->zone_count_main - freezones - 2;
+	int nr_zones = sb->zone_count_main - freezones;
 
 	unsigned int nr_sit_blks = sb->zone_count_main/entries_in_blk;
 
@@ -306,8 +292,7 @@ void write_sit(int fd, struct lsdm_sb *sb,  unsigned int freeblks)
 unsigned long get_zone_nr(struct lsdm_sb * sb, unsigned long pba)
 {
 	unsigned long nr_lbas_in_zone = (1 << (sb->log_zone_size - sb->log_sector_size));
-	unsigned long phys_zone =  (pba % nr_lbas_in_zone);
-	return (phys_zone - sb->zone0_pba / nr_lbas_in_zone);
+	return (pba - sb->zone0_pba) / nr_lbas_in_zone;
 }
 
 int read_seg_entries_from_block(struct lsdm_sb *sb, struct lsdm_ckpt *ckpt, struct lsdm_seg_entry *entry, unsigned int nr_seg_entries, unsigned int *zonenr)
@@ -315,16 +300,18 @@ int read_seg_entries_from_block(struct lsdm_sb *sb, struct lsdm_ckpt *ckpt, stru
         int i = 0;
         unsigned int nr_blks_in_zone;
 	int free = 0;
+	int hot_zone = get_zone_nr(sb, ckpt->hot_frontier_pba);
+	int warm_zone = get_zone_nr(sb, ckpt->warm_gc_frontier_pba);
 
         nr_blks_in_zone = (1 << (sb->log_zone_size - sb->log_block_size));
         //printk("\n Number of seg entries: %u", nr_seg_entries);
 
+	//printf("\n %s :::::::: hot_zone: %llu, warm_zone: %llu ", __func__, hot_zone, warm_zone);
         while (i < nr_seg_entries) {
                 /* 0th zonenr is the zone that holds all the metadata */
-                if ((*zonenr == get_zone_nr(sb, ckpt->hot_frontier_pba)) ||
-                    (*zonenr == get_zone_nr(sb, ckpt->warm_gc_frontier_pba))) {
+                if ((*zonenr == hot_zone) || (*zonenr == warm_zone)) {
                         /* 1 indicates zone is free, 0 is the default bit because of kzalloc */
-                        printf("\n zonenr: %d vblocks: %llu is our cur_frontier! not marking it free!", *zonenr, entry->vblocks);
+                        printf("\n ************!!!!!! zonenr: %d vblocks: %llu is our cur_frontier! not marking it free!", *zonenr, entry->vblocks);
                         entry = entry + 1;
                         *zonenr= *zonenr + 1;
                         i++;

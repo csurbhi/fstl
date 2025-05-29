@@ -49,6 +49,7 @@
 #include <linux/blkdev.h>
 #include <linux/refcount.h>
 #include <linux/debugfs.h>
+#include <asm/unistd.h>
 
 #include "metadata.h"
 #define DM_MSG_PREFIX "lsdm"
@@ -1199,11 +1200,13 @@ static int select_zone_to_clean(struct ctx *ctx, int mode, const char *func)
 
 		cnode = rb_entry(node, struct gc_cost_node, rb);
 		list_for_each_entry(znode, &cnode->znodes_list, list) {
-			//printk(KERN_ERR "\n %s zone: %d has %d blks caller: %s", __func__, znode->zonenr, znode->vblks, func);
+			//printk(KERN_ERR "\n %s zone: %u has %d blks caller: %s", __func__, znode->zonenr, znode->vblks, func);
+			//printk(KERN_ERR "\n 2. %s ctx->nr_gc_nodes: %d ", __func__, ctx->nr_gc_nodes);
 			return znode->zonenr;
 		}
 
 	//}
+	//printk(KERN_ERR "\n %s ctx->nr_gc_nodes: %d ", __func__, ctx->nr_gc_nodes);
 	/* TODO: Mode: FG_GC */
 	return -1;
 }
@@ -1439,7 +1442,7 @@ void free_gc_extent(struct ctx * ctx, struct gc_extents * gc_extent)
 }
 
 int print_gc_extents(struct ctx *ctx, int zonenr);
-int get_sit_ent_vblocks(struct ctx *ctx, int zonenr);
+int get_sit_ent_vblocks(struct ctx *ctx, int zonenr, int free);
 /* Since our read_extents call, overwrites could have made
  * the blocks in this zone invalid. Thus we now take a 
  * write lock and then re-read the extents metadata; else we
@@ -1461,7 +1464,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	//int total = 0;
 
 	
-	total_vblks = get_sit_ent_vblocks(ctx, zonenr);
+	total_vblks = get_sit_ent_vblocks(ctx, zonenr, 0);
 	//gc_writes = total_vblks;
 	gc_writes = 0;
 	s8 = 0;
@@ -1637,7 +1640,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	up_write(&ctx->lsdm_rb_lock);
 #ifdef LSDM_DEBUG
 	printk(KERN_ERR "\n %s All %d extents written, total: %d , flushing workqueue now! Segment cleaned! \n", __func__, count, total);
-	vblks = get_sit_ent_vblocks(ctx, zonenr);
+	vblks = get_sit_ent_vblocks(ctx, zonenr, 0);
 	//printk(KERN_ERR "\n %s validblks: %d ", __func__, vblks);
 	if (vblks != 0) {
 		print_gc_extents(ctx, zonenr);
@@ -1723,7 +1726,7 @@ int print_gc_extents(struct ctx *ctx, int zonenr)
 
 	pba = get_first_pba_for_zone(ctx, zonenr);
 	last_pba = get_last_pba_for_zone(ctx, zonenr);
-	vblks = get_sit_ent_vblocks(ctx, zonenr);
+	vblks = get_sit_ent_vblocks(ctx, zonenr, 0);
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
 
 	//print_memory_usage(ctx, "Before GC");
@@ -1811,7 +1814,7 @@ int create_gc_extents(struct ctx *ctx, int zonenr)
 
 	pba = get_first_pba_for_zone(ctx, zonenr);
 	last_pba = get_last_pba_for_zone(ctx, zonenr);
-	vblks = get_sit_ent_vblocks(ctx, zonenr);
+	vblks = get_sit_ent_vblocks(ctx, zonenr, 0);
 	INIT_LIST_HEAD(&ctx->gc_extents->list);
 
 	//print_memory_usage(ctx, "Before GC");
@@ -1940,6 +1943,7 @@ again:
 	start_t = ktime_get_ns();	
 	zonenr = select_zone_to_clean(ctx, gc_mode, __func__);
 	if (zonenr < 0) {
+		printk(KERN_ERR "\n %s ctx->nr_gc_nodes: %d ", __func__, ctx->nr_gc_nodes);
 		printk(KERN_ERR "\n No zone found for cleaning!! \n");
 		if (!gc_count) {
 			gc_count = -1;
@@ -1968,7 +1972,8 @@ again:
 		goto again;
 	}
 
-	//printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
+	printk(KERN_ERR "%s Number of free zones available for GC: %d, cleaning: %d", __func__, ctx->nr_freezones, zonenr);
+	//printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
 	ret = read_gc_extents(ctx);
 	if (ret)
 		goto failed;
@@ -2018,7 +2023,7 @@ again:
 		goto failed;
 	}
 
-	//printk(KERN_ERR "\n %s zonenr: %d about to be written, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
+	//printk(KERN_ERR "\n %s zonenr: %d about to be written, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
 	ret = write_valid_gc_extents(ctx, zonenr);
 	if (ret < 0) { 
 		printk(KERN_ERR "\n write_valid_gc_extents() failed, ret: %d ", ret);
@@ -2038,7 +2043,7 @@ again:
 	ctx->gc_average = ctx->gc_total/ ctx->gc_count;
 	printk(KERN_ERR "\n %s gc_count: %llu total time: %llu (milliseconds) gc_writes: %llu gc_mode:%d ", __func__, gc_count, interval, gc_writes, gc_mode);
 	gc_writes = 0;
-	//printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
+	//printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
 	/* while gc thread was running, urgent mode triggered */
 	if (ctx->nr_freezones <= ctx->higher_watermark) {
 		gc_mode = CONC_GC;
@@ -2903,7 +2908,7 @@ static void mark_zone_free(struct ctx *ctx , int zonenr, int resetZone)
 
 	if ((bitmap[bytenr] & (1 << bitnr)) == (1<<bitnr)) {
 		/* This bit was 1 and hence already free*/
-		printk(KERN_ERR "\n BUG Trying to free an already free zone! ");
+		printk(KERN_ERR "\n Trying to free an already free zone! ");
 		printk(KERN_ERR "\n %s zonenr: %d, bytenr: %d bitnr: %d bitmap[%d]: %d  bitmap_bytes: %d", __func__, zonenr, bytenr, bitnr,  bytenr, bitmap[bytenr], ctx->bitmap_bytes);
 		return;
 	}
@@ -2919,10 +2924,10 @@ static void mark_zone_free(struct ctx *ctx , int zonenr, int resetZone)
 	/* The bit was 0 as its in use and hence we or it with
 	 * 1 to set it
 	 */
-	bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
+	ctx->freezone_bitmap[bytenr] = bitmap[bytenr] | (1 << bitnr);
 	ctx->nr_freezones = ctx->nr_freezones + 1;
-	//get_byte_string(bitmap[bytenr], str);
-	//printk(KERN_ERR "\n %s Freed zonenr: %d, bytenr: %d, bitnr: %d byte:%s", __func__, zonenr, bytenr, bitnr, str);
+	//get_byte_string( ctx->freezone_bitmap[bytenr], str);
+	//printk(KERN_ERR "\n %s Freed zonenr: %d, bytenr: %d, bitnr: %d byte:(%s)", __func__, zonenr, bytenr, bitnr, str);
 	/* we need to reset the  zone that we are about to use */
 }
 
@@ -2955,7 +2960,7 @@ static int get_next_freezone_nr(struct ctx *ctx)
 			break;
 		}
 		bitnr = bitnr + 1;
-		if(unlikely((bytenr == (ctx->bitmap_bytes-1)) && (bitnr == ctx->bitmap_bit))) {
+		if(unlikely((bytenr >= (ctx->bitmap_bytes-1)) && (bitnr == ctx->bitmap_bit))) {
 			printk(KERN_ERR "\n 2) No free zone available, disk is full! \n");
 			return -1;
 		}
@@ -3028,6 +3033,7 @@ static int get_new_gc_zone(struct ctx *ctx)
 {
 	int zone_nr;
 	int trial;
+	unsigned long timeout;
 
 	trial = 0;
 again:
@@ -3037,9 +3043,13 @@ again:
 	if (zone_nr < 0) {
 		trial++;
 		flush_workqueue(ctx->tm_wq);
-		if (trial < 2) 
-			goto again;
 		print_zones_vblocks(ctx);
+		printk(KERN_ERR "%s Number of free zones available: %d", __func__, ctx->nr_freezones);
+		if (trial < 2)  {
+			timeout = jiffies + 100;
+			while(time_before(jiffies, timeout));
+			goto again;
+		}
 		mark_disk_full(ctx);
 		printk(KERN_ERR "No more disk space available for writing!");
 		ctx->warm_gc_wf_pba = ~0;
@@ -3055,10 +3065,11 @@ again:
 	if (ctx->warm_gc_wf_pba > ctx->warm_gc_wf_end) {
 		panic("wf > wf_end!!, nr_free_sectors: %llu", ctx->free_sectors_in_wf );
 	}
-	BUG_ON(ctx->warm_gc_wf_end > ctx->sb->max_pba);
+	if(ctx->warm_gc_wf_end > ctx->sb->max_pba) {
+		printk("\n %s zone0_pba: %llu zone_nr: %d warm_gc_wf_pba: %llu, gc_wf_end: %llu", __func__,  ctx->sb->zone0_pba, zone_nr, ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
+	}
 	ctx->free_sectors_in_gc_wf = ctx->warm_gc_wf_end - ctx->warm_gc_wf_pba + 1;
 	add_ckpt_new_gc_wf(ctx, ctx->warm_gc_wf_pba);
-	//printk("\n %s zone0_pba: %llu zone_nr: %d warm_gc_wf_pba: %llu, gc_wf_end: %llu", __func__,  ctx->sb->zone0_pba, zone_nr, ctx->warm_gc_wf_pba, ctx->warm_gc_wf_end);
 	return 0;
 }
 
@@ -3373,7 +3384,7 @@ void move_write_frontier(struct ctx *ctx, sector_t s8)
 			BUG_ON(ctx->hot_wf_pba != (ctx->hot_wf_end + 1));
 		}
 		//int zonenr = get_zone_nr(ctx, ctx->hot_wf_pba - 2);
-		//trace_printk("\n %s zone: %d #valid blks: %d ", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr));
+		//trace_printk("\n %s zone: %d #valid blks: %d ", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
 		//mutex_lock(&ctx->bm_lock);
 		ret = get_new_zone(ctx);
 		//mutex_unlock(&ctx->bm_lock);
@@ -3491,7 +3502,7 @@ struct sit_page * add_sit_page_kv_store(struct ctx * ctx, sector_t pba, const ch
 	return new;
 }
 
-int get_sit_ent_vblocks(struct ctx *ctx, int zonenr)
+int get_sit_ent_vblocks(struct ctx *ctx, int zonenr, int free)
 {
 
 	struct sit_page *sit_page;
@@ -3508,6 +3519,15 @@ int get_sit_ent_vblocks(struct ctx *ctx, int zonenr)
 	zonenr = get_zone_nr(ctx, pba);
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
+
+	if (!ptr->vblocks && free)  {
+		if ((zonenr != get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) &&
+		    (zonenr != get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
+			printk(KERN_ERR "\n %s Freeing zone: %d \n", __func__, zonenr);
+			mark_zone_free(ctx , zonenr, 1);
+		}
+	}
+
 	return ptr->vblocks;
 }
 
@@ -3515,9 +3535,10 @@ void print_zones_vblocks(struct ctx *ctx)
 {
 	int i, vblocks = 0;
 
-	for (i=0; i<ctx->sb->zone_count; i++) {
-		vblocks = get_sit_ent_vblocks(ctx, i);
-		printk(KERN_ERR "\n %s zonenr: %d vblocks: %d ", __func__, i, vblocks);
+	for (i=0; i<ctx->sb->zone_count_main; i++) {
+		vblocks = get_sit_ent_vblocks(ctx, i, 1);
+		if (!vblocks)
+			printk(KERN_ERR "\n %s zonenr: %d vblocks: %d ", __func__, i, vblocks);
 	}
 }
 
@@ -3548,7 +3569,7 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	index = zonenr % SIT_ENTRIES_BLK; 
 	ptr = ptr + index;
 	if (!ptr->vblocks) {
-		printk("\n pba: %llu segnr: %llu vblocks: %u mtime:%lu \n", pba, zonenr, ptr->vblocks, ptr->mtime);
+		printk("\n (%s) pba: %llu segnr: %llu vblocks: %u mtime:%lu \n", __func__, pba, zonenr, ptr->vblocks, ptr->mtime);
 	}
 	BUG_ON(!ptr->vblocks);
 	ptr->vblocks = ptr->vblocks - 1;
@@ -3557,9 +3578,13 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 	 * the older cost which is stored in the tree. The newer ones
 	 * on the other hand are used to modify the tree
 	 */
+	/*
+	if (!ptr->vblocks) {
+		printk(KERN_ERR "\n %s done! zone: %llu vblocks: %d pba: %llu, index: %d , ptr: %p", __func__, zonenr, ptr->vblocks, pba, index, ptr);
+		printk(KERN_ERR "\n ***** zone: %llu hot_zone: %d, warm_gc_zone: %d ", zonenr, get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba), get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba));
+	} */
 	if ((zonenr != get_zone_nr(ctx, ctx->ckpt->hot_frontier_pba)) &&
 		    (zonenr != get_zone_nr(ctx, ctx->ckpt->warm_gc_frontier_pba))) {
-		//trace_printk("\n %s done! zone: %u vblocks: %d pba: %lu, index: %d , ptr: %p", __func__, zonenr, ptr->vblocks, pba, index, ptr);
 		/* add mtime here */
 		ptr->mtime = get_elapsed_time(ctx);
 		if (ctx->max_mtime < ptr->mtime)
@@ -3568,7 +3593,6 @@ void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba)
 		if (!ptr->vblocks) {
 			//printk(KERN_ERR "\n %s Freeing zone: %llu \n", __func__, zonenr);
 			mark_zone_free(ctx , zonenr, 1);
-			
 		}
 	}
 	//mutex_unlock(&ctx->sit_kv_store_lock);
@@ -4469,6 +4493,7 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 		bio->bi_status = BLK_STS_NOSPC;
 		goto fail;
 	}
+//again:
 	if (ctx->nr_freezones <= ctx->higher_watermark) {
 		/* start fg gc but dont wait here unless less than lower_watermark*/
 		/* setting gc_wake=1 and the next wakeup will trigger lsdm_gc(ctx, FG_GC, 0) by waking up a sleeping gc thread */
@@ -4484,6 +4509,7 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 			io_schedule();
 			finish_wait(&ctx->gc_th->fggc_wq, &wait);
 			//printk(KERN_ERR "\n %s %d woken up lba: %llu, nrsectors: %d ", __func__,  __LINE__, lba, nr_sectors);
+			/* ensure that not too many write threads are woken up so that GC can proceed */
 		}
 	}
 	//printk(KERN_ERR "\n (%s) bio: lba: %llu nr_sectors: %llu \n", __func__, lba, nr_sectors);
@@ -5145,13 +5171,11 @@ int remove_zone_from_gc_tree(struct ctx *ctx, unsigned int zonenr)
 	struct gc_zone_node *znode = NULL;
 	struct gc_cost_node *cost_node = NULL;
 	struct rb_node *link = root->rb_node;
-	int temp;
 
 	while (link) {
 		znode = container_of(link, struct gc_zone_node, rb);
 		if (znode->zonenr == zonenr) {
 			cost_node = znode->ptr_to_cost_node;
-			//printk(KERN_ERR "\n %s removing zone: %d from the gc_cost_root tree", __func__, zonenr);
 			remove_zone_from_cost_node(ctx, cost_node, zonenr);
 			rb_erase(&znode->rb, root);
 			kmem_cache_free(ctx->gc_zone_node_cache, znode);
@@ -5160,6 +5184,8 @@ int remove_zone_from_gc_tree(struct ctx *ctx, unsigned int zonenr)
 				printk(KERN_ERR "\n %s zonenr selected next time: %d is same as removed!! \n", __func__, zonenr);
 				BUG_ON(1);
 			} */
+			ctx->nr_gc_nodes -= 1;
+			//printk(KERN_ERR "\n %s removing zone: %u from the gc_cost_root tree, ctx->nr_gc_node: %d", __func__, zonenr, ctx->nr_gc_nodes);
 			return (0);
 		}
 		if (znode->zonenr < zonenr) {
@@ -5168,9 +5194,7 @@ int remove_zone_from_gc_tree(struct ctx *ctx, unsigned int zonenr)
 			link = link->rb_left;
 		}
 	}
-	/* did not find the zone in rb tree */
-	temp = select_zone_to_clean(ctx, BG_GC, __func__);
-	printk("\n %s could not find zone: %d in the zone tree! zone selected for next round: %d \n", __func__, zonenr, temp);
+	/* did not find the zone in rb tree, we should not be here ideally */
 	return (-1);
 }
 
@@ -5202,13 +5226,15 @@ struct gc_zone_node * add_zonenr_gc_zone_tree(struct ctx *ctx, unsigned int zone
 	znew->vblks = nrblks;
 	znew->ptr_to_cost_node = NULL;
 	INIT_LIST_HEAD(&znew->list);
+	ctx->nr_gc_nodes += 1;
+	//printk(KERN_ERR "\n %s removing zone: %u from the gc_cost_root tree, ctx->nr_gc_node: %d", __func__, zonenr, ctx->nr_gc_nodes);
 
 	/* link holds the address of left or the right pointer
 	 * appropriately
 	 */
 	rb_link_node(&znew->rb, parent, link);
 	rb_insert_color(&znew->rb, root);
-	//printk(KERN_ERR "\n %s Added zone: %d nrblks: %d to gc tree!znode: %p  znode->list: %p \n", __func__, zonenr, nrblks, znew, &znew->list);
+	//printk(KERN_ERR "\n %s Added zone: %u nrblks: %d to gc tree! nr_gc_nodes: %d \n", __func__, zonenr, nrblks, ctx->nr_gc_nodes);
 	return znew;
 }
 
@@ -5317,6 +5343,7 @@ int update_gc_tree(struct ctx *ctx, unsigned int zonenr, u32 nrblks, u64 mtime, 
 	/* We are essentially adding a new node here */
 	new = kmem_cache_alloc(ctx->gc_cost_node_cache, GFP_KERNEL | __GFP_ZERO);
 	if (!new) {
+
 		printk(KERN_ERR "\n %s could not allocate memory for gc_cost_node \n", __func__);
 		return -ENOMEM;
 	}
@@ -5442,7 +5469,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			mark_zone_free(ctx , *zonenr, 1);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
-			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %u entry->mtime: %lu", *zonenr, entry->vblocks, entry->mtime);
+			printk(KERN_ERR "\n *segnr: %u entry->vblocks: %u entry->mtime: %lu", *zonenr, entry->vblocks, entry->mtime);
 			ret = update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__);
 			if (ret < 0) {
 				printk(KERN_ERR "\n Memory error, write a memory shrinker!");
@@ -5658,6 +5685,7 @@ int read_metadata(struct ctx * ctx)
 	if (sb2->zone_count_main % BITS_IN_BYTE) {
 		ctx->bitmap_bytes = ctx->bitmap_bytes + 1;
 		ctx->bitmap_bit = (sb2->zone_count_main % BITS_IN_BYTE);
+		ctx->bitmap_bit = ctx->bitmap_bit - 1;
 	}
 	printk(KERN_ERR "\n %s Nr of zones in main are: %llu, bitmap_bytes: %d, bitmap_bit: %d ", __func__, sb2->zone_count_main, ctx->bitmap_bytes, ctx->bitmap_bit);
 	if (sb2->zone_count_main % BITS_IN_BYTE > 0)
@@ -5887,6 +5915,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	ctx->sit_rb_root = RB_ROOT;
 	ctx->gc_cost_root = RB_ROOT;
 	ctx->gc_zone_root = RB_ROOT;
+	ctx->nr_gc_nodes = 0;
 
 	rwlock_init(&ctx->sit_rb_lock);
 
@@ -5948,10 +5977,11 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	//ctx->lower_watermark = ctx->sb->zone_count / 20; 
 	//ctx->higher_watermark = ctx->lower_watermark + 20;
 	ctx->lower_watermark = 1;
-	//ctx->middle_watermark = 6;
-	//ctx->higher_watermark = 10;
-	ctx->middle_watermark = 2;
-	ctx->higher_watermark = 3;
+	//ctx->lower_watermark = 3;
+	ctx->middle_watermark = 3;
+	ctx->higher_watermark = 6;
+	//ctx->middle_watermark = 3;
+	//ctx->higher_watermark = 5;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
 	//ctx->higher_watermark = ctx->lower_watermark >> 2; 
 	/*
@@ -6159,7 +6189,7 @@ static void lsdm_io_hints(struct dm_target *ti, struct queue_limits *limits)
 
 static struct target_type lsdm_target = {
 	.name            = "lsdm",
-	.version         = {1, 0, 0},
+	.version         = {1, 1, 0},
 	.module          = THIS_MODULE,
 	.ctr             = lsdm_ctr,
 	.dtr             = lsdm_dtr,

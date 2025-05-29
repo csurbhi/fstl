@@ -265,7 +265,6 @@ struct ctx {
 	int 	middle_watermark;
 	int	lower_watermark;
 	char *gc_zone_bitmap;
-	int nr_gc_zones;
 	int	bitmap_bytes;
 	int 	bitmap_bit;
 	time64_t mounted_time;
@@ -279,6 +278,7 @@ struct ctx {
 	u64	gc_average;
 	int	gc_count;
 	u64	gc_total;
+	int 	nr_gc_nodes;
 	struct kmem_cache * bioctx_cache;
 	struct kmem_cache * extent_cache;
 	struct kmem_cache * rev_extent_cache;
