@@ -1349,32 +1349,119 @@ static void free_gc_list(struct ctx *ctx)
 
 void wait_on_refcount(struct ctx *ctx, refcount_t *ref, spinlock_t *lock);
 
+int read_zone_partly(struct ctx *ctx, sector_t pba, unsigned int pagecount, struct page **bio_pages, int index)
+{
+	struct bio * bio;
+	struct bio_vec *bv = NULL;
+	struct bvec_iter_all iter_all;
+	struct page *page;
+	unsigned int s8 = 0;
+	int i, j;
+
+	if (pba > ctx->max_pba) {
+		dump_stack();
+		printk(KERN_ERR "\n %s pba: %llu \n", __func__, pba);
+		return -1;
+	}
+
+	/* create a bio with "nr_pages" bio vectors, so that we can add nr_pages (nrpages is different)
+	 * individually to the bio vectors
+	 */
+	bio = bio_alloc_bioset(ctx->dev->bdev, pagecount, REQ_OP_READ, GFP_KERNEL, ctx->gc_bs);
+	if (!bio) {
+		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
+		return -ENOMEM;
+	}
+	
+	/* bio_add_page sets the bi_size for the bio */
+	for(i=0, j=index; i<pagecount; i++, j++) {
+		if ( !bio_add_page(bio, page, PAGE_SIZE, 0)) {
+			bio_for_each_segment_all(bv, bio, iter_all) {
+				mempool_free(bv->bv_page, ctx->gc_page_pool);
+			}
+			bio_put(bio);
+			return -ENOMEM;
+		}
+	}
+	bio->bi_iter.bi_sector = pba;
+	bio_set_dev(bio, ctx->dev->bdev);
+	/* submiting the bio in read_all_bios_and_wait */
+	submit_bio_wait(bio);
+	bio_put(bio);
+	return 0;
+}
+
+#define NR_PAGES_IN_ZONE 65536
+
 /*
  * TODO: Do  not chain the bios as we do not get notification
  * of what extent reading did not work! We can retry and if
  * the block did not work, we can do something more meaningful.
  */
-static int read_gc_extents(struct ctx *ctx)
+static int read_gc_extents(struct ctx *ctx, unsigned int zonenr)
 {
 	struct list_head *pos;
 	struct gc_extents *gc_extent;
-	int count = 0;
-	
+	int count = 0, nrreads, i=0, j=0, index=0;
+	sector_t pba, last_pba; 
+	int vblks;
+	struct page **bio_pages;
+	unsigned int s8, pagecount = 0;
+
+	pba = get_first_pba_for_zone(ctx, zonenr);
+	last_pba = get_last_pba_for_zone(ctx, zonenr);
+	nrreads = NR_PAGES_IN_ZONE/BIO_MAX_PAGES;
+
+	bio_pages = (struct page **) kmalloc(NR_PAGES_IN_ZONE * sizeof(void *), GFP_KERNEL);
+	if (!bio_pages) {
+		return -ENOMEM;
+	}
+
+	for(i=0; i<NR_PAGES_IN_ZONE; i++) {
+		bio_pages[i] = mempool_alloc(ctx->gc_page_pool, GFP_KERNEL);
+		if (!bio_pages[i]) {
+			for(j=0; j<i; j++) {
+				mempool_free(bio_pages[j], ctx->gc_page_pool);
+				return -ENOMEM;
+			}
+		}
+	}
+	for(i=0, index=0; i<nrreads; i++) {
+		if (read_zone_partly(ctx, pba, BIO_MAX_PAGES, bio_pages, index)) {
+			/* free up all the pages */
+			for(j=0; j<NR_PAGES_IN_ZONE; j++) {
+				mempool_free(bio_pages[j], ctx->gc_page_pool);
+				return -ENOMEM;
+			}
+
+		}
+		index = index + BIO_MAX_PAGES;
+	}
 	/* If list is empty we have nothing to do */
 	BUG_ON(list_empty(&ctx->gc_extents->list));
-
+	j = 0;
 	/* setup the bio for the first gc_extent */
+	pba = get_first_pba_for_zone(ctx, zonenr);
 	list_for_each(pos, &ctx->gc_extents->list) {
 		gc_extent = list_entry(pos, struct gc_extents, list);
 		if ((gc_extent->e.len == 0) || ((gc_extent->e.pba + gc_extent->e.len) > ctx->sb->max_pba)) {
 			printk(KERN_ERR "\n %s lba: %llu, pba: %llu, len: %llu ", __func__, gc_extent->e.lba, gc_extent->e.pba, gc_extent->e.len);
 			BUG();
 		}
-		if (read_extent_bio(ctx, gc_extent)) {
-			free_gc_list(ctx);
-			printk(KERN_ERR "Low memory! TODO: Write code to free memory from translation tables etc ");
-			BUG();
+		s8 = gc_extent->e.len;
+		BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_BLK_SHIFT));
+		pagecount = (s8 >> SECTOR_BLK_SHIFT);
+		while(gc_extent->e.pba < pba) {
+			pba = pba + NR_SECTORS_IN_BLK;
+			/* free these diff pages */
+			mempool_free(bio_pages[j], ctx->gc_page_pool);
+			j = j + 1;
 		}
+		for(i=0; i<pagecount; i++,j++) {
+			gc_extent->bio_pages[i] = bio_pages[j];
+			pba = pba + NR_SECTORS_IN_BLK;
+		}
+		gc_extent->read = 1;
 		count = count + 1;
 	}
 	//printk(KERN_ERR "\n GC extents submitted for read: %d ", count);
@@ -1652,6 +1739,8 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	*/
 	/* last revmap blk may not be full, we write the partial revmap blk */
 	/* clear the revmap bitmap */
+	//wake_up_count(&ctx->gc_th->fggc_wq, gc_writes);
+
 	return gc_writes;
 }
 
@@ -1972,9 +2061,9 @@ again:
 		goto again;
 	}
 
-	printk(KERN_ERR "%s Number of free zones available for GC: %d, cleaning: %d", __func__, ctx->nr_freezones, zonenr);
+	printk(KERN_ERR "\n %s Number of free zones available for GC: %d, cleaning: %d", __func__, ctx->nr_freezones, zonenr);
 	//printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
-	ret = read_gc_extents(ctx);
+	ret = read_gc_extents(ctx, zonenr);
 	if (ret)
 		goto failed;
 
@@ -2041,9 +2130,9 @@ again:
 	ctx->gc_total += interval;
 	ctx->gc_count += gc_count;
 	ctx->gc_average = ctx->gc_total/ ctx->gc_count;
-	printk(KERN_ERR "\n %s gc_count: %llu total time: %llu (milliseconds) gc_writes: %llu gc_mode:%d ", __func__, gc_count, interval, gc_writes, gc_mode);
+	trace_printk("\n %s gc_count: %llu total time: %llu (milliseconds) gc_writes: %llu gc_mode:%d ", __func__, gc_count, interval, gc_writes, gc_mode);
 	gc_writes = 0;
-	//printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
+	printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
 	/* while gc thread was running, urgent mode triggered */
 	if (ctx->nr_freezones <= ctx->higher_watermark) {
 		gc_mode = CONC_GC;
@@ -2055,7 +2144,8 @@ again:
 	/* TODO: Mode: FG_GC */
 	drain_workqueue(ctx->tm_wq);
 	if (gc_mode == FG_GC) {
-		wake_up_all(&ctx->gc_th->fggc_wq);
+		//wake_up_all(&ctx->gc_th->fggc_wq);
+		wake_up_nr(&ctx->gc_th->fggc_wq, ret);
 		io_schedule();
 		if (ctx->nr_freezones <= ctx->middle_watermark) {
 			goto again;
@@ -5469,7 +5559,7 @@ int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, u
 			mark_zone_free(ctx , *zonenr, 1);
 		}
 		else if (entry->vblocks < nr_blks_in_zone) {
-			printk(KERN_ERR "\n *segnr: %u entry->vblocks: %u entry->mtime: %lu", *zonenr, entry->vblocks, entry->mtime);
+			//printk(KERN_ERR "\n *segnr: %u entry->vblocks: %u entry->mtime: %lu", *zonenr, entry->vblocks, entry->mtime);
 			ret = update_gc_tree(ctx, *zonenr, entry->vblocks, entry->mtime, __func__);
 			if (ret < 0) {
 				printk(KERN_ERR "\n Memory error, write a memory shrinker!");

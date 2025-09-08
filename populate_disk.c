@@ -30,8 +30,11 @@
 #define BITS_IN_BYTE 8
 #define NR_BLKS_IN_ZONE 65536
 
-#define NR_FREE_ZONES 120 /* for 1 MB tests, 28.5 GB on-disk STL cache, middle wm: 6 - GC starts here. 28.5GB - 114 + 6 = 120 */
+//#define NR_FREE_ZONES 9 /* for 4KB tests, 750 MB (3 zones) on-disk STL cache, higher wm: 6 - GC starts here. 3 + 6 = 9*/
+//#define NR_FREE_ZONES 14 /* for 4KB tests, 750 MB (8 zones) on-disk STL cache for 90/10 zipf (2GB cache), higher wm: 6 - GC starts here. 8 + 6 = 14*/
+//#define NR_FREE_ZONES 120 /* for 1 MB tests, 28.5 GB on-disk STL cache, higher wm: 6 - GC starts here. 28.5GB - 114 + 6 = 120 */
 //#define NR_FREE_ZONES 121 /* for 1 MB tests, 28.5 GB on-disk STL cache, higher wm: 7 - GC starts here. 28.5GB - 114 + 7 = 121 */
+#define NR_FREE_ZONES 150 /* 144 for 36.5GB cache for 90/10 zipf + higher wm - 7 = 150 */
 
 unsigned int crc32(int d, unsigned char *buf, unsigned int size)
 {
@@ -109,6 +112,7 @@ void read_sb(int fd, unsigned long sectornr, struct lsdm_sb **sb)
 		printf("\n wrong superblock!");
 		exit(-1);
 	}
+	printf("\n sb->zone_count_main: %d", (*sb)->zone_count_main);
 	return;
 }
 
