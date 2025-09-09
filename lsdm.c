@@ -1714,6 +1714,15 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 				rem_sectors = ctx->nr_lbas_in_zone;
 			}
 		}
+		/* TODO: fix this - we are waking assuming this could be 1MB, for 4KB, this will be less 
+		 * We are waking up before the metadata is updated - as the lsdm_rb_lock is held, so while
+		 * the data will be written to the disk, the metadata won't be updated till much later.
+		 * Waking up early, should improve bandwidth - but is susceptible to more data loss.
+		 * We will live with that for now.
+		 * The writes will go to the reserved zones - as we anticipate that eventually same number of
+		 * blocks written will be released by the GC.
+		 */
+		wake_up_count(&ctx->gc_th->fggc_wq, gc_extent->len/2048);	
 	}
 	if (len > 0) {
 		submit_bio_wait(bio);
@@ -2145,8 +2154,8 @@ again:
 	drain_workqueue(ctx->tm_wq);
 	if (gc_mode == FG_GC) {
 		//wake_up_all(&ctx->gc_th->fggc_wq);
-		wake_up_nr(&ctx->gc_th->fggc_wq, ret);
-		io_schedule();
+		//wake_up_nr(&ctx->gc_th->fggc_wq, ret);
+		//io_schedule();
 		if (ctx->nr_freezones <= ctx->middle_watermark) {
 			goto again;
 		}
