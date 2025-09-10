@@ -34,7 +34,8 @@
 //#define NR_FREE_ZONES 14 /* for 4KB tests, 750 MB (8 zones) on-disk STL cache for 90/10 zipf (2GB cache), higher wm: 6 - GC starts here. 8 + 6 = 14*/
 //#define NR_FREE_ZONES 120 /* for 1 MB tests, 28.5 GB on-disk STL cache, higher wm: 6 - GC starts here. 28.5GB - 114 + 6 = 120 */
 //#define NR_FREE_ZONES 121 /* for 1 MB tests, 28.5 GB on-disk STL cache, higher wm: 7 - GC starts here. 28.5GB - 114 + 7 = 121 */
-#define NR_FREE_ZONES 150 /* 144 for 36.5GB cache for 90/10 zipf + higher wm: 6 = 150 */
+//#define NR_FREE_ZONES 160 /* 144 for 36.5GB cache for 90/10 zipf + higher wm: 16 = 160 */
+#define NR_FREE_ZONES 135 /* 118 for 29.5GB cache for 80/20 and 70/30 zipf + higher wm: 17 = 135 */
 
 unsigned int crc32(int d, unsigned char *buf, unsigned int size)
 {

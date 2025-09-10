@@ -1722,7 +1722,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		 * The writes will go to the reserved zones - as we anticipate that eventually same number of
 		 * blocks written will be released by the GC.
 		 */
-		wake_up_count(&ctx->gc_th->fggc_wq, gc_extent->len/2048);	
+		wake_up_nr(&ctx->gc_th->fggc_wq, s8/2048);
 	}
 	if (len > 0) {
 		submit_bio_wait(bio);
@@ -1748,7 +1748,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	*/
 	/* last revmap blk may not be full, we write the partial revmap blk */
 	/* clear the revmap bitmap */
-	//wake_up_count(&ctx->gc_th->fggc_wq, gc_writes);
+	//wake_up_nr(&ctx->gc_th->fggc_wq, gc_writes);
 
 	return gc_writes;
 }
@@ -2070,7 +2070,7 @@ again:
 		goto again;
 	}
 
-	printk(KERN_ERR "\n %s Number of free zones available for GC: %d, cleaning: %d", __func__, ctx->nr_freezones, zonenr);
+	printk(KERN_ERR "\n %s Number of free zones available for GC: %d, cleaning: %d gc_mode:%d", __func__, ctx->nr_freezones, zonenr, gc_mode);
 	//printk(KERN_ERR "\n %s zonenr: %d about to be read, vblocks: %d  \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
 	ret = read_gc_extents(ctx, zonenr);
 	if (ret)
@@ -2139,7 +2139,7 @@ again:
 	ctx->gc_total += interval;
 	ctx->gc_count += gc_count;
 	ctx->gc_average = ctx->gc_total/ ctx->gc_count;
-	trace_printk("\n %s gc_count: %llu total time: %llu (milliseconds) gc_writes: %llu gc_mode:%d ", __func__, gc_count, interval, gc_writes, gc_mode);
+	printk(KERN_ERR "\n %s gc_count: %llu total time: %llu (milliseconds) gc_writes: %llu gc_mode:%d ", __func__, gc_count, interval, gc_writes, gc_mode);
 	gc_writes = 0;
 	printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
 	/* while gc thread was running, urgent mode triggered */
@@ -2260,7 +2260,7 @@ static int gc_thread_fn(void * data)
 		//print_extents(ctx);
 		 /* give it a try one time */
                 if (gc_th->gc_wake) {
-			if (ctx->nr_freezones < ctx->lower_watermark) {
+			if (ctx->nr_freezones < ctx->middle_watermark) {
 				/* concurrent GC, no pauses */
 				mode = FG_GC;
 			} else {
@@ -4599,7 +4599,7 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 		//printk(KERN_ERR "\n 2. ctx->nr_freezones: %d, ctx->higher_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->higher_watermark);
 		ctx->gc_th->gc_wake = 1;
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
-		if (ctx->nr_freezones <= ctx->lower_watermark) {
+		if (ctx->nr_freezones <= ctx->middle_watermark) {
 			//printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
 			DEFINE_WAIT(wait);
 			prepare_to_wait(&ctx->gc_th->fggc_wq, &wait,
@@ -6073,21 +6073,10 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	}
 
 	/* lower watermark is at 5 %, watermark represents nrfreezones */
-	//ctx->lower_watermark = ctx->sb->zone_count / 20; 
-	//ctx->higher_watermark = ctx->lower_watermark + 20;
-	ctx->lower_watermark = 1;
-	//ctx->lower_watermark = 3;
-	ctx->middle_watermark = 3;
-	ctx->higher_watermark = 6;
-	//ctx->middle_watermark = 3;
-	//ctx->higher_watermark = 5;
+	ctx->lower_watermark = 6;
+	ctx->middle_watermark = 16;
+	ctx->higher_watermark = 17;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
-	//ctx->higher_watermark = ctx->lower_watermark >> 2; 
-	/*
-	if (ctx->sb->zone_count > SMALL_NR_ZONES) {
-		ctx->higher_watermark = ctx->lower_watermark >> 4;
-	}
-	*/
 	printk(KERN_ERR "\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
 	ctx->gc_extents = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 	if (!ctx->gc_extents) {
