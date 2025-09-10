@@ -1548,10 +1548,12 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	u64 last_pba_read;
 	u64 gc_writes = 0;
 	int rem_sectors, wakenr = 0;
+	int freeblks = 0;
 	//int total = 0;
 
 	
 	total_vblks = get_sit_ent_vblocks(ctx, zonenr, 0);
+	freeblks = 65536 - total_vblks;
 	//gc_writes = total_vblks;
 	gc_writes = 0;
 	s8 = 0;
@@ -1675,6 +1677,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	bio->bi_status = BLK_STS_OK;
 	bio->bi_iter.bi_sector = gc_extent->e.pba;
 	len = 0;
+	wakenr = count / (freeblks * 256);
 	/* now all the gc extents are set, we do not need to adjust it 
 	 * We also know that every gc extent will fit in the current warm frontier.
 	 */
@@ -1726,7 +1729,6 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		if (ctx->nr_freezones <= ctx->lower_watermark) {
 			wake_up_nr(&ctx->gc_th->fggc_wq, 1);
 		} else {
-			wakenr = gc_extent->e.len / 2048;
 			if (wakenr >= 1) 
 				wake_up_nr(&ctx->gc_th->fggc_wq, wakenr);
 		}
