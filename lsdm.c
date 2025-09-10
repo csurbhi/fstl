@@ -1547,7 +1547,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	int i, j, total_vblks = 0;
 	u64 last_pba_read;
 	u64 gc_writes = 0;
-	int rem_sectors;
+	int rem_sectors, wakenr = 0;
 	//int total = 0;
 
 	
@@ -1722,7 +1722,14 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 		 * The writes will go to the reserved zones - as we anticipate that eventually same number of
 		 * blocks written will be released by the GC.
 		 */
-		wake_up_nr(&ctx->gc_th->fggc_wq, s8/2048);
+
+		if (ctx->nr_freezones <= ctx->lower_watermark) {
+			wake_up_nr(&ctx->gc_th->fggc_wq, 1);
+		} else {
+			wakenr = gc_extent->e.len / 2048;
+			if (wakenr >= 1) 
+				wake_up_nr(&ctx->gc_th->fggc_wq, wakenr);
+		}
 	}
 	if (len > 0) {
 		submit_bio_wait(bio);
@@ -2084,20 +2091,6 @@ again:
 			gc_th->gc_wake = 1;
 		}
 	}
-	/* if we are in concurrent mode, we can afford to let the application i/o go ahead */
-	if (gc_mode == CONC_GC) {
-		gc_th->gc_wake = 0;
-		wait_event_interruptible_timeout(*wq,
-			kthread_should_stop() || freezing(current) ||
-			gc_th->gc_wake,
-			msecs_to_jiffies(gc_th->urgent_sleep_time));
-                if (gc_th->gc_wake) {
-			if (ctx->nr_freezones <= ctx->middle_watermark) {
-				gc_mode = FG_GC;
-			}
-		}
-		gc_th->gc_wake = 1;
-	}
 	else if (gc_mode == BG_GC) {
 	       	if (!is_lsdm_ioidle(ctx)) {
                 	if (!gc_th->gc_wake) {
@@ -2107,14 +2100,7 @@ again:
 					gc_th->gc_wake,
 					msecs_to_jiffies(gc_th->urgent_sleep_time));
 			}
-			if (ctx->nr_freezones <= ctx->higher_watermark) {
-				gc_mode = CONC_GC;
-				if (ctx->nr_freezones <= ctx->middle_watermark) {
-					gc_mode = FG_GC;
-				}
-				gc_th->gc_wake = 1;
-			}
-		} /* else, we are in BG GC and are io idle, so do not wait, continue */
+		}
 	}
 	if (kthread_should_stop()) {
 		printk(KERN_ERR "\n kthread needs to stop ");
@@ -2143,40 +2129,16 @@ again:
 	gc_writes = 0;
 	printk(KERN_ERR "\n %s zonenr: %d cleaned! #valid blks: %d \n", __func__, zonenr, get_sit_ent_vblocks(ctx, zonenr, 0));
 	/* while gc thread was running, urgent mode triggered */
-	if (ctx->nr_freezones <= ctx->higher_watermark) {
-		gc_mode = CONC_GC;
-		if (ctx->nr_freezones <= ctx->middle_watermark) {
-			gc_mode = FG_GC;
-		}
+	if (ctx->nr_freezones <= ctx->middle_watermark) {
+		gc_mode = FG_GC;
 	}
-
 	/* TODO: Mode: FG_GC */
 	drain_workqueue(ctx->tm_wq);
 	if (gc_mode == FG_GC) {
-		//wake_up_all(&ctx->gc_th->fggc_wq);
-		//wake_up_nr(&ctx->gc_th->fggc_wq, ret);
-		//io_schedule();
 		if (ctx->nr_freezones <= ctx->middle_watermark) {
 			goto again;
 		}
-		/* else: Paused GC mode */
-		gc_mode = CONC_GC;
-		io_schedule();
 	} 
-	if (gc_mode == CONC_GC) {
-		/* if we are in concurrent mode, we can afford to let the application i/o go ahead */
-		wait_event_interruptible_timeout(*wq,
-			kthread_should_stop() || freezing(current) ||
-			gc_th->gc_wake,
-			msecs_to_jiffies(gc_th->urgent_sleep_time));
-		if (ctx->nr_freezones <= ctx->middle_watermark) {
-			gc_mode = FG_GC;
-		}
-		if (ctx->nr_freezones <= ctx->higher_watermark) {
-			goto again;
-		}
-		// else, you dont need to do CONC_GC or FG_GC any more;
-	}
 	else if (gc_mode == BG_GC) {
 		if (is_lsdm_ioidle(ctx))
 			goto again;
@@ -2263,9 +2225,6 @@ static int gc_thread_fn(void * data)
 			if (ctx->nr_freezones < ctx->middle_watermark) {
 				/* concurrent GC, no pauses */
 				mode = FG_GC;
-			} else {
-				/* concurrent, intermittent GC */
-				mode = CONC_GC;
 			}
 		}
 		else if(mode == BG_GC) {
@@ -4592,23 +4551,22 @@ int lsdm_write_checks(struct ctx *ctx, struct bio *bio)
 		bio->bi_status = BLK_STS_NOSPC;
 		goto fail;
 	}
-//again:
-	if (ctx->nr_freezones <= ctx->higher_watermark) {
+again:
+	if (ctx->nr_freezones <= ctx->middle_watermark) {
 		/* start fg gc but dont wait here unless less than lower_watermark*/
 		/* setting gc_wake=1 and the next wakeup will trigger lsdm_gc(ctx, FG_GC, 0) by waking up a sleeping gc thread */
-		//printk(KERN_ERR "\n 2. ctx->nr_freezones: %d, ctx->higher_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->higher_watermark);
 		ctx->gc_th->gc_wake = 1;
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
-		if (ctx->nr_freezones <= ctx->middle_watermark) {
-			//printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
-			DEFINE_WAIT(wait);
-			prepare_to_wait(&ctx->gc_th->fggc_wq, &wait,
+		//printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
+		DEFINE_WAIT(wait);
+		prepare_to_wait(&ctx->gc_th->fggc_wq, &wait,
 					TASK_UNINTERRUPTIBLE);
-			/* setting gc_wake=1 and the next wakeup will trigger lsdm_gc(ctx, FG_GC, 0) by waking up a sleeping gc thread */
-			io_schedule();
-			finish_wait(&ctx->gc_th->fggc_wq, &wait);
-			//printk(KERN_ERR "\n %s %d woken up lba: %llu, nrsectors: %d ", __func__,  __LINE__, lba, nr_sectors);
-			/* ensure that not too many write threads are woken up so that GC can proceed */
+		/* setting gc_wake=1 and the next wakeup will trigger lsdm_gc(ctx, FG_GC, 0) by waking up a sleeping gc thread */
+		io_schedule();
+		finish_wait(&ctx->gc_th->fggc_wq, &wait);
+		/* ensure that not too many write threads are woken up so that GC can proceed */
+		if (ctx->nr_freezones <= ctx->lower_watermark) {
+			goto again;
 		}
 	}
 	//printk(KERN_ERR "\n (%s) bio: lba: %llu nr_sectors: %llu \n", __func__, lba, nr_sectors);
@@ -6073,7 +6031,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	}
 
 	/* lower watermark is at 5 %, watermark represents nrfreezones */
-	ctx->lower_watermark = 6;
+	ctx->lower_watermark = 4;
 	ctx->middle_watermark = 16;
 	ctx->higher_watermark = 17;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
