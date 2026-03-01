@@ -4558,7 +4558,7 @@ again:
 		/* setting gc_wake=1 and the next wakeup will trigger lsdm_gc(ctx, FG_GC, 0) by waking up a sleeping gc thread */
 		ctx->gc_th->gc_wake = 1;
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
-		//printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
+		printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
 		DEFINE_WAIT(wait);
 		prepare_to_wait(&ctx->gc_th->fggc_wq, &wait,
 					TASK_UNINTERRUPTIBLE);
@@ -6034,9 +6034,14 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	/* lower watermark is at 5 %, watermark represents nrfreezones */
 	ctx->lower_watermark = 2;
 	/* wm = 56 for 90/10, wm = 82 for 80/20 and 70/30, wm = 88 for 60/40 and uniform */
+	/*
 	ctx->middle_watermark = 56;
 	ctx->higher_watermark = 56;
+	*/
+	ctx->middle_watermark = ctx->nr_freezones + 1;
+	ctx->higher_watermark = ctx->nr_freezones + 1;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
+	printk(KERN_ERR "\n ctx->nr_freezones: %d ", ctx->nr_freezones);
 	printk(KERN_ERR "\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
 	ctx->gc_extents = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 	if (!ctx->gc_extents) {
