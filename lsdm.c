@@ -50,6 +50,8 @@
 #include <linux/refcount.h>
 #include <linux/debugfs.h>
 #include <asm/unistd.h>
+#include <linux/sysfs.h>
+#include <linux/string.h>
 
 #include "metadata.h"
 #define DM_MSG_PREFIX "lsdm"
@@ -1375,6 +1377,7 @@ int read_zone_partly(struct ctx *ctx, sector_t pba, unsigned int pagecount, stru
 	
 	/* bio_add_page sets the bi_size for the bio */
 	for(i=0, j=index; i<pagecount; i++, j++) {
+		page = bio_pages[j];
 		if ( !bio_add_page(bio, page, PAGE_SIZE, 0)) {
 			bio_for_each_segment_all(bv, bio, iter_all) {
 				mempool_free(bv->bv_page, ctx->gc_page_pool);
@@ -1461,6 +1464,7 @@ static int read_gc_extents(struct ctx *ctx, unsigned int zonenr)
 			gc_extent->bio_pages[i] = bio_pages[j];
 			pba = pba + NR_SECTORS_IN_BLK;
 		}
+		gc_extent->nrpages = pagecount;
 		gc_extent->read = 1;
 		count = count + 1;
 	}
@@ -1590,6 +1594,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 			diff = e->pba - gc_extent->e.pba;
 			gc_extent->e.lba = e->lba;
 			gc_extent->e.pba = e->pba;
+			/* ideally - this is gc_extent->e.len = e->len */
 			gc_extent->e.len = gc_extent->e.len - diff;
 			BUG_ON(!gc_extent->e.len);
 			pagecount = gc_extent->e.len >> SECTOR_BLK_SHIFT;
@@ -1667,7 +1672,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 	int bio_pages;
 	struct page * page;
 	bio_pages = 256;
-	struct bio * bio = bio_alloc_bioset(ctx->dev->bdev, 256, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
+	struct bio * bio = bio_alloc_bioset(ctx->dev->bdev, bio_pages, REQ_OP_WRITE, GFP_KERNEL, ctx->gc_bs);
 	if (!bio) {
 		printk(KERN_ERR "\n %s could not allocate memory for bio ", __func__);
 		return -ENOMEM;
@@ -1699,7 +1704,7 @@ static int write_valid_gc_extents(struct ctx *ctx, int zonenr)
 			}
 			len = len + 1;
 			rem_sectors = rem_sectors - NR_SECTORS_IN_BLK;
-			if ((len == 256) || (0 == rem_sectors)) {
+			if ((len == bio_pages) || (0 == rem_sectors)) {
 				submit_bio_wait(bio);
 				/* To release all the associations of pages with this bio */
 				bio_put(bio);
@@ -4558,7 +4563,7 @@ again:
 		/* setting gc_wake=1 and the next wakeup will trigger lsdm_gc(ctx, FG_GC, 0) by waking up a sleeping gc thread */
 		ctx->gc_th->gc_wake = 1;
 		wake_up(&ctx->gc_th->lsdm_gc_wait_queue);
-		printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
+		//printk(KERN_ERR "\n 1. ctx->nr_freezones: %d, ctx->lower_watermark: %d. Starting GC.....\n", ctx->nr_freezones, ctx->lower_watermark);
 		DEFINE_WAIT(wait);
 		prepare_to_wait(&ctx->gc_th->fggc_wq, &wait,
 					TASK_UNINTERRUPTIBLE);
@@ -5866,6 +5871,65 @@ destroy_cache_bioctx:
 	return -1;
 }
 
+struct my_dm_target {
+    unsigned int lower_watermark;
+    unsigned int middle_watermark;
+    unsigned int higher_watermark;
+    unsigned int nr_freezones;
+};
+
+/* Helper macro for standard sysfs show functions */
+#define DM_ATTR_SHOW(_name, _var) \
+static ssize_t _name##_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf) \
+{ \
+	struct ctx * ctx = container_of(kobj, struct ctx, kobj); \
+	return scnprintf(buf, PAGE_SIZE, "%d\n", ctx->_var); \
+}
+#define DM_ATTR_STORE(_name, _var) \
+static ssize_t _name##_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buf, size_t size) \
+{ \
+	struct ctx * ctx = container_of(kobj, struct ctx, kobj); \
+	int ret = kstrtoint(buf, 10, &ctx->_var); \
+	if (ret < 0) \
+		return ret; \
+	printk(KERN_ERR "\n Set ctx->middle_watermark: %d ", ctx->_var); \
+	return size; \
+}
+/*Define the functions for the sysfs attributes*/
+DM_ATTR_SHOW(lower_watermark, lower_watermark);
+DM_ATTR_SHOW(middle_watermark, middle_watermark);
+DM_ATTR_STORE(middle_watermark, middle_watermark);
+DM_ATTR_SHOW(higher_watermark, higher_watermark);
+DM_ATTR_SHOW(nr_freezones, nr_freezones);
+/* Define the sysfs attributes*/
+static struct kobj_attribute lower_wm_attr =  __ATTR_RO(lower_watermark);
+static struct kobj_attribute middle_wm_attr = __ATTR_RW(middle_watermark);
+static struct kobj_attribute higher_wm_attr = __ATTR_RO(higher_watermark);
+static struct kobj_attribute nrfreezones_attr = __ATTR_RO(nr_freezones);
+
+
+static struct attribute * lsdm_attrs[] = {
+	&lower_wm_attr.attr,
+	&middle_wm_attr.attr,
+	&higher_wm_attr.attr,
+	&nrfreezones_attr.attr,
+	NULL,
+};
+
+static struct attribute_group lsdm_attr_group = {
+	.attrs = lsdm_attrs,
+};
+
+static void lsdm_ctr_release(struct kobject *kobj) {
+	struct ctx * ctx = container_of(kobj, struct ctx, kobj);
+	kfree(ctx);
+}
+
+static struct kobj_type lsdm_ktype = {
+	.release = lsdm_ctr_release,
+	.sysfs_ops = &kobj_sysfs_ops,	/* Use the standard show/store logic */
+};
+
 static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 {
 	int ret = -ENOMEM;
@@ -5873,6 +5937,9 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	unsigned long long max_pba;
 	loff_t disk_size;
 	struct request_queue *q;
+
+	struct mapped_device *md = dm_table_get_md(target->table);
+	struct gendisk *disk = dm_disk(md);
 
 	nrpages = 0;
 
@@ -5891,12 +5958,27 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	}
 
 	target->private = ctx;
+
 	/* 13 comes from 9 + 3, where 2^9 is the number of bytes in a sector
 	 * and 2^3 is the number of sectors in a block.
 	 */
 	target->flush_supported = true;
 	target->discards_supported = true;
 	/* target->per_io_data_size - set this to get per_io_data_size allocated before every standard structure that holds a bio. */
+
+	ret = kobject_init_and_add(&ctx->kobj, &lsdm_ktype, kernel_kobj, "lsdm_stats");
+	if (ret) {
+		printk(KERN_ERR "\n Could not add kobject \n");
+		goto free_ctx2;
+	}
+
+	printk(KERN_ERR "\n Added kobject \n");
+	ret = sysfs_create_group(&ctx->kobj, &lsdm_attr_group);
+	if (ret) {
+		printk(KERN_ERR "\n Could not create sysfs group! ret: %d \n", ret);
+		goto free_ctx1;
+	}
+	printk(KERN_ERR "\n Added sysfs group\n");
 
 	ret = dm_get_device(target, argv[0], dm_table_get_mode(target->table), &ctx->dev);
     	if (ret) {
@@ -5907,7 +5989,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	if (!bdev_is_zoned(ctx->dev->bdev)) {
                 target->error = "Not a zoned block device";
                 ret = -EINVAL;
-                goto free_ctx;
+                goto put_dev;
         }
 	ret = blkdev_report_zones(ctx->dev->bdev, 1572864, 1, print_bzr, NULL);
 	if (!ret) {
@@ -6034,12 +6116,12 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	/* lower watermark is at 5 %, watermark represents nrfreezones */
 	ctx->lower_watermark = 2;
 	/* wm = 56 for 90/10, wm = 82 for 80/20 and 70/30, wm = 88 for 60/40 and uniform */
-	/*
 	ctx->middle_watermark = 56;
 	ctx->higher_watermark = 56;
-	*/
+	/*
 	ctx->middle_watermark = ctx->nr_freezones + 1;
 	ctx->higher_watermark = ctx->nr_freezones + 1;
+	*/
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
 	printk(KERN_ERR "\n ctx->nr_freezones: %d ", ctx->nr_freezones);
 	printk(KERN_ERR "\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
@@ -6097,6 +6179,10 @@ free_bioset:
 put_dev:
 	dm_put_device(target, ctx->dev);
 free_ctx:
+	sysfs_remove_group(&ctx->kobj, &lsdm_attr_group);
+free_ctx1: 
+	kobject_put(&ctx->kobj);
+free_ctx2:
 	kfree(ctx);
 	printk(KERN_ERR "\n %s nrpages: %lu", __func__, nrpages);
 	return ret;
@@ -6166,7 +6252,13 @@ static void lsdm_dtr(struct dm_target *dm_target)
 	printk(KERN_ERR "\n gc total time spent cleaning: %llu", ctx->gc_total);
 	destroy_caches(ctx);
 	dm_put_device(dm_target, ctx->dev);
-	kfree(ctx);
+	sysfs_remove_group(&ctx->kobj, &lsdm_attr_group);
+	kobject_put(&ctx->kobj);
+	ctx->lower_watermark = 0;
+	ctx->middle_watermark = 0;
+	ctx->higher_watermark = 0;
+	ctx->nr_freezones = 0;
+	//kfree(ctx);
 	//trace_printk("\n ctx memory freed!\n");
 	printk(KERN_ERR "\n Goodbye World!\n");
 	return;

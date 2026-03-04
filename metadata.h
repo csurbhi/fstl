@@ -326,6 +326,7 @@ struct ctx {
 	struct work_struct sit_work;
 	struct work_struct tb_work;
 	unsigned int err;
+	struct kobject kobj;
 };
 
 struct extent {
