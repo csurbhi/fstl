@@ -845,11 +845,14 @@ long reset_shingled_zones(int fd)
 	printf("\n nr of zones reported: %d", bzr->nr_zones);
 	assert(bzr->nr_zones == zone_count);
 
+	/*
 	if (zone_count < 1024) {
 		bzr->nr_zones = zone_count;
 	} else {
 		bzr->nr_zones = 1024;
-	}
+	}*/
+
+	bzr->nr_zones = 10;
 
 	printf("\n zone_count: %d ", bzr->nr_zones);
 	for (i=0; i<bzr->nr_zones; i++) {
