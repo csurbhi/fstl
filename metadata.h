@@ -327,6 +327,7 @@ struct ctx {
 	struct work_struct tb_work;
 	unsigned int err;
 	struct kobject kobj;
+	struct dentry *debugfs_dentry;
 };
 
 struct extent {

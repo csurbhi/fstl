@@ -2037,7 +2037,6 @@ static int lsdm_gc(struct ctx *ctx, int gc_mode, int err_flag)
 	//wait_queue_head_t *wq = &gc_th->lsdm_gc_wait_queue;
 	u64 start_t, end_t, interval = 0, gc_count = 0;
 	u64 gc_writes = 0;
-
 	//printk(KERN_ERR "\a %s * GC thread polling after every few seconds! gc_mode: %d \n", __func__, gc_mode);
 	
 	if (ctx->nr_freezones >= ctx->middle_watermark) {
@@ -5930,6 +5929,64 @@ static struct kobj_type lsdm_ktype = {
 	.sysfs_ops = &kobj_sysfs_ops,	/* Use the standard show/store logic */
 };
 
+static int print_zone_stats(struct seq_file *file, void *v)
+{
+	struct ctx * ctx = (struct ctx*) file->private;
+	struct rb_root *root = &ctx->gc_cost_root;
+	struct rb_node *node;
+	struct list_head *list_head = NULL;
+	struct gc_zone_node *zone_node = NULL;
+	struct gc_cost_node *cost_node = NULL;
+
+	node = rb_first(&ctx->gc_cost_root);
+	while(node) {
+		cost_node = rb_entry(node, struct gc_cost_node, rb);
+		list_head = &cost_node->znodes_list;
+		/* We remove znode from the list maintained by cost node. If this is the last node on the list 
+		 * then we have to remove the cost node from the tree
+		 */
+		list_for_each_entry(zone_node, list_head, list) {
+			seq_printf(file, "\n zonenr: %u vblks: %u, nr_freezones: %d, total_zones: %d  \n", zone_node->zonenr, zone_node->vblks, ctx->nr_freezones, ctx->sb->zone_count_main);
+		}
+		node = rb_next(&cost_node->rb);
+	}
+	return 0;
+}
+
+static int lsdm_zone_stats_open(struct inode *inode, struct file *file)
+{
+	struct ctx *ctx = inode->i_private;
+	int ret;
+
+	ret = single_open(file, print_zone_stats, (void *) ctx);
+	if (ret < 0) {
+		printk(KERN_ERR "\n Could not open zone-stats file ");
+	}
+	return ret;
+}
+
+static const struct file_operations lsdm_zone_stats_fops = {
+	.open 		= lsdm_zone_stats_open,
+	.read 		= seq_read,
+	.llseek 	= seq_lseek,
+	.release 	= single_release,
+};
+
+int lsdm_create_debugfs(struct ctx *ctx)
+{
+	struct dentry *dent;
+	char *dir_name = "host-ls";
+	if (!debugfs_initialized())
+		return -1;
+	if (!ctx->sb)
+		return -1;
+
+	ctx->debugfs_dentry = debugfs_create_dir(dir_name, NULL);
+	debugfs_create_file("gc_zone_stats", 0644, ctx->debugfs_dentry, ctx, &lsdm_zone_stats_fops);
+	return 0;
+}
+
+
 static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 {
 	int ret = -ENOMEM;
@@ -6128,7 +6185,7 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	ctx->gc_extents = kmem_cache_alloc(ctx->gc_extents_cache, GFP_KERNEL);
 	if (!ctx->gc_extents) {
 		printk(KERN_ERR "\n Could not allocate gc_extent and hence could not initialized \n");
-		goto free_metadata_pages;
+		goto destroy_gc_page_pool;
 	}
 	gcextent_init(ctx->gc_extents, 0, 0 , 0);
 	//trace_printk("\n Extent allocated....! ctx->gc_extents: %p", ctx->gc_extents);
@@ -6138,11 +6195,15 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	 */
 	ret = lsdm_gc_thread_start(ctx);
 	if (ret) {
-		goto free_metadata_pages;
+		goto destroy_gc_page_pool;
 	}
 	ret = lsdm_flush_thread_start(ctx);
 	if (ret) {
 		goto stop_gc_thread;
+	}
+	ret = lsdm_create_debugfs(ctx);
+	if (ret < 0) {
+		goto stop_flusher_thread;
 	}
 	/*
 	if (register_shrinker(lsdm_shrinker))
@@ -6152,8 +6213,9 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	printk(KERN_ERR "\n ctr() done!!");
 	return 0;
 /* failed case */
-stop_gc_thread:
+stop_flusher_thread:
 	lsdm_flush_thread_stop(ctx);
+stop_gc_thread:
 	lsdm_gc_thread_stop(ctx);
 destroy_gc_page_pool:
 	if (ctx->gc_page_pool)
