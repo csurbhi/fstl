@@ -2397,13 +2397,11 @@ void complete_small_reads(struct bio *clone)
 	struct bvec_iter iter;
 	char * todata = NULL, *fromdata = NULL;
 	struct app_read_ctx *readctx = clone->bi_private;
-	/* we are not doing this next rounding before reading, we cannot do it after reading, diff will be 0 */
-	sector_t lba = round_down(readctx->lba, NR_SECTORS_IN_BLK);
+	//sector_t lba = round_down(readctx->lba, NR_SECTORS_IN_BLK);
+	sector_t lba = readctx->lba;
 	sector_t nrsectors = readctx->nrsectors;
-	unsigned long diff = 0;
+	//unsigned long diff = 0;
 
-	//diff = (readctx->lba - lba) << LOG_SECTOR_SIZE;
-	//printk(KERN_ERR "\n %s 1. diff: %lu nrsectors: %llu \n", __func__, diff, nrsectors);
 	if (clone->bi_status != BLK_STS_OK) {
 		readctx->clone->bi_status = clone->bi_status;
 		goto free;
@@ -2415,13 +2413,17 @@ void complete_small_reads(struct bio *clone)
 		goto free;
 		//BUG();
 	}
+	//diff = (readctx->lba - lba) << LOG_SECTOR_SIZE;
+	//printk(KERN_ERR "\n %s 1. diff: %lu nrsectors: %llu \n", __func__, diff, nrsectors);
 	bio_for_each_segment(bv, readctx->clone, iter) {
 		todata = page_address(bv.bv_page);
+		//printk(KERN_ERR "\n %s 1) (orig clone) data: %p bv.bv_offset: %u", __func__, todata, bv.bv_offset);
 		todata = todata + bv.bv_offset;
-		break;
+		//printk(KERN_ERR "\n %s 2) (orig clone) data: %p bv.bv_offset: %u", __func__, todata, bv.bv_offset);
 	}
 	fromdata = readctx->data;
-	memcpy(todata, fromdata + diff, (nrsectors << LOG_SECTOR_SIZE));
+	//memcpy(todata, fromdata + diff, (nrsectors << LOG_SECTOR_SIZE));
+	memcpy(todata, fromdata, (nrsectors << LOG_SECTOR_SIZE));
 	//printk(KERN_ERR "\n %s todata: %p, fromdata: %p diff: %lu  bytes: %lluconstruct_smaller_bios \n", __func__, todata, fromdata, diff, (nrsectors << LOG_SECTOR_SIZE));
 free:
 	readctx->clone->bi_end_io = lsdm_subread_done;
@@ -2451,7 +2453,7 @@ struct bio * construct_smaller_bios(struct ctx * ctx, sector_t pba, struct app_r
 		return NULL;
 	}
 
-	//printk(KERN_ERR "\n %s smaller bio's address: %p larger bio address: %p", __func__, bio, readctx->clone);
+	printk(KERN_ERR "\n %s smaller bio's address: %p larger bio address: %p", __func__, bio, readctx->clone);
 	
 	/* bio_add_page sets the bi_size for the bio */
 	if( PAGE_SIZE > bio_add_page(bio, page, PAGE_SIZE, 0)) {
