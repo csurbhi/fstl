@@ -92,6 +92,8 @@ struct lsdm_bioctx {
 	struct kref ref;
 	struct bio * orig;
 	struct ctx *ctx;
+	int req_sectors; /* request sectors */
+	int w_sectors; /* actually written */
 };
 
 struct extent_entry {
