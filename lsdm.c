@@ -1,4 +1,4 @@
- /*
+/*
  *  Copyright (C) 2016 Peter Desnoyers and 2020 Surbhi Palande.
  *
  * This file is released under the GPL
@@ -89,7 +89,7 @@ struct sit_page * search_sit_blk(struct ctx *ctx, sector_t blknr);
 void mark_zone_erroneous(struct ctx *ctx, sector_t pba);
 void get_byte_string(char byte, char *str);
 void flush_checkpoint(struct ctx *ctx);
-void flush_sit_nodes(struct ctx *ctx, struct rb_node *node, int *count);
+void flush_sit_nodes(struct ctx *ctx, struct rb_node *node);
 void remove_gc_cost_nodes(struct ctx *ctx);
 void remove_gc_zone_nodes(struct ctx *ctx);
 u32 calculate_crc(struct ctx *ctx, struct page *page);
@@ -135,7 +135,7 @@ void move_gc_write_frontier(struct ctx *ctx, sector_t sectors_s8);
 int remove_rev_translation_entry(struct ctx * ctx, sector_t pba, unsigned int len);
 int add_rev_translation_entry(struct ctx * ctx, sector_t lba, sector_t pba, size_t len);
 struct tm_page *add_rev_tm_page_kv_store(struct ctx *ctx, sector_t pba);
-void flush_tm_nodes(struct rb_node *node, struct ctx *ctx, int * count);
+void flush_tm_nodes(struct rb_node *node, struct ctx *ctx);
 struct page * read_block(struct ctx *, u64 , u64 );
 void sit_ent_vblocks_decr(struct ctx *ctx, sector_t pba);
 int read_seg_entries_from_block(struct ctx *ctx, struct lsdm_seg_entry *entry, unsigned int nr_seg_entries, unsigned int *zonenr);
@@ -2245,11 +2245,11 @@ static int gc_thread_fn(void * data)
 			printk(KERN_ERR "\n Starting BG GC ");
 			start_t = ktime_get_ns();
 		}
-		ctx->flush_th->sleep_time = DEF_GC_TIME;
+		ctx->gc_th->min_sleep_time = DEF_GC_TIME;
 		/* Doing this for now! ret part */
 		ret = lsdm_gc(ctx, mode, 0);
 		printk(KERN_ERR "\n %s lsdm_gc() returned: %d ", __func__, ret);
-		ctx->flush_th->sleep_time = DEF_FLUSH_TIME;
+		gc_th->min_sleep_time = DEF_FLUSH_TIME;
 		if (mode == BG_GC) {
 			end_t = ktime_get_ns();
 			interval += (end_t - start_t)/1000000;
@@ -3251,26 +3251,26 @@ void flush_checkpoint(struct ctx *ctx)
 	 * we need to log structurize the metadata
 	 */
 	BUG_ON(pba > ctx->sb->max_pba);
-	//submit_bio(bio);
+	submit_bio(bio);
 	return;
 }
 
 
-void flush_sit_node_page(struct ctx * ctx, struct rb_node *, int *);
+void flush_sit_node_page(struct ctx * ctx, struct rb_node *);
 
 
-void flush_sit_nodes(struct ctx *ctx, struct rb_node *node, int *count)
-{
+void flush_sit_nodes(struct ctx *ctx, struct rb_node *node)
+{	
 	if (!node) {
 		//printk(KERN_ERR "\n %s Sit node is null, returning", __func__);
 		return;
 	}
 	//printk(KERN_ERR "\n Inside %s --------------------\n", __func__);
 	if (node->rb_left)
-		flush_sit_nodes(ctx, node->rb_left, count);
-	flush_sit_node_page(ctx, node, count);
+		flush_sit_nodes(ctx, node->rb_left);
+	flush_sit_node_page(ctx, node);
 	if (node->rb_right)
-		flush_sit_nodes(ctx, node->rb_right, count);
+		flush_sit_nodes(ctx, node->rb_right);
 }
 
 void free_sit_pages(struct ctx *);
@@ -3285,7 +3285,6 @@ void flush_sit(struct ctx *ctx)
 {
 	struct rb_root *rb_root = &ctx->sit_rb_root;
 	//struct blk_plug plug;
-	int count = 0;
 
 	if (!rb_root->rb_node) {
 		//printk(KERN_ERR "\n %s Sit node is null, returning", __func__);
@@ -3300,11 +3299,10 @@ void flush_sit(struct ctx *ctx)
 	 * written together
 	 */
 	//blk_start_plug(&plug);
-	flush_sit_nodes(ctx, rb_root->rb_node, &count);
+	flush_sit_nodes(ctx, rb_root->rb_node);
 	//blk_finish_plug(&plug);
 	mutex_unlock(&ctx->sit_flush_lock);
 	/* When all the nodes are flushed we are here */
-	printk(KERN_ERR "\n %s done, flushed: %d SIT pages \n", __func__, count);
 }
 
 /* We call this function only on exit. The premise is that the gc_zone_nodes 
@@ -4107,11 +4105,10 @@ void remove_sit_page(struct ctx *ctx, struct rb_node *node)
 
 	struct sit_page *sit_page;
 	struct page *page;
-	int count = 0;
 	sit_page = rb_entry(node, struct sit_page, rb);
 
 	if (sit_page->flag == NEEDS_FLUSH) {
-		flush_sit_node_page(ctx, node, &count);
+		flush_sit_node_page(ctx, node);
 	}
 
 	rb_erase(&sit_page->rb, &ctx->sit_rb_root);
@@ -4189,13 +4186,13 @@ void flush_tm_node_page(struct ctx *ctx, struct tm_page * tm_page)
 	bio->bi_end_io = md_endio;
 	BUG_ON(pba > ctx->sb->max_pba);
 	tm_page->flag = NEEDS_NO_FLUSH;
-	//submit_bio(bio);
+	submit_bio(bio);
 	//printk(KERN_INFO "\n 2. Leaving %s! flushed dirty page! \n", __func__);
 	return;
 }
 
 
-void flush_tm_nodes(struct rb_node *node, struct ctx *ctx, int *count)
+void flush_tm_nodes(struct rb_node *node, struct ctx *ctx)
 {
 	struct tm_page * tm_page; 
 
@@ -4208,12 +4205,11 @@ void flush_tm_nodes(struct rb_node *node, struct ctx *ctx, int *count)
 	if (!tm_page) {
 		return;
 	}
-	flush_tm_nodes(node->rb_left, ctx, count);
+	flush_tm_nodes(node->rb_left, ctx);
 	if(tm_page->flag == NEEDS_FLUSH) {
 		flush_tm_node_page(ctx, tm_page);
-		*count = *count + 1;
 	}
-	flush_tm_nodes(node->rb_right, ctx, count);
+	flush_tm_nodes(node->rb_right, ctx);
 	return;
 }
 
@@ -4226,7 +4222,6 @@ void flush_translation_blocks(struct ctx *ctx)
 {
 	struct rb_root *root = &ctx->rev_tm_rb_root;
 	//struct blk_plug plug;
-	int count = 0;
 
 	//printk(KERN_ERR "\n Inside %s ", __func__);
 	if (!mutex_trylock(&ctx->tm_lock)) {
@@ -4240,16 +4235,16 @@ void flush_translation_blocks(struct ctx *ctx)
 	}
 
 	//blk_start_plug(&plug);
-	flush_tm_nodes(root->rb_node, ctx, &count);
+	flush_tm_nodes(root->rb_node, ctx);
 	mutex_unlock(&ctx->tm_lock);
 	//blk_finish_plug(&plug);	
-	printk(KERN_INFO "\n %s done!! flushed: %d pages", __func__, count);
+	//printk(KERN_INFO "\n %s done!!", __func__);
 }
 
 /* We don't wait for the bios to complete 
  * flushing. We only initiate the flushing
  */
-void flush_sit_node_page(struct ctx *ctx, struct rb_node *node, int *count)
+void flush_sit_node_page(struct ctx *ctx, struct rb_node *node)
 {
 	struct page *page; 
 	struct sit_page *sit_page;
@@ -4275,7 +4270,6 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node, int *count)
 	if (!page)
 		return;
 
-	*count = *count + 1;
 	sit_page->flag = NEEDS_NO_FLUSH;
 
 	/* pba denotes a relative sit blknr that is 4096 sized
@@ -4306,7 +4300,7 @@ void flush_sit_node_page(struct ctx *ctx, struct rb_node *node, int *count)
 	bio->bi_private = sit_ctx;
 	bio->bi_end_io = md_endio;
 	BUG_ON(pba > ctx->sb->max_pba);
-	//submit_bio(bio);
+	submit_bio(bio);
 }	
 
 int read_extents_from_block(struct ctx * ctx, struct rev_tm_entry *entry, u64 lba);
@@ -4626,7 +4620,6 @@ int prepare_bio(struct bio * clone, sector_t s8, sector_t wf)
 	kref_get(&bioctx->ref);
 	fill_subbioctx(subbio_ctx, bioctx, lba, wf, s8);
 	fill_bio(clone, wf, s8, ctx->dev->bdev, subbio_ctx);
-	bioctx->w_sectors += s8;
 	return 0;
 }
 
@@ -4735,9 +4728,6 @@ int submit_bio_write(struct ctx *ctx, struct bio *clone)
 	} while (1);
 
 	//blk_finish_plug(&plug);
-	if (bioctx->req_sectors != bioctx->w_sectors) {
-		printk(KERN_ERR "\n %s requested: %llu, written: %llu ", __func__, bioctx->req_sectors, bioctx->w_sectors);
-	}
 	kref_put(&bioctx->ref, write_done);
 	return 0; 
 fail:
@@ -4828,7 +4818,6 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 	}
 	bioctx->orig = bio;
 	bioctx->ctx = ctx;
-	bioctx->req_sectors =  bio_sectors(bio);
 	/* TODO: Initialize refcount in bioctx and increment it every
 	 * time bio is split or padded */
 	clone->bi_private = bioctx;
@@ -4910,7 +4899,7 @@ void do_checkpoint(struct ctx *ctx)
 	atomic_set(&ctx->tm_flush_count, 0);
 	flush_sit(ctx);
 	atomic_set(&ctx->sit_flush_count, 0);
-	printk(KERN_ERR "\n sit pages flushed! nr_sit_pages: %llu sit_flush_count: %llu", atomic_read(&ctx->nr_sit_pages), atomic_read(&ctx->sit_flush_count));
+	//printk(KERN_ERR "\n sit pages flushed! nr_sit_pages: %llu sit_flush_count: %llu", atomic_read(&ctx->nr_sit_pages), atomic_read(&ctx->sit_flush_count));
 	/*--------------------------------------------*/
 	flush_checkpoint(ctx);
 
@@ -6185,13 +6174,10 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 
 	/* lower watermark is at 5 %, watermark represents nrfreezones */
 	ctx->lower_watermark = 2;
-	/* wm = 56 for 90/10, wm = 82 for 80/20 and 70/30, wm = 88 for 60/40 and uniform */
-	ctx->middle_watermark = 56;
-	ctx->higher_watermark = 56;
-	/*
-	ctx->middle_watermark = ctx->nr_freezones + 1;
-	ctx->higher_watermark = ctx->nr_freezones + 1;
-	*/
+	/* wm = 56 for 90/10, wm = 82 for 80/20 and 70/30, wm = 88 for 60/40 and uniform, wm = 56 (arbitrary - 10%) for Linux kernel compile on 141 GB Total data size */
+	//ctx->middle_watermark = 28; /* GC starts when 7GB remain */
+	ctx->middle_watermark = 40; /* GC starts when 10GB remain */
+	ctx->higher_watermark = 40;
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
 	printk(KERN_ERR "\n ctx->nr_freezones: %d ", ctx->nr_freezones);
 	printk(KERN_ERR "\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
@@ -6206,35 +6192,31 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	 * Will work with timer based invocation later
 	 * init_timer(ctx->timer);
 	 */
-	/*
 	ret = lsdm_gc_thread_start(ctx);
 	if (ret) {
-		goto destroy_extent_cache;
+		goto destroy_gc_page_pool;
 	}
 	ret = lsdm_flush_thread_start(ctx);
 	if (ret) {
 		goto stop_gc_thread;
-	}*/
+	}
 	ret = lsdm_create_debugfs(ctx);
 	if (ret < 0) {
 		goto stop_flusher_thread;
 	}
+	printk(KERN_ERR "\n Started the flusher thread ! ");
 	/*
 	if (register_shrinker(lsdm_shrinker))
 		goto stop_gc_thread;
 	*/
 	debugfs_create_u32("freezones", 0444, debug_dir, &ctx->ckpt->nr_free_zones);
-	printk(KERN_ERR "\n ctr() done - No metadata and writes tracked!!");
+	printk(KERN_ERR "\n ctr() done!!");
 	return 0;
 /* failed case */
 stop_flusher_thread:
-/*
 	lsdm_flush_thread_stop(ctx);
 stop_gc_thread:
 	lsdm_gc_thread_stop(ctx);
-*/
-destroy_extent_cache:
-	kmem_cache_free(ctx->gc_extents_cache, ctx->gc_extents);
 destroy_gc_page_pool:
 	if (ctx->gc_page_pool)
 		mempool_destroy(ctx->gc_page_pool);
@@ -6263,11 +6245,6 @@ free_ctx:
 free_ctx1: 
 	kobject_put(&ctx->kobj);
 free_ctx2:
-	//trace_printk("\n exited from bioset \n");
-	//destroy_workqueue(ctx->writes_wq);
-	lsdm_free_rb_tree(ctx);
-	free_translation_pages(ctx);	
-	free_sit_pages(ctx);
 	kfree(ctx);
 	printk(KERN_ERR "\n %s nrpages: %lu", __func__, nrpages);
 	return ret;
@@ -6278,8 +6255,8 @@ static void lsdm_dtr(struct dm_target *dm_target)
 {
 	struct ctx *ctx = dm_target->private;
 
-	//lsdm_flush_thread_stop(ctx);
-	//lsdm_gc_thread_stop(ctx);
+	lsdm_flush_thread_stop(ctx);
+	lsdm_gc_thread_stop(ctx);
 	flush_workqueue(ctx->writes_wq);
 	flush_workqueue(ctx->tm_wq);
 	printk(KERN_ERR "\n nr_app_writes: %llu", ctx->nr_app_writes);
