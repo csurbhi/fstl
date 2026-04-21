@@ -1454,7 +1454,7 @@ static int read_gc_extents(struct ctx *ctx, unsigned int zonenr)
 		s8 = gc_extent->e.len;
 		BUG_ON(s8 > (BIO_MAX_PAGES << SECTOR_BLK_SHIFT));
 		pagecount = (s8 >> SECTOR_BLK_SHIFT);
-		while(gc_extent->e.pba < pba) {
+		while(gc_extent->e.pba > pba) {
 			pba = pba + NR_SECTORS_IN_BLK;
 			/* free these diff pages */
 			mempool_free(bio_pages[j], ctx->gc_page_pool);
@@ -6176,8 +6176,17 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 	ctx->lower_watermark = 2;
 	/* wm = 56 for 90/10, wm = 82 for 80/20 and 70/30, wm = 88 for 60/40 and uniform, wm = 56 (arbitrary - 10%) for Linux kernel compile on 141 GB Total data size */
 	//ctx->middle_watermark = 28; /* GC starts when 7GB remain */
-	ctx->middle_watermark = 40; /* GC starts when 10GB remain */
+	/* GC starts when 10GB remain 
+	ctx->middle_watermark = 40; 
 	ctx->higher_watermark = 40;
+	*/
+
+	/* Disk size is 40GB for linux kernel iterative compile test
+	 * GC starts when 5\% space remains - ie 2GB
+	 */
+	ctx->middle_watermark = 8;
+	ctx->higher_watermark = 8;
+
 	printk(KERN_ERR "\n zone_count: %lld lower_watermark: %d middle_watermark: %d higher_watermark: %d ", ctx->sb->zone_count, ctx->lower_watermark, ctx->middle_watermark, ctx->higher_watermark);
 	printk(KERN_ERR "\n ctx->nr_freezones: %d ", ctx->nr_freezones);
 	printk(KERN_ERR "\n Initializing gc_extents list, ctx->gc_extents_cache: %p ", ctx->gc_extents_cache);
