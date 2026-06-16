@@ -77,7 +77,7 @@ int write_to_disk(int fd, char *buf, unsigned long sectornr)
 
 
 
-__le32 get_zone_count(int fd)
+__le32 get_zone_count(int fd, int nrzones)
 {
 	__le32 zone_count = 0, zonesz;
 	char str[400];
@@ -105,8 +105,24 @@ __le32 get_zone_count(int fd)
 		perror(str);
 		exit(errno);
 	}
-
+	if (nrzones) {
+		/* 114 cache zones + 2 for the watermarks - these are used for GC reservation.
+		 * These are not for writing data - so this is not equivalent of the cache
+		 */
+		if ((nrzones + 116) < zone_count)
+			return (nrzones + 116);
+	}
 	printf("\n Nr of zones reported by disk :%llu", zone_count);
+	/* 114 reserved + 600 zones  + 2 zones => 716 zones. 600 zones is 150 GB -> for 5 parallel Linux kernel compile test */
+	//return 610;
+	/* 114 reserved zones + 160 data zones + 2 zones => 274 zones (for linux kernel ITERATIVE compile) */
+	//return 276;
+	/* disk size should be 220 (55GB) + 114 (reserved/cache size) + 2 (metadata) */
+	//return 336;
+	/* disk size should be 280 (70GB) + 114 (reserved/cache size) + 1 (metadata) (for YCSB) */
+	//return 395;
+	/* disk size should be 320 (80GB) + 114 (reserved/cache size) + 1 (metadata) */
+	//return 435;
 	/* Use zone queries and find this eventually
 	 * Doing this manually for now for a 20GB 
 	 * harddisk and 256MB zone size.
@@ -234,10 +250,13 @@ __le32 get_main_zone_count(struct lsdm_sb *sb)
 	__le32 main_zone_count = 0;
 	/* we are not subtracting reserved zones from here */
 	main_zone_count = sb->zone_count - get_metadata_zone_count(sb) - sb->zone_count_reserved;
+	printf("\n !!!!-------!!!!! main_zone_count: %d ", main_zone_count);
 	return main_zone_count;
 }
 
-#define RESERVED_ZONES	10
+//#define RESERVED_ZONES	10
+#define RESERVED_ZONES	114
+
 /* TODO: use zone querying to find this out */
 __le32 get_reserved_zone_count()
 {
@@ -247,7 +266,7 @@ __le32 get_reserved_zone_count()
 	 */
 	reserved_zone_count = RESERVED_ZONES;
 	//return reserved_zone_count;
-	return 0;
+	return reserved_zone_count;
 }
 
 
@@ -469,7 +488,7 @@ unsigned long long get_zone0_pba(struct lsdm_sb *sb)
 
 unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
 {
-	int zonenr = get_zone_count(fd);
+	int zonenr = get_zone_count(fd, sb->zone_count);
 
 	//zonenr = zonenr - 20000;
 	//zonenr = zonenr - 10;
@@ -478,7 +497,7 @@ unsigned long long get_current_gc_frontier(struct lsdm_sb *sb, int fd)
 }
 
 
-struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
+struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr, int nrzones)
 {
 	struct lsdm_sb *sb;
 	int ret = 0;
@@ -527,7 +546,7 @@ struct lsdm_sb * write_sb(int fd, unsigned long sb_pba, unsigned long cmr)
 	sb->log_block_size = 12;
 	sb->log_zone_size = logzonesz;
 	sb->checksum_offset = offsetof(struct lsdm_sb, crc);
-	sb->zone_count = get_zone_count(fd);
+	sb->zone_count = get_zone_count(fd, nrzones);
 	/* For now we are shunting the 7TB disk to a size of 4TB */
 	printf("\n sb->zone_count: %d", sb->zone_count);
     	sb->zone_count_reserved = get_reserved_zone_count(sb);
@@ -815,7 +834,7 @@ void report_zone(unsigned int fd, unsigned long zonenr, struct blk_zone * bzone)
 	return;	
 }
 
-long reset_shingled_zones(int fd)
+long reset_shingled_zones(int fd, int nrzones)
 {
 	int ret;
 	long i = 0;
@@ -825,7 +844,7 @@ long reset_shingled_zones(int fd)
 	long cmr = 0;
 
 
-	zone_count = get_zone_count(fd);
+	zone_count = get_zone_count(fd, nrzones);
 
 	printf("\n Nr of zones: %d ", zone_count);
 
@@ -890,18 +909,21 @@ int main(int argc, char * argv[])
 	unsigned int ret = 0;
 	long cmr;
 	char * blkdev;
-	int fd;
+	int fd, nrzones = 0;
 
 	printf("\n %s argc: %d \n ", __func__, argc);
-	if (argc != 2) {
+	if (argc < 2) {
 		fprintf(stderr, "\n Usage: %s device-name \n", argv[0]);
 		exit(EXIT_FAILURE);
 	}
 	blkdev = argv[1];
+	if (argc >= 3) {
+		nrzones = atoi(argv[2]);
+	}
 	fd = open_disk(blkdev);
-	cmr = reset_shingled_zones(fd);
+	cmr = reset_shingled_zones(fd, nrzones);
 	printf("\n Number of cmr zones: %d ", cmr);
-	sb1 = write_sb(fd, 0, cmr);
+	sb1 = write_sb(fd, 0, cmr, nrzones);
 	printf("\n Superblock written at pba: %d", pba);
 	printf("\n sizeof sb: %ld", sizeof(struct lsdm_sb));
 	read_sb(fd, 0);
