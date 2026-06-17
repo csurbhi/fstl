@@ -148,7 +148,7 @@ char * read_block(int fd, sector_t pba)
 }
 
 /* Each zone has NR_BLKS_IN_ZONE ie 65536 entries */
-void write_rtm(int fd, struct lsdm_sb *sb, int freeblks)
+int write_rtm(int fd, struct lsdm_sb *sb, int freeblks)
 {
 	sector_t tm_pba, data_lba = 0;
 	unsigned int freed=0;
@@ -239,6 +239,7 @@ void write_rtm(int fd, struct lsdm_sb *sb, int freeblks)
 	}
 	free(buffer);
 	printf("\n %s ... end .... zonenr: %d ", __func__, i);
+	return nr_zones;
 }
 
 void write_sit(int fd, struct lsdm_sb *sb,  unsigned int freeblks)
@@ -527,7 +528,7 @@ int main(int argc, char * argv[])
 	free_blks = atoi(argv[2]);
 	read_sb(fd, 0, &sb);
 	read_sb(fd, 8, &sb);
-	write_rtm(fd, sb,  free_blks);
+	nr_zones = write_rtm(fd, sb,  free_blks);
 	write_sit(fd, sb, free_blks);
 	write_ckpt(fd, sb);
 	read_sb(fd, 0, &sb);
