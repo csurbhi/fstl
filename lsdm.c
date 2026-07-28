@@ -4576,9 +4576,9 @@ again:
 			goto again;
 		}
 	}
-	//printk(KERN_ERR "\n (%s) bio: lba: %llu nr_sectors: %llu \n", __func__, lba, nr_sectors);
 	return 0;
 fail: 
+	printk(KERN_ERR "\n (%s) bio: lba: %llu nr_sectors: %llu \n", __func__, lba, nr_sectors);
 	return -1;
 
 }
@@ -4794,6 +4794,7 @@ int lsdm_write_io(struct ctx *ctx, struct bio *bio)
 		goto memfail;
 	}
 	if (!bio_sectors(bio)) {
+		printk(KERN_ERR "\n WRITE - zero lenght, FLUSH");
 		bio->bi_status = BLK_STS_OK;
 		bio_endio(bio);
 		return DM_MAPIO_SUBMITTED;
@@ -5985,6 +5986,8 @@ int lsdm_create_debugfs(struct ctx *ctx)
 
 	ctx->debugfs_dentry = debugfs_create_dir(dir_name, NULL);
 	debugfs_create_file("gc_zone_stats", 0644, ctx->debugfs_dentry, ctx, &lsdm_zone_stats_fops);
+	atomic_set(&ctx->sync_count, 0);
+	debugfs_create_atomic_t("sync_stats", 0444, ctx->debugfs_dentry, &ctx->sync_count);
 	return 0;
 }
 
@@ -6219,6 +6222,10 @@ static int lsdm_ctr(struct dm_target *target, unsigned int argc, char **argv)
 		goto stop_gc_thread;
 	*/
 	debugfs_create_u32("freezones", 0444, debug_dir, &ctx->ckpt->nr_free_zones);
+
+	/* advertise that flushes are processed by this device mapper */
+	target->num_flush_bios = 1;
+	target->flush_supported = true;
 	printk(KERN_ERR "\n ctr() done!!");
 	return 0;
 /* failed case */
@@ -6356,11 +6363,32 @@ int lsdm_map_io(struct dm_target *dm_target, struct bio *bio)
 
 	bio_set_dev(bio, ctx->dev->bdev);
 
+	if (op_is_flush(bio->bi_opf)) {
+		printk(KERN_ERR "\n FLUSH received ");
+	}
+
 	switch (bio_op(bio)) {
 		case REQ_OP_READ:
 			ret = lsdm_read_io(ctx, bio);
 			break;
 		case REQ_OP_WRITE:
+			if (bio->bi_opf & REQ_PREFLUSH) {
+				printk(KERN_ERR "\n received REQ_PREFLUSH");
+				bio_endio(bio);
+				return 0;
+			}
+			if (bio->bi_opf & REQ_FUA) {
+				printk(KERN_ERR "\n received REQ_FUA, lba: %llu, len: %d", bio->bi_iter.bi_sector, bio_sectors(bio));
+				atomic_inc(&ctx->sync_count);
+				printk(KERN_ERR "\n sync_count: %d ", atomic_read(&ctx->sync_count));
+				bio_endio(bio);
+				return 0;
+			}
+			if (!bio_sectors(bio)) {
+				printk(KERN_ERR "\n received a WRITE request for zero length!! INVALID");
+				bio_endio(bio);
+				return 0;
+			}
 			ret = lsdm_write_io(ctx, bio);
 			break;
 		default:
